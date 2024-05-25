@@ -33,22 +33,22 @@ def authenticate():
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-                print("Token rafraîchi:")
+                print("Token refreshed:")
                 print(f"Access Token: {creds.token}")
                 print(f"Refresh Token: {creds.refresh_token}")
                 print("Expiry:", convert_expiry_to_paris_time(creds.expiry))
             except Exception as e:
-                print(f"Erreur lors du rafraîchissement du token : {e}")
+                print(f"Error refreshing token: {e}")
                 flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
                 creds = flow.run_local_server(port=0)
-                print("Nouvelle autorisation:")
+                print("New authorization:")
                 print(f"Access Token: {creds.token}")
                 print(f"Refresh Token: {creds.refresh_token}")
                 print("Expiry:", convert_expiry_to_paris_time(creds.expiry))
         else:
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
             creds = flow.run_local_server(port=0)
-            print("Nouvelle autorisation:")
+            print("New authorization:")
             print(f"Access Token: {creds.token}")
             print(f"Refresh Token: {creds.refresh_token}")
             print("Expiry:", convert_expiry_to_paris_time(creds.expiry))
@@ -56,7 +56,7 @@ def authenticate():
         with open(token_path, "w") as token:
             token.write(creds.to_json())
     else:
-        print("Token existant:")
+        print("Existing token:")
         print(f"Access Token: {creds.token}")
         print(f"Refresh Token: {creds.refresh_token}")
         print("Expiry:", convert_expiry_to_paris_time(creds.expiry))
@@ -92,7 +92,7 @@ def save_attachments(service, user_id, msg_id, save_dir):
             new_filename = f"{now}_{filename}"
             new_path = os.path.join(save_dir, new_filename)
             os.rename(path, new_path)
-            print(f"Pièce jointe {filename} renommée en {new_filename}.")
+            print(f"Attachment {filename} renamed to {new_filename}.")
 
 
 def create_combined_html(subject, date, fro, to, html_content, attachments_files):
@@ -112,10 +112,10 @@ def create_combined_html(subject, date, fro, to, html_content, attachments_files
     <body>
         <h1>{subject}</h1>
         <hr>
-        <h3>De : {fro}</h2>
-        <h3>à : {to}</h2>
-        <h3>Date : {date}</h2>
-        <h3>Objet : {subject}</h2>
+        <h3>From: {fro}</h2>
+        <h3>To: {to}</h2>
+        <h3>Date: {date}</h2>
+        <h3>Subject: {subject}</h2>
         <hr>
         {html_content}
         <hr>
@@ -149,7 +149,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         for header in message['payload']['headers']:
             if header['name'] == 'From':
                 fro = header['value']
-                # Sépare le nom et l'adresse e-mail
+                # Split name and email address
                 if '<' in fro and '>' in fro:
                     fro_name, fro_email = fro.split('<', 1)
                     fro_email = fro_email.rstrip('>')
@@ -162,7 +162,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         for header in message['payload']['headers']:
             if header['name'] == 'To':
                 to = header['value']
-                # Sépare le nom et l'adresse e-mail
+                # Split name and email address
                 if '<' in to and '>' in to:
                     to_name, to_email = to.split('<', 1)
                     to_email = to_email.rstrip('>')
@@ -203,12 +203,12 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
 
         pdfkit.from_string(combined_html, final_pdf_path)
 
-        print(f"Email {msg_id} sauvegardé en tant que PDF à {final_pdf_path}.")
+        print(f"Email {msg_id} saved as PDF at {final_pdf_path}.")
 
         now = datetime.now().strftime("%y%m%d_%H%M%S")
         new_pdf_path = os.path.join(save_dir, f"{now}_{file_safe_subject}.pdf")
         os.rename(final_pdf_path, new_pdf_path)
-        print(f"Fichier PDF renommé en {os.path.basename(new_pdf_path)}.")
+        print(f"PDF file renamed to {os.path.basename(new_pdf_path)}.")
 
     else:
         print(f"No HTML content found for message {msg_id}.")
@@ -244,14 +244,14 @@ def main():
         if label_id:
             response = service.users().messages().list(userId=user_id, labelIds=[label_id]).execute()
             messages = response.get("messages", [])
-            print(f"Nombre d'emails récupérés : {len(messages)}")
+            print(f"Number of emails retrieved: {len(messages)}")
 
             if len(messages) > 0:
                 for message in messages:
                     msg_id = message["id"]
                     save_email_and_attachments(service, user_id, msg_id, DOWNLOAD_PATH)
 
-                print(f"{len(messages)} emails et leurs pièces jointes ont été sauvegardés dans {DOWNLOAD_PATH}.")
+                print(f"{len(messages)} emails and their attachments have been saved in {DOWNLOAD_PATH}.")
 
                 for message in messages:
                     msg_id = message["id"]
@@ -259,14 +259,14 @@ def main():
                     service.users().messages().modify(userId=user_id, id=msg_id, body={"addLabelIds": [label_name_processed_id]}).execute()
                     service.users().messages().delete(userId=user_id, id=msg_id).execute()
 
-                print(f"L'étiquette des emails traités a été changée en '{label_name_processed}'.")
+                print(f"The label of processed emails has been changed to '{label_name_processed}'.")
             else:
-                print("Aucun e-mail à traiter avec l'étiquette '{}'.".format(label_name))
+                print("No emails to process with the label '{}'.".format(label_name))
         else:
-            print(f"Label '{label_name}' non trouvé.")
+            print(f"Label '{label_name}' not found.")
 
     except HttpError as error:
-        print(f"Une erreur est survenue : {error}")
+        print(f"An error occurred: {error}")
 
 
 if __name__ == "__main__":
