@@ -12,6 +12,8 @@ Before using SaveGmail, make sure you have the following:
 - Gmail labels `HasAttachment` and `HasAttachment/SavedAsPDF` created in your Gmail account
 - A Gmail filter rule set up to apply the `HasAttachment` label to emails with attachments
 
+For more detailed information on setting up and running an app that calls a Google Workspace API, visit the [Google Gmail API Quickstart guide](https://developers.google.com/gmail/api/quickstart/python).
+
 ## Usage
 
 1. Clone this repository to your local machine.
