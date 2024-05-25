@@ -11,7 +11,7 @@ import pytz
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]
 
-DOWNLOAD_PATH = 'your_download_path'  # Replace this line with your own download path
+DOWNLOAD_PATH = '/your_download_path/'  # Replace this line with your own download path
 
 
 def convert_expiry_to_paris_time(expiry_utc):
