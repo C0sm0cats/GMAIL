@@ -9,6 +9,8 @@ Before using SaveGmail, make sure you have the following:
 - Google Cloud Platform project with Gmail API enabled
 - OAuth 2.0 credentials file (`credentials.json`) downloaded from the Google Cloud Console
 - Dependencies installed (`base64`, `pdfkit`, `datetime`, `google-auth`, `google-auth-oauthlib`, `google-api-python-client`, `pytz`)
+- Gmail labels `HasAttachment` and `HasAttachment/SavedAsPDF` created in your Gmail account
+- A Gmail filter rule set up to apply the `HasAttachment` label to emails with attachments
 
 ## Usage
 
