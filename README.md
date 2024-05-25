@@ -15,7 +15,7 @@ Before using SaveGmail, make sure you have the following:
 1. Clone this repository to your local machine.
 
     ```bash
-    git clone https://github.com/yourusername/SaveGmail.git
+    git clone https://github.com/C0sm0cats/GMAIL.git
     ```
 
 2. Replace the value of `DOWNLOAD_PATH` variable in the script (`savegmail.py`) with your desired download directory.
