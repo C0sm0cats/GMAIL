@@ -258,7 +258,8 @@ def main():
                     msg_id = message["id"]
                     service.users().messages().modify(userId=user_id, id=msg_id, body={"removeLabelIds": [label_id]}).execute()
                     service.users().messages().modify(userId=user_id, id=msg_id, body={"addLabelIds": [label_name_processed_id]}).execute()
-                    service.users().messages().delete(userId=user_id, id=msg_id).execute()
+                    # Delete email
+                    # service.users().messages().delete(userId=user_id, id=msg_id).execute()
 
                 print(f"The label of processed emails has been changed to '{label_name_processed}'.")
             else:
