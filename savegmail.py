@@ -1,6 +1,6 @@
 import os
 import base64
-import pdfkit
+from weasyprint import HTML
 from datetime import datetime
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -9,7 +9,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import pytz
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]
+SCOPES = ["https://mail.google.com/"]
+# SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]
 
 DOWNLOAD_PATH = '/your_download_path/'  # Replace this line with your own download path
 
@@ -201,7 +202,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
 
         final_pdf_path = os.path.join(save_dir, f"{file_safe_subject}.pdf")
 
-        pdfkit.from_string(combined_html, final_pdf_path)
+        HTML(string=combined_html).write_pdf(final_pdf_path)
 
         print(f"Email {msg_id} saved as PDF at {final_pdf_path}.")
 
