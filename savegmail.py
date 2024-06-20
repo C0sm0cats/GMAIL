@@ -7,6 +7,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from tzlocal import get_localzone
+from email.utils import parsedate_to_datetime
 import pytz
 
 SCOPES = ["https://mail.google.com/"]
@@ -15,12 +17,37 @@ SCOPES = ["https://mail.google.com/"]
 DOWNLOAD_PATH = '/your_download_path/'  # Replace this line with your own download path
 
 
-def convert_expiry_to_paris_time(expiry_utc):
+def get_real_date(date_string):
+    if date_string == 'No Date':
+        return date_string
+
+    try:
+        # Attempt to parse the date with the specific format YYYY.MM.DD-HH.MM.SS.
+        parsed_date = datetime.strptime(date_string, '%Y.%m.%d-%H.%M.%S')
+    except ValueError:
+        # If the specific format fails, try with the standard format.
+        try:
+            parsed_date = parsedate_to_datetime(date_string)
+        except ValueError:
+            parsed_date = None
+
+    if parsed_date:
+        # Convert the date to the user's local time
+        local_tz = get_localzone()
+        local_date = parsed_date.astimezone(local_tz)
+        # Format the date according to a specific format
+        formatted_date = local_date.strftime("%Y-%m-%d %H:%M:%S %Z")
+        return formatted_date
+    else:
+        return 'Invalid Date'
+
+
+def convert_expiry_to_local_time(expiry_utc):
+    local_timezone = get_localzone()
     utc_timezone = pytz.utc
-    paris_timezone = pytz.timezone('Europe/Paris')
     expiry_utc = utc_timezone.localize(expiry_utc)
-    expiry_paris = expiry_utc.astimezone(paris_timezone)
-    return expiry_paris
+    expiry_local = expiry_utc.astimezone(local_timezone)
+    return expiry_local
 
 
 def authenticate():
@@ -37,7 +64,7 @@ def authenticate():
                 print("Token refreshed:")
                 print(f"Access Token: {creds.token}")
                 print(f"Refresh Token: {creds.refresh_token}")
-                print("Expiry:", convert_expiry_to_paris_time(creds.expiry))
+                print("Expiry:", convert_expiry_to_local_time(creds.expiry))
             except Exception as e:
                 print(f"Error refreshing token: {e}")
                 flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
@@ -45,14 +72,14 @@ def authenticate():
                 print("New authorization:")
                 print(f"Access Token: {creds.token}")
                 print(f"Refresh Token: {creds.refresh_token}")
-                print("Expiry:", convert_expiry_to_paris_time(creds.expiry))
+                print("Expiry:", convert_expiry_to_local_time(creds.expiry))
         else:
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
             creds = flow.run_local_server(port=0)
             print("New authorization:")
             print(f"Access Token: {creds.token}")
             print(f"Refresh Token: {creds.refresh_token}")
-            print("Expiry:", convert_expiry_to_paris_time(creds.expiry))
+            print("Expiry:", convert_expiry_to_local_time(creds.expiry))
 
         with open(token_path, "w") as token:
             token.write(creds.to_json())
@@ -60,7 +87,7 @@ def authenticate():
         print("Existing token:")
         print(f"Access Token: {creds.token}")
         print(f"Refresh Token: {creds.refresh_token}")
-        print("Expiry:", convert_expiry_to_paris_time(creds.expiry))
+        print("Expiry:", convert_expiry_to_local_time(creds.expiry))
 
     return creds
 
@@ -99,11 +126,14 @@ def save_attachments(service, user_id, msg_id, save_dir):
 def create_combined_html(subject, date, fro, to, html_content, attachments_files):
     attachments_html = ""
     if attachments_files:
-        attachments_html = "<h3>Attachments :</h3>"
-        attachments_html += "<ul>"
-        for attachment in attachments_files:
-            attachments_html += f"{attachment}"
-        attachments_html += "</ul>"
+        filtered_attachments = [attachment for attachment in attachments_files if attachment]
+
+        if filtered_attachments:
+            attachments_html = "<div>Attachments :</div>\n"
+            attachments_html += "<ul>\n"
+            for attachment in filtered_attachments:
+                attachments_html += f"  <li><h6>{attachment}</h6></li>\n"
+            attachments_html += "</ul>\n"
 
     combined_html = f"""
     <html>
@@ -111,14 +141,13 @@ def create_combined_html(subject, date, fro, to, html_content, attachments_files
         <meta charset="UTF-8">
     </head>
     <body>
-        <h1>{subject}</h1>
+        <h3 style='margin-top: 10px;'>{subject}</h3>
         <hr>
-        <h3>From: {fro}</h2>
-        <h3>To: {to}</h2>
-        <h3>Date: {date}</h2>
-        <h3>Subject: {subject}</h2>
+        <div>De : {fro}</div>
+        <div>à : {to}</div>
+        <div>Date : {date}</div>
         <hr>
-        {html_content}
+        <div>{html_content}</div>
         <hr>
         {attachments_html}
     </body>
@@ -137,13 +166,11 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 subject = header['value']
                 break
 
-    date_str = ""
-    if 'payload' in message and 'headers' in message['payload']:
-        for header in message['payload']['headers']:
-            if header['name'] == 'Date':
-                date_str = header['value']
-                break
-    date = datetime.strptime(date_str, "%a, %d %b %Y %H:%M:%S %z").strftime("%Y-%m-%d %H:%M:%S")
+    payload = message.get('payload', {})
+    headers = {header['name']: header['value'] for header in payload.get('headers', [])}
+    date = headers.get('Date', 'No Date')
+    real_date = get_real_date(date)
+    date = real_date
 
     fro = ""
     if 'payload' in message and 'headers' in message['payload']:
@@ -154,7 +181,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 if '<' in fro and '>' in fro:
                     fro_name, fro_email = fro.split('<', 1)
                     fro_email = fro_email.rstrip('>')
-                    fro_email = f"- {fro_email} -"
+                    fro_email = f" {fro_email}"
                     fro = f"{fro_name.strip()} {fro_email.strip()} "
                 break
 
@@ -167,7 +194,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 if '<' in to and '>' in to:
                     to_name, to_email = to.split('<', 1)
                     to_email = to_email.rstrip('>')
-                    to_email = f"- {to_email} -"
+                    to_email = f" {to_email}"
                     to = f"{to_name.strip()} {to_email.strip()} "
                 break
 
