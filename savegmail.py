@@ -210,7 +210,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 return extract_parts(part.get('parts', []))
             elif mime_type == 'multipart/related':
                 return extract_parts(part.get('parts', []))
-            print(f"Found part with MIME type: {mime_type}")  # Débogage
+            print(f"Found part with MIME type: {mime_type}")
         return ""
 
     data = extract_parts(parts)
