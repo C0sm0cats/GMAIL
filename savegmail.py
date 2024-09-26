@@ -202,11 +202,15 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
 
     def extract_parts(parts):
         for part in parts:
-            if part.get('mimeType') == 'text/html':
+            mime_type = part.get('mimeType')
+            if mime_type == 'text/html':
                 if part.get('body') and part['body'].get('data'):
                     return part['body']['data']
-            elif part.get('mimeType') == 'multipart/alternative':
+            elif mime_type == 'multipart/alternative':
                 return extract_parts(part.get('parts', []))
+            elif mime_type == 'multipart/related':
+                return extract_parts(part.get('parts', []))
+            print(f"Found part with MIME type: {mime_type}")  # Débogage
         return ""
 
     data = extract_parts(parts)
