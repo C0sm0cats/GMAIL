@@ -46,3 +46,7 @@ SaveGmail utilizes Gmail labels to manage the processing of emails. Before runni
 ### Changing Labels in Gmail
 
 The script automatically changes the labels of processed emails to keep track of their status. It removes the `HasAttachment` label and adds the `HasAttachment/SavedAsPDF` label to indicate that the attachments have been saved. This helps in organizing your emails within Gmail.
+
+### Activity
+
+![Alt](https://repobeats.axiom.co/api/embed/b190ab0f74186972651fce8c254740af2387dc97.svg "Repobeats analytics image")
