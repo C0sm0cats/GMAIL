@@ -159,6 +159,11 @@ def create_combined_html(subject, date, fro, to, html_content, attachments_files
 def save_email_and_attachments(service, user_id, msg_id, save_dir):
     message = service.users().messages().get(userId=user_id, id=msg_id, format="full").execute()
 
+    # print(f"Message : {message}")
+
+    # payload = message.get('payload', {})
+    # print(f"Payload : {payload}")
+
     subject = ""
     if 'payload' in message and 'headers' in message['payload']:
         for header in message['payload']['headers']:
@@ -213,9 +218,12 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
             print(f"Found part with MIME type: {mime_type}")
         return ""
 
-    data = extract_parts(parts)
-
     attachments_files = []
+
+    if 'body' in payload and 'data' in payload['body']:
+        data = payload['body']['data']
+    else:
+        data = extract_parts(parts)
 
     if data:
         html_content = decode_base64(data).decode('utf-8')
