@@ -123,7 +123,7 @@ def save_attachments(service, user_id, msg_id, save_dir):
             print(f"Attachment {filename} renamed to {new_filename}.")
 
 
-def create_combined_html(subject, date, fro, to, html_content, attachments_files):
+def create_combined_html(subject, date, fro, to, cc, html_content, attachments_files):
     attachments_html = ""
     if attachments_files:
         filtered_attachments = [attachment for attachment in attachments_files if attachment]
@@ -145,6 +145,7 @@ def create_combined_html(subject, date, fro, to, html_content, attachments_files
         <hr>
         <div>De : {fro}</div>
         <div>à : {to}</div>
+        <div>Cc : {cc}</div>
         <div>Date : {date}</div>
         <hr>
         <div>{html_content}</div>
@@ -191,6 +192,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 break
 
     to = ""
+    cc = ""
     if 'payload' in message and 'headers' in message['payload']:
         for header in message['payload']['headers']:
             if header['name'] == 'To':
@@ -201,6 +203,25 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                     to_email = to_email.rstrip('>')
                     to_email = f" {to_email}"
                     to = f"{to_name.strip()} {to_email.strip()} "
+                # break
+
+            if header['name'] == 'Cc':
+                cc = header['value']
+                # Sépare les adresses e-mails si plusieurs sont présentes
+                cc_list = []
+                for email in cc.split(','):
+                    email = email.strip()
+                    if '<' in email and '>' in email:
+                        cc_name, cc_email = email.split('<', 1)
+                        cc_email = cc_email.rstrip('>')  # Supprime le chevron angulaire à la fin
+                        cc_email = f" {cc_email}"
+                        cc_list.append(f"{cc_name.strip()} {cc_email.strip()}")
+                    else:
+                        cc_list.append(email.strip())
+                cc = ', '.join(cc_list)  # Recombine les adresses dans le format attendu
+
+            # On arrête la boucle après avoir traité les deux champs
+            if to and cc:  # On vérifie si les deux sont récupérés
                 break
 
     parts = message.get('payload', {}).get('parts', [])
@@ -209,6 +230,9 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         for part in parts:
             mime_type = part.get('mimeType')
             if mime_type == 'text/html':
+                if part.get('body') and part['body'].get('data'):
+                    return part['body']['data']
+            elif mime_type == 'text/plain':
                 if part.get('body') and part['body'].get('data'):
                     return part['body']['data']
             elif mime_type == 'multipart/alternative':
@@ -235,7 +259,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                     if 'filename' in part:
                         attachments_files.append(part['filename'])
 
-        combined_html = create_combined_html(subject, date, fro, to, html_content, attachments_files)
+        combined_html = create_combined_html(subject, date, fro, to, cc, html_content, attachments_files)
 
         file_safe_subject = subject.replace("/", "-").replace("\\", "-").replace(":", "-").replace("*", "-").replace("+", "-")
 
