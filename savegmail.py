@@ -207,21 +207,19 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
 
             if header['name'] == 'Cc':
                 cc = header['value']
-                # Sépare les adresses e-mails si plusieurs sont présentes
                 cc_list = []
                 for email in cc.split(','):
                     email = email.strip()
                     if '<' in email and '>' in email:
                         cc_name, cc_email = email.split('<', 1)
-                        cc_email = cc_email.rstrip('>')  # Supprime le chevron angulaire à la fin
+                        cc_email = cc_email.rstrip('>')
                         cc_email = f" {cc_email}"
                         cc_list.append(f"{cc_name.strip()} {cc_email.strip()}")
                     else:
                         cc_list.append(email.strip())
-                cc = ', '.join(cc_list)  # Recombine les adresses dans le format attendu
+                cc = ', '.join(cc_list)
 
-            # On arrête la boucle après avoir traité les deux champs
-            if to and cc:  # On vérifie si les deux sont récupérés
+            if to and cc:
                 break
 
     parts = message.get('payload', {}).get('parts', [])
