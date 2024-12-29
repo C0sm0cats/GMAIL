@@ -227,7 +227,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
             html_content = decode_base64(data).decode('utf-8')
             html_content = re.sub(r'(>>?|>)', r'<br>', html_content)
             html_content = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'<br><br><hr>\1', html_content)
-            date_regex = r'(Le \d{1,2} (janv\.|févr\.|mars\.|avr\.|mai\.|juin\.|juil\.|août\.|sept\.|oct\.|nov\.|déc\.) \d{4}( à \d{1,2}:\d{2})?)'
+            date_regex = r'((Le|The) \d{1,2} (janv\.|févr\.|mars\.|avr\.|mai\.|juin\.|juil\.|août\.|sept\.|oct\.|nov\.|déc\.|Jan\.|Feb\.|Mar\.|Apr\.|May\.|Jun\.|Jul\.|Aug\.|Sep\.|Oct\.|Nov\.|Dec\.) \d{4}( (à|at) \d{1,2}:\d{2})?)'
             html_content = re.sub(date_regex, r'<hr>\1', html_content)
         elif mime_type == 'text/html':
             html_content = decode_base64(data).decode('utf-8')
