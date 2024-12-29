@@ -14,7 +14,7 @@ import re
 
 SCOPES = ["https://mail.google.com/"]
 # SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]
-DOWNLOAD_PATH = '/home/cosmocat/GMail/'
+DOWNLOAD_PATH = '~/Downloads/'
 
 
 def get_real_date(date_string):
