@@ -17,18 +17,18 @@ For more detailed information on setting up and running an app that calls a Goog
 
 The following Python dependencies must be installed to run this project:
 
-- **base64** : Encodage/décodage Base64.
-- **playwright** : Automatisation de navigateur.
-- **flask** : Framework web léger pour Python.
-- **datetime** : Manipulation de dates et d'heures.
-- **google-auth** : Authentification Google.
-- **google-auth-oauthlib** : Authentification OAuth avec Google.
-- **google-api-python-client** : Client pour les API Google.
-- **pytz** : Gestion des fuseaux horaires.
-- **tzlocal** : Détection automatique du fuseau horaire local.
-- **requests** : Exécution de requêtes HTTP.
-- **re** : Gestion des expressions régulières.
-- **logging** : Journalisation des événements.
+- **base64**: Base64 encoding/decoding.
+- **playwright**: Browser automation.
+- **flask**: Lightweight web framework for Python.
+- **datetime**: Date and time manipulation.
+- **google-auth**: Google authentication.
+- **google-auth-oauthlib**: OAuth authentication with Google.
+- **google-api-python-client**: Client library for Google APIs.
+- **pytz**: Timezone management.
+- **tzlocal**: Automatic detection of the local timezone.
+- **requests**: HTTP request handling.
+- **re**: Regular expression handling.
+- **logging**: Event logging.
 
 ## Usage
 
