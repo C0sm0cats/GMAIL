@@ -15,7 +15,7 @@ For more detailed information on setting up and running an app that calls a Goog
 
 ## Dependencies Installed
 
-Les dépendances suivantes doivent être installées pour exécuter ce projet :
+The following Python dependencies must be installed to run this project:
 
 - **base64** : Encodage/décodage Base64.
 - **playwright** : Automatisation de navigateur.
