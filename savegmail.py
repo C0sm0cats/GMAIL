@@ -1,6 +1,9 @@
 import os
 import base64
 from playwright.sync_api import sync_playwright
+from flask import Flask, send_from_directory
+from threading import Thread
+import time
 from datetime import datetime
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -9,6 +12,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from tzlocal import get_localzone
 from email.utils import parsedate_to_datetime
+import logging
+import requests
 import pytz
 import re
 
@@ -16,6 +21,22 @@ SCOPES = ["https://mail.google.com/"]
 # SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]
 DOWNLOAD_PATH = '~/Downloads/'
 
+PORT = 5000
+app = Flask(__name__)
+log = logging.getLogger('werkzeug')
+log.disabled = True
+
+@app.route('/<path:filename>')
+def serve_static(filename):
+    return send_from_directory(DOWNLOAD_PATH, filename)
+
+@app.route('/shutdown', methods=['POST'])
+def shutdown():
+    print("Shutting down Flask server...")
+    os._exit(0)
+
+def run_server():
+    app.run(port=PORT, debug=False)
 
 def get_real_date(date_string):
     if date_string == 'No Date':
@@ -53,8 +74,8 @@ def authenticate():
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-                print("Token refreshed:")
-                print("Expiry:", convert_expiry_to_local_time(creds.expiry))
+                print("[INFO] Token refreshed:")
+                print("[INFO] Expiry:", convert_expiry_to_local_time(creds.expiry))
             except Exception as e:
                 print(f"Error refreshing token: {e}")
                 flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
@@ -63,7 +84,7 @@ def authenticate():
         else:
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
             creds = flow.run_local_server(port=0)
-            print("Expiry:", convert_expiry_to_local_time(creds.expiry))
+            print("[INFO] Expiry:", convert_expiry_to_local_time(creds.expiry))
         with open(token_path, "w") as token:
             token.write(creds.to_json())
     return creds
@@ -76,10 +97,48 @@ def decode_base64(data):
     return base64.urlsafe_b64decode(data)
 
 
+def replace_src_with_url(html_content, attachments_files, port):
+    src_pattern = re.compile(r'src=["\']cid:([^"\']+)["\']')
+
+    def replace_src(match):
+        cid_value = match.group(1).split('@')[0]
+        # print(f"Found cid: {cid_value}")
+        for attachment in attachments_files:
+            if cid_value in attachment:
+                attachment_url = f"http://127.0.0.1:{port}/{attachment}"
+                # print(f"Generated URL: {attachment_url}")
+                return f'src="{attachment_url}"'
+
+        print(f"No matching attachment found for cid: {cid_value}")
+        return match.group(0)
+
+    updated_html_content = re.sub(src_pattern, replace_src, html_content)
+
+    # print("\nUpdated HTML content:")
+    # print(updated_html_content)
+    return updated_html_content
+
+
+def delete_matching_attachments(html_content, attachments_files, download_path):
+    url_pattern = re.compile(r'http://127.0.0.1:\d+/(.+?\.(jpg|png|gif|jpeg))')
+    urls_in_html = re.findall(url_pattern, html_content)
+
+    print(f"\033[36m[INFO] Cleaning up CID attachment(s) file(s):\033[0m")
+    for attachment in attachments_files:
+        for url in urls_in_html:
+            filename = url[0]
+            if filename == attachment:
+                attachment_path = os.path.join(download_path, attachment)
+                if os.path.exists(attachment_path):
+                    os.remove(attachment_path)
+                    print(f"\033[34m  - {attachment}\033[0m")
+
+
 def save_attachments(service, user_id, msg_id, save_dir, attachments_files):
     message = service.users().messages().get(userId=user_id, id=msg_id).execute()
     parts = message['payload'].get('parts', [])
     attachments_html = ""
+    attachments_html_pdf = ""
     for part in parts:
         if part.get('filename'):
             filename = part['filename']
@@ -103,14 +162,14 @@ def save_attachments(service, user_id, msg_id, save_dir, attachments_files):
             attachments_files.append(new_filename)
 
     if len(attachments_files) == 1:
-        print(f"\033[36m1 Attachment saved :\033[0m")
-        print(f"\033[34m{attachments_files[0]}\033[0m")
+        print(f"\033[36m[INFO] 1 Attachment saved:\033[0m")
+        print(f"\033[34m  - {attachments_files[0]}\033[0m")
     elif len(attachments_files) > 1:
-        print(f"\033[36m{len(attachments_files)} Attachments saved :\033[0m")
+        print(f"\033[36m[INFO] {len(attachments_files)} Attachments saved:\033[0m")
         for file in attachments_files:
-            print(f"\033[34m{file}\033[0m")
+            print(f"\033[34m  - {file}\033[0m")
     else:
-        print(f"\033[34mNo attachments to save.\033[0m")
+        print(f"\033[36m[INFO] No attachments to save.\033[0m")
 
     if attachments_files:
         filtered_attachments = [attachment for attachment in attachments_files if attachment]
@@ -122,17 +181,27 @@ def save_attachments(service, user_id, msg_id, save_dir, attachments_files):
                 attachment_url = f"file://{os.path.abspath(attachment_path)}"
                 attachments_html += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
             attachments_html += "</ul>\n"
+
+            attachments_html_pdf = "<div>Attachments :</div>\n"
+            attachments_html_pdf += "<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
+            for attachment in filtered_attachments:
+                if attachment.lower().endswith('.pdf'):
+                    attachment_path = os.path.join(DOWNLOAD_PATH, attachment)
+                    attachment_url = f"file://{os.path.abspath(attachment_path)}"
+                    attachments_html_pdf += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
+            attachments_html_pdf += "</ul>\n"
     else:
         attachments_html = "<div>No Attachments for this mail</div>"
-    return attachments_html
+        attachments_html_pdf = "<div>No PDF Attachments for this mail</div>"
+    return attachments_html, attachments_html_pdf
 
 def save_email_and_attachments(service, user_id, msg_id, save_dir):
     message = service.users().messages().get(userId=user_id, id=msg_id, format="full").execute()
 
-    # print(f"Message : {message}")
+    # print(f"Message: {message}")
 
     # payload = message.get('payload', {})
-    # print(f"Payload : {payload}")
+    # print(f"Payload: {payload}")
 
     subject = ""
     if 'payload' in message and 'headers' in message['payload']:
@@ -170,7 +239,6 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                     to_email = to_email.rstrip('>')
                     to_email = f" {to_email}"
                     to = f"{to_name.strip()} {to_email.strip()} "
-                # break
 
             if header['name'] == 'Cc':
                 cc = header['value']
@@ -214,7 +282,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         return data, mime_type
 
     attachments_files = []
-    attachments_html = save_attachments(service, user_id, msg_id, save_dir, attachments_files)
+    attachments_html, attachments_html_pdf = save_attachments(service, user_id, msg_id, save_dir, attachments_files)
 
     if 'body' in payload and 'data' in payload['body']:
         data = payload['body']['data']
@@ -231,6 +299,12 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
             html_content = re.sub(date_regex, r'<hr>\1', html_content)
         elif mime_type == 'text/html':
             html_content = decode_base64(data).decode('utf-8')
+            if attachments_files and re.search(r'src=["\']cid:([^"\']+)["\']', html_content):
+                print(f"\033[36m[INFO] Starting Flask server to handle CID attachment(s) file(s) for PDF processing.\033[0m")
+                server_thread = Thread(target=run_server, daemon=True)
+                server_thread.start()
+                time.sleep(1)
+                html_content = replace_src_with_url(html_content, attachments_files, PORT)
         else:
             html_content = "The message contains neither plain text nor HTML."
 
@@ -238,57 +312,81 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
 
         final_pdf_path = os.path.join(save_dir, f"{file_safe_subject}.pdf")
 
-        with sync_playwright() as p:
+        try:
+            with sync_playwright() as p:
+                try:
+                    browser = p.chromium.launch(headless=True)
+                    page = browser.new_page()
+                    page.set_content(html_content)
+
+                    header_template = """
+                        <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                            <h3 style='margin-top: 0px;'>{subject}</h3>
+                            <div>From : {fro}</div>
+                            <div>To : {to}</div>
+                            <div>Cc : {cc}</div>
+                            <div>Date : {date}</div>
+                        </div>
+                    """.format(fro=fro, to=to, cc=cc, date=date, subject=subject)
+                    contains_pdf = any(file.lower().endswith('.pdf') for file in attachments_files)
+                    if attachments_files and re.search(r'http://127.0.0.1:\d+/.+?\.jpg|\.png|\.gif|\.jpeg', html_content):
+                        if contains_pdf:
+                            footer_template = """
+                                <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                                    {attachments_html_pdf}
+                                    <span class="pageNumber"></span> / <span class="totalPages"></span>
+                                </div>
+                            """.format(attachments_html_pdf=attachments_html_pdf)
+                        else:
+                            footer_template = """
+                                <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                                    <span class="pageNumber"></span> / <span class="totalPages"></span>
+                                </div>
+                            """
+                    else:
+                        footer_template = """
+                            <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                                {attachments_html}
+                                <span class="pageNumber"></span> / <span class="totalPages"></span>
+                            </div>
+                        """.format(attachments_html=attachments_html)
+
+                    page.pdf(
+                        format='A4',
+                        print_background=True,
+                        display_header_footer=True,
+                        header_template=header_template,
+                        footer_template=footer_template,
+                        margin={
+                            "top": "150px",
+                            "bottom": "150px",
+                            "left": "0",
+                            "right": "0",
+                        },
+                        path=final_pdf_path
+                    )
+
+                    browser.close()
+                    # print(f"The PDF has been saved in {final_pdf_path}")
+                    if attachments_files and re.search(r'http://127.0.0.1:\d+/.+?\.jpg|\.png|\.gif|\.jpeg', html_content):
+                        delete_matching_attachments(html_content, attachments_files, DOWNLOAD_PATH)
+                except Exception as e:
+                    print(f"Playwright error during PDF generation: {e}")
+
+            print(f"\033[36m[INFO] PDF document saved for message ID {msg_id} at {DOWNLOAD_PATH}\033[0m")
+            now = datetime.now()
+            timestamp = now.strftime("%y%m%d_%H%M%S")
+            milliseconds = now.microsecond // 1000
+            new_pdf_path = os.path.join(save_dir, f"{timestamp}{milliseconds}_{file_safe_subject}.pdf")
+            os.rename(final_pdf_path, new_pdf_path)
+            print(f"\033[34m  - {os.path.basename(new_pdf_path)}\033[0m")
+            print(f"\033[92m[INFO] Finished saving email and attachment(s) for message ID {msg_id}\033[0m\n")
+        finally:
             try:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.set_content(html_content)
-
-                header_template = """
-                    <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
-                        <h3 style='margin-top: 0px;'>{subject}</h3>
-                        <div>From : {fro}</div>
-                        <div>To : {to}</div>
-                        <div>Cc : {cc}</div>
-                        <div>Date : {date}</div>
-                    </div>
-                """.format(fro=fro, to=to, cc=cc, date=date, subject=subject)
-
-                footer_template = """
-                    <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
-                        {attachments_html}
-                        <span class="pageNumber"></span> / <span class="totalPages"></span>
-                    </div>
-                """.format(attachments_html=attachments_html)
-
-                page.pdf(
-                    format='A4',
-                    print_background=True,
-                    display_header_footer=True,
-                    header_template=header_template,
-                    footer_template=footer_template,
-                    margin={
-                        "top": "150px",
-                        "bottom": "150px",
-                        "left": "0",
-                        "right": "0",
-                    },
-                    path=final_pdf_path
-                )
-
-                browser.close()
-                print(f"The PDF has been saved in {final_pdf_path}")
+                if attachments_files and re.search(r'http://127.0.0.1:\d+/.+?\.jpg|\.png|\.gif|\.jpeg', html_content):
+                    requests.post(f"http://127.0.0.1:{PORT}/shutdown")
             except Exception as e:
-                print(f"Playwright error during PDF generation : {e}")
-
-        print(f"\033[36mEmail saved :\033[0m")
-        now = datetime.now()
-        timestamp = now.strftime("%y%m%d_%H%M%S")
-        milliseconds = now.microsecond // 1000
-        new_pdf_path = os.path.join(save_dir, f"{timestamp}{milliseconds}_{file_safe_subject}.pdf")
-        os.rename(final_pdf_path, new_pdf_path)
-        print(f"\033[34m{os.path.basename(new_pdf_path)}\033[0m")
-
+                print(f"Flask shutdown triggered: {e}")
     else:
         print(f"No HTML content found for message {msg_id}.")
 
@@ -321,23 +419,21 @@ def main():
         if label_id:
             response = service.users().messages().list(userId=user_id, labelIds=[label_id]).execute()
             messages = response.get("messages", [])
-
             if len(messages) == 1:
-                print(f"\033[36m1 email retrieved.\033[0m")
+                print(f"[INFO] Processing 1 email with label 'HasAttachment' for PDF generation\n")
             elif len(messages) > 1:
-                print(f"\033[36m{len(messages)} emails retrieved.\033[0m")
+                print(f"[INFO] Processing {len(messages)} emails with label 'HasAttachment' for PDF generation\n")
             if len(messages) > 0:
-                for message in messages:
-                    msg_id = message["id"]
-                    save_email_and_attachments(service, user_id, msg_id, DOWNLOAD_PATH)
 
                 for message in messages:
                     msg_id = message["id"]
+                    print(f"\033[92m[INFO] Starting to save email and attachment(s) for message ID {msg_id}\033[0m")
                     service.users().messages().modify(userId=user_id, id=msg_id, body={"removeLabelIds": [label_id]}).execute()
                     service.users().messages().modify(userId=user_id, id=msg_id, body={"addLabelIds": [label_name_processed_id]}).execute()
                     #service.users().messages().delete(userId=user_id, id=msg_id).execute()
+                    save_email_and_attachments(service, user_id, msg_id, DOWNLOAD_PATH)
             else:
-                print("No emails to process with the label '{}'.".format(label_name))
+                print("[INFO] No emails to process with label '{}' for PDF generation.".format(label_name))
         else:
             print(f"Label '{label_name}' not found.")
 

@@ -8,11 +8,27 @@ Before using SaveGmail, make sure you have the following:
 - Python installed on your system (version 3.6 or higher)
 - Google Cloud Platform project with Gmail API enabled
 - OAuth 2.0 credentials file (`credentials.json`) downloaded from the Google Cloud Console
-- Dependencies installed (`base64`, `playwright`, `datetime`, `google-auth`, `google-auth-oauthlib`, `google-api-python-client`, `pytz`)
 - Gmail labels `HasAttachment` and `HasAttachment/SavedAsPDF` created in your Gmail account
 - A Gmail filter rule set up to apply the `HasAttachment` label to emails with attachments
 
 For more detailed information on setting up and running an app that calls a Google Workspace API, visit the [Google Gmail API Quickstart guide](https://developers.google.com/gmail/api/quickstart/python).
+
+## Dependencies Installed
+
+Les dépendances suivantes doivent être installées pour exécuter ce projet :
+
+- **base64** : Encodage/décodage Base64.
+- **playwright** : Automatisation de navigateur.
+- **flask** : Framework web léger pour Python.
+- **datetime** : Manipulation de dates et d'heures.
+- **google-auth** : Authentification Google.
+- **google-auth-oauthlib** : Authentification OAuth avec Google.
+- **google-api-python-client** : Client pour les API Google.
+- **pytz** : Gestion des fuseaux horaires.
+- **tzlocal** : Détection automatique du fuseau horaire local.
+- **requests** : Exécution de requêtes HTTP.
+- **re** : Gestion des expressions régulières.
+- **logging** : Journalisation des événements.
 
 ## Usage
 
