@@ -1,7 +1,7 @@
 import os
 import base64
 from playwright.sync_api import sync_playwright
-from flask import Flask, send_from_directory
+from flask import Flask, send_from_directory, request
 from threading import Thread
 import time
 from datetime import datetime
@@ -30,10 +30,16 @@ log.disabled = True
 def serve_static(filename):
     return send_from_directory(DOWNLOAD_PATH, filename)
 
+def shutdown_server():
+    print("[INFO] Server Flask shutting down...")
+    func = request.environ.get('werkzeug.server.shutdown')
+    if func:
+        func()
+
 @app.route('/shutdown', methods=['POST'])
 def shutdown():
-    print("Shutting down Flask server...")
-    os._exit(0)
+    shutdown_server()
+    return '', 200
 
 def run_server():
     app.run(port=PORT, debug=False)
@@ -384,14 +390,19 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         finally:
             try:
                 if attachments_files and re.search(r'http://127.0.0.1:\d+/.+?\.jpg|\.png|\.gif|\.jpeg', html_content):
-                    requests.post(f"http://127.0.0.1:{PORT}/shutdown")
-            except Exception as e:
-                print(f"Flask shutdown triggered: {e}")
+                    response = requests.post(f"http://127.0.0.1:{PORT}/shutdown")
+                    if response.status_code == 200:
+                        print("[INFO] Server Flask has been successfully stopped (HTTP 200).")
+                    else:
+                        print("[ERROR] Server Flask shutdown failed with status code:", response.status_code)
+            except requests.exceptions.RequestException as e:
+                print(f"[ERROR] Error during Flask shutdown request: {e}")
     else:
         print(f"No HTML content found for message {msg_id}.")
 
 
 def main():
+    os.system('clear')
     creds = authenticate()
     try:
         service = build("gmail", "v1", credentials=creds)
@@ -432,6 +443,8 @@ def main():
                     service.users().messages().modify(userId=user_id, id=msg_id, body={"addLabelIds": [label_name_processed_id]}).execute()
                     #service.users().messages().delete(userId=user_id, id=msg_id).execute()
                     save_email_and_attachments(service, user_id, msg_id, DOWNLOAD_PATH)
+                print(f"[INFO] {len(messages)} email(s) processed. Goodbye!")
+
             else:
                 print("[INFO] No emails to process with label '{}' for PDF generation.".format(label_name))
         else:
