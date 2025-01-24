@@ -168,14 +168,14 @@ def save_attachments(service, user_id, msg_id, save_dir, attachments_files):
             attachments_files.append(new_filename)
 
     if len(attachments_files) == 1:
-        print(f"\033[36m[INFO] 1 Attachment saved:\033[0m")
+        print(f"\033[36m[INFO] 1 Attachment saved for message ID {msg_id} at {DOWNLOAD_PATH}:\033[0m")
         print(f"\033[34m  - {attachments_files[0]}\033[0m")
     elif len(attachments_files) > 1:
-        print(f"\033[36m[INFO] {len(attachments_files)} Attachments saved:\033[0m")
+        print(f"\033[36m[INFO] {len(attachments_files)} Attachments saved for message ID {msg_id} at {DOWNLOAD_PATH}:\033[0m")
         for file in attachments_files:
             print(f"\033[34m  - {file}\033[0m")
     else:
-        print(f"\033[36m[INFO] No attachments to save.\033[0m")
+        print(f"\033[36m[INFO] No attachments to save for message ID {msg_id} at {DOWNLOAD_PATH}.\033[0m")
 
     if attachments_files:
         filtered_attachments = [attachment for attachment in attachments_files if attachment]
@@ -200,6 +200,21 @@ def save_attachments(service, user_id, msg_id, save_dir, attachments_files):
         attachments_html = "<div>No Attachments for this mail</div>"
         attachments_html_pdf = "<div>No PDF Attachments for this mail</div>"
     return attachments_html, attachments_html_pdf
+
+
+def download_attachment(service, user_id, attachment_id, save_dir, filename, msg_id):
+    try:
+        attachment = service.users().messages().attachments().get(userId=user_id, messageId=msg_id, id=attachment_id).execute()
+        file_data = base64.urlsafe_b64decode(attachment['data'].encode('UTF-8'))
+        filepath = os.path.join(save_dir, filename)
+        with open(filepath, 'wb') as f:
+            f.write(file_data)
+        # print(f"Attachment saved to {filepath}")
+        return filepath
+    except Exception as e:
+        print(f"Error downloading attachment {filename}: {e}")
+        return None
+
 
 def save_email_and_attachments(service, user_id, msg_id, save_dir):
     message = service.users().messages().get(userId=user_id, id=msg_id, format="full").execute()
@@ -264,9 +279,10 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 break
 
     parts = message.get('payload', {}).get('parts', [])
+    attachments_files = []
 
     def extract_parts(parts):
-        valid_mime_types = ['text/html', 'text/plain', 'multipart/alternative', 'multipart/related' , 'multipart/mixed']
+        valid_mime_types = ['text/html', 'text/plain', 'multipart/alternative', 'multipart/related', 'multipart/mixed']
         mime_type = None
         data = ""
         html_data = None
@@ -281,13 +297,20 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                         plain_data = part['body']['data']
                 elif 'parts' in part:
                     html_data, plain_data = extract_parts(part['parts'])
+            # Handling image attachments (with CID)
+            if mime_type.startswith('image/'):
+                filename = part['filename']
+                attachment_id = part['body']['attachmentId']
+                file_path = download_attachment(service, user_id, attachment_id, save_dir, filename, msg_id)
+                if file_path:
+                    attachments_files.append(filename)  # Add the file to the attachments_files list
+
         if html_data:
             return html_data, 'text/html'
         if plain_data:
             return plain_data, 'text/plain'
         return data, mime_type
 
-    attachments_files = []
     attachments_html, attachments_html_pdf = save_attachments(service, user_id, msg_id, save_dir, attachments_files)
 
     if 'body' in payload and 'data' in payload['body']:
