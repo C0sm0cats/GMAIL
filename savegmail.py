@@ -12,10 +12,42 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from tzlocal import get_localzone
 from email.utils import parsedate_to_datetime
+import subprocess
 import logging
 import requests
 import pytz
 import re
+
+def check_playwright_chromium_browser():
+    # Path to the Playwright cache directory
+    cache_path = os.path.expanduser("~/.cache/ms-playwright")
+
+    # Initialize flags to check if the browsers are installed
+    chromium_installed = False
+    chromium_headless_installed = False
+
+    # Loop through the cache and look for chromium directories
+    for folder in os.listdir(cache_path):
+        if folder.startswith("chromium-"):
+            chromium_installed = True
+        elif folder.startswith("chromium_headless_shell-"):
+            chromium_headless_installed = True
+
+    # If either Chromium or Headless Chromium is missing, install the missing one
+    if not chromium_installed and not chromium_headless_installed:
+        print("\033[92m[INFO] Both Chromium (Playwright) and Headless Chromium (Playwright) are missing. Installing...\033[0m")
+        subprocess.run(["playwright", "install", "chromium"], check=True)  # Install Chromium (both versions)
+        print("\033[92m[INFO] Chromium (Playwright) and Headless Chromium (Playwright) installed successfully.\033[0m")
+    elif not chromium_installed:
+        print("\033[92m[INFO] Chromium (Playwright) is missing. Installing Chromium (Playwright)...\033[0m")
+        subprocess.run(["playwright", "install", "chromium"], check=True)  # Install Chromium
+        print("\033[92m[INFO] Chromium (Playwright) installed successfully.\033[0m")
+    elif not chromium_headless_installed:
+        print("\033[92m[INFO] Headless Chromium (Playwright) is missing. Installing Headless Chromium (Playwright)...\033[0m")
+        subprocess.run(["playwright", "install", "chromium"], check=True)  # Install Chromium (Headless version)
+        print("\033[92m[INFO] Headless Chromium (Playwright) installed successfully.\033[0m")
+    else:
+        print("\033[92m[INFO] Both Chromium (Playwright) and Headless Chromium (Playwright) are already installed.\033[0m")
 
 SCOPES = ["https://mail.google.com/"]
 # SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]
@@ -249,6 +281,18 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                     fro = f"{fro_name.strip()} {fro_email.strip()} "
                 break
 
+    reply = ""
+    if 'payload' in message and 'headers' in message['payload']:
+        for header in message['payload']['headers']:
+            if header['name'] == 'Reply-To':
+                reply  = header['value']
+                if '<' in reply and '>' in reply :
+                    reply_name, reply_email = reply.split('<', 1)
+                    reply_email = reply_email.rstrip('>')
+                    reply_email = f" {reply_email}"
+                    reply  = f"{reply_name.strip()} {reply_email.strip()} "
+                break
+
     to = ""
     cc = ""
     if 'payload' in message and 'headers' in message['payload']:
@@ -299,8 +343,14 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                     html_data, plain_data = extract_parts(part['parts'])
             # Handling image attachments (with CID)
             if mime_type.startswith('image/'):
-                filename = part['filename']
-                attachment_id = part['body']['attachmentId']
+                # filename = part['filename']
+                filename = part.get('filename', '')
+                if not filename:
+                    continue
+                # attachment_id = part['body']['attachmentId']
+                attachment_id = part.get('body', {}).get('attachmentId')
+                if not attachment_id:
+                    continue
                 file_path = download_attachment(service, user_id, attachment_id, save_dir, filename, msg_id)
                 if file_path:
                     attachments_files.append(filename)  # Add the file to the attachments_files list
@@ -317,17 +367,22 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         data = payload['body']['data']
         mime_type = payload.get('mimeType', '')
     else:
+        # print(f"Running extract_parts")
         data, mime_type = extract_parts(parts)
 
     if data:
+        # print(f"data found")
         if mime_type == 'text/plain':
+            # print(f"text/plain detected")
             html_content = decode_base64(data).decode('utf-8')
             html_content = re.sub(r'(>>?|>)', r'<br>', html_content)
             html_content = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'<br><br><hr>\1', html_content)
             date_regex = r'((Le|The) \d{1,2} (janv\.|févr\.|mars\.|avr\.|mai\.|juin\.|juil\.|août\.|sept\.|oct\.|nov\.|déc\.|Jan\.|Feb\.|Mar\.|Apr\.|May\.|Jun\.|Jul\.|Aug\.|Sep\.|Oct\.|Nov\.|Dec\.) \d{4}( (à|at) \d{1,2}:\d{2})?)'
             html_content = re.sub(date_regex, r'<hr>\1', html_content)
         elif mime_type == 'text/html':
+            # print(f"text/html detected")
             html_content = decode_base64(data).decode('utf-8')
+            # print(f"html_content: {html_content}")
             if attachments_files and re.search(r'src=["\']cid:([^"\']+)["\']', html_content):
                 print(f"\033[36m[INFO] Starting Flask server to handle CID attachment(s) file(s) for PDF processing.\033[0m")
                 server_thread = Thread(target=run_server, daemon=True)
@@ -337,26 +392,69 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         else:
             html_content = "The message contains neither plain text nor HTML."
 
-        file_safe_subject = subject.replace("/", "-").replace("\\", "-").replace(":", "-").replace("*", "-").replace("+", "-")
-
+        file_safe_subject = subject.replace("/", "-").replace("\\", "-").replace(":", "-").replace("*", "-").replace("+", "-").replace("é", "e").replace("à", "a")
+        # print(f"file_safe_subject: {file_safe_subject}")
         final_pdf_path = os.path.join(save_dir, f"{file_safe_subject}.pdf")
+        # print(f"final_pdf_path: {final_pdf_path}")
 
         try:
             with sync_playwright() as p:
                 try:
-                    browser = p.chromium.launch(headless=True)
+                    def has_dynamic_content(html_content):
+                        dynamic_patterns = {
+                            "script tags": r"<script.*?>.*?</script>",  # Détection des balises <script>
+                            "iframe tags": r"<iframe.*?>.*?</iframe>",  # Détection des balises <iframe>
+                            "JS frameworks (React/Vue/Angular)": r"data-reactroot|ng-app|vue",  # Détection des frameworks JS comme React, Vue ou Angular
+                            "AJAX calls": r"XMLHttpRequest|fetch",  # Appels AJAX via XMLHttpRequest ou fetch
+                            "Media queries": r"@media",  # Requêtes media CSS pour un style dynamique
+                            "CSS transitions/animations": r"transition|animation",  # Détection de transitions CSS ou animations
+                            "JavaScript timers": r"setInterval|setTimeout",  # Détection des minuteries JavaScript (setInterval, setTimeout)
+                            "AJAX content markers": r"data-ajax",  # Marqueurs d'appels AJAX dans les données HTML (par exemple, data-ajax="true")
+                            "Vue.js or React markers": r"v-bind|v-for|data-v-",  # Détection de Vue.js (marqueurs spécifiques) ou React
+                            "WebSocket indicators": r"WebSocket",  # Détection de WebSocket (indicateur de contenu dynamique en temps réel)
+                            "Dynamic event listeners": r"addEventListener",  # Détection d'ajout d'écouteurs d'événements JavaScript dynamiques
+                            "Inline CSS for dynamic styles": r"style=['\"].*?display\s*:\s*none.*?['\"]",  # Styles CSS en ligne pour des éléments dynamiques (par exemple, display: none)
+                            "Loading indicators": r'loading|lazy|spinner|progress',  # Détection des éléments de chargement comme "lazy", "loading", "spinner", "progress"
+                            "Dynamic data attributes": r"data-\w+",  # Détection des attributs de données dynamiques (par exemple, data-id, data-src)
+                            "Content injected by JavaScript": r"document\.write|innerHTML|outerHTML",  # Détection de contenu injecté par JS
+                            "MutationObserver": r"MutationObserver",  # Détection de l'utilisation de MutationObserver (utilisé pour détecter les changements dans le DOM)
+                            "IntersectionObserver": r"IntersectionObserver",  # Détection de l'utilisation de l'IntersectionObserver pour les éléments qui apparaissent dans la vue
+                            "Lazy-loaded content": r"data-src|data-lazy",  # Détection de contenu chargé de manière paresseuse (lazy-loaded)
+                            "Viewport-related dynamic elements": r"viewport|resize",  # Éléments dynamiques liés au viewport (par exemple, lors du redimensionnement de la fenêtre)
+                            "SVG graphics": r"<svg",  # Détection de graphiques SVG souvent manipulés dynamiquement via JavaScript
+                            "Web components": r"<\w+-\w+",  # Détection des composants Web personnalisés (ex : <my-component>)
+                            "Dynamic background images": r"background-image\s*:\s*url",  # Détection des images de fond souvent changées dynamiquement
+                        }
+
+                        for desc, pattern in dynamic_patterns.items():
+                            if re.search(pattern, html_content, re.IGNORECASE):
+                                print(f"Dynamic content detected: Found {desc}")
+                                return True
+
+                        return False
+
+                    # Check if dynamic content exists
+                    headless_mode = not has_dynamic_content(html_content)
+                    print(f"headless_mode: {headless_mode}")
+
+                    browser = p.chromium.launch(headless=headless_mode)
                     page = browser.new_page()
-                    page.set_content(html_content)
+                    page.set_content(html_content, timeout=30000)  # Set content to the page
+
+                    # browser = p.chromium.launch(headless=False) # `headless=False` to show the interface
+                    # page = browser.new_page()
+                    # page.set_content(html_content, timeout=30000)
 
                     header_template = """
                         <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
                             <h3 style='margin-top: 0px;'>{subject}</h3>
                             <div>From : {fro}</div>
+                            <div>Reply To : {reply}</div>
                             <div>To : {to}</div>
                             <div>Cc : {cc}</div>
                             <div>Date : {date}</div>
                         </div>
-                    """.format(fro=fro, to=to, cc=cc, date=date, subject=subject)
+                    """.format(fro=fro, reply=reply, to=to, cc=cc, date=date, subject=subject)
                     contains_pdf = any(file.lower().endswith('.pdf') for file in attachments_files)
                     if attachments_files and re.search(r'http://127.0.0.1:\d+/.+?\.jpg|\.png|\.gif|\.jpeg', html_content):
                         if contains_pdf:
@@ -428,6 +526,7 @@ def main():
     os.system('clear')
     creds = authenticate()
     try:
+        check_playwright_chromium_browser()
         service = build("gmail", "v1", credentials=creds)
         user_id = "me"
         label_name = "HasAttachment"
