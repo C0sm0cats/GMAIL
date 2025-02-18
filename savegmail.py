@@ -200,10 +200,10 @@ def save_attachments(service, user_id, msg_id, save_dir, attachments_files):
             attachments_files.append(new_filename)
 
     if len(attachments_files) == 1:
-        print(f"\033[36m[INFO] 1 Attachment saved for message ID {msg_id} at {DOWNLOAD_PATH}:\033[0m")
+        print(f"\033[36m[INFO] 1 Attachment saved for message ID {msg_id} at {DOWNLOAD_PATH}\033[0m")
         print(f"\033[34m  - {attachments_files[0]}\033[0m")
     elif len(attachments_files) > 1:
-        print(f"\033[36m[INFO] {len(attachments_files)} Attachments saved for message ID {msg_id} at {DOWNLOAD_PATH}:\033[0m")
+        print(f"\033[36m[INFO] {len(attachments_files)} Attachments saved for message ID {msg_id} at {DOWNLOAD_PATH}\033[0m")
         for file in attachments_files:
             print(f"\033[34m  - {file}\033[0m")
     else:
@@ -347,6 +347,17 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 filename = part.get('filename', '')
                 if not filename:
                     continue
+
+                # Retrieve headers as a dictionary
+                headers_dict = {header['name'].lower(): header['value'] for header in part.get('headers', [])}
+
+                content_id = headers_dict.get('content-id')
+                content_disposition = headers_dict.get('content-disposition', '').lower()
+
+                # Ensure the image is a CID and is inline
+                if not content_id or ('attachment' in content_disposition):
+                    continue
+
                 # attachment_id = part['body']['attachmentId']
                 attachment_id = part.get('body', {}).get('attachmentId')
                 if not attachment_id:
