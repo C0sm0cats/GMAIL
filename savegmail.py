@@ -331,41 +331,63 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         data = ""
         html_data = None
         plain_data = None
+
+        # Loop through each part of the email
         for part in parts:
             mime_type = part.get('mimeType')
+
+            # Handle text-based MIME types (HTML, plain text, multipart)
             if mime_type in valid_mime_types:
+                # Check if the part has a body with data
                 if part.get('body') and part['body'].get('data'):
                     if mime_type == 'text/html':
-                        html_data = part['body']['data']
+                        html_data = part['body']['data'] # Store HTML data
                     elif mime_type == 'text/plain':
-                        plain_data = part['body']['data']
+                        plain_data = part['body']['data'] # Store plain text data
+                # Recursively process nested parts if present
                 elif 'parts' in part:
                     html_data, plain_data = extract_parts(part['parts'])
-            # Handling image attachments (with CID)
-            if mime_type.startswith('image/'):
-                # filename = part['filename']
+
+            # Handle image attachments (with Content-ID for inline images)
+            if mime_type and mime_type.startswith('image/'):
                 filename = part.get('filename', '')
                 if not filename:
-                    continue
+                    # Generate a default filename if none is provided
+                    headers_dict = {header['name'].lower(): header['value'] for header in part.get('headers', [])}
+                    content_id = headers_dict.get('content-id')
+                    if content_id:
+                        filename = f"inline_image_{content_id.strip('<>')}.{mime_type.split('/')[1]}"
+                    else:
+                        continue  # Skip if no filename and no content_id
 
                 # Retrieve headers as a dictionary
                 headers_dict = {header['name'].lower(): header['value'] for header in part.get('headers', [])}
-
                 content_id = headers_dict.get('content-id')
                 content_disposition = headers_dict.get('content-disposition', '').lower()
 
-                # Ensure the image is a CID and is inline
+                # Ensure the image is inline (has CID and is not an attachment)
                 if not content_id or ('attachment' in content_disposition):
                     continue
 
-                # attachment_id = part['body']['attachmentId']
+                # Handle inline images encoded directly in the body
+                if part.get('body') and part['body'].get('data'):
+                    import base64
+                    image_data = part['body']['data'] # Get base64-encoded image data
+                    file_path = os.path.join(save_dir, filename) # Define file path
+                    with open(file_path, 'wb') as f:
+                        f.write(base64.b64decode(image_data)) # Decode and save the image
+                    attachments_files.append(filename) # Add to attachments list
+                    continue # Move to next part after processing inline image
+
+                # Handle attachments with an attachmentId (original logic)
                 attachment_id = part.get('body', {}).get('attachmentId')
                 if not attachment_id:
-                    continue
+                    continue # Skip if no attachmentId
                 file_path = download_attachment(service, user_id, attachment_id, save_dir, filename, msg_id)
                 if file_path:
-                    attachments_files.append(filename)  # Add the file to the attachments_files list
+                    attachments_files.append(filename) # Add to attachments list if downloaded
 
+        # Return the extracted data based on priority (HTML first, then plain text)
         if html_data:
             return html_data, 'text/html'
         if plain_data:
@@ -413,28 +435,28 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 try:
                     def has_dynamic_content(html_content):
                         dynamic_patterns = {
-                            "script tags": r"<script.*?>.*?</script>",  # Détection des balises <script>
-                            "iframe tags": r"<iframe.*?>.*?</iframe>",  # Détection des balises <iframe>
-                            "JS frameworks (React/Vue/Angular)": r"data-reactroot|ng-app|vue",  # Détection des frameworks JS comme React, Vue ou Angular
-                            "AJAX calls": r"XMLHttpRequest|fetch",  # Appels AJAX via XMLHttpRequest ou fetch
-                            "Media queries": r"@media",  # Requêtes media CSS pour un style dynamique
-                            "CSS transitions/animations": r"transition|animation",  # Détection de transitions CSS ou animations
-                            "JavaScript timers": r"setInterval|setTimeout",  # Détection des minuteries JavaScript (setInterval, setTimeout)
-                            "AJAX content markers": r"data-ajax",  # Marqueurs d'appels AJAX dans les données HTML (par exemple, data-ajax="true")
-                            "Vue.js or React markers": r"v-bind|v-for|data-v-",  # Détection de Vue.js (marqueurs spécifiques) ou React
-                            "WebSocket indicators": r"WebSocket",  # Détection de WebSocket (indicateur de contenu dynamique en temps réel)
-                            "Dynamic event listeners": r"addEventListener",  # Détection d'ajout d'écouteurs d'événements JavaScript dynamiques
-                            "Inline CSS for dynamic styles": r"style=['\"].*?display\s*:\s*none.*?['\"]",  # Styles CSS en ligne pour des éléments dynamiques (par exemple, display: none)
-                            "Loading indicators": r'loading|lazy|spinner|progress',  # Détection des éléments de chargement comme "lazy", "loading", "spinner", "progress"
-                            "Dynamic data attributes": r"data-\w+",  # Détection des attributs de données dynamiques (par exemple, data-id, data-src)
-                            "Content injected by JavaScript": r"document\.write|innerHTML|outerHTML",  # Détection de contenu injecté par JS
-                            "MutationObserver": r"MutationObserver",  # Détection de l'utilisation de MutationObserver (utilisé pour détecter les changements dans le DOM)
-                            "IntersectionObserver": r"IntersectionObserver",  # Détection de l'utilisation de l'IntersectionObserver pour les éléments qui apparaissent dans la vue
-                            "Lazy-loaded content": r"data-src|data-lazy",  # Détection de contenu chargé de manière paresseuse (lazy-loaded)
-                            "Viewport-related dynamic elements": r"viewport|resize",  # Éléments dynamiques liés au viewport (par exemple, lors du redimensionnement de la fenêtre)
-                            "SVG graphics": r"<svg",  # Détection de graphiques SVG souvent manipulés dynamiquement via JavaScript
-                            "Web components": r"<\w+-\w+",  # Détection des composants Web personnalisés (ex : <my-component>)
-                            "Dynamic background images": r"background-image\s*:\s*url",  # Détection des images de fond souvent changées dynamiquement
+                            "script tags": r"<script.*?>.*?</script>",  # Detection of <script> tags
+                            "iframe tags": r"<iframe.*?>.*?</iframe>",  # Detection of <iframe> tags
+                            "JS frameworks (React/Vue/Angular)": r"data-reactroot|ng-app|vue",  # Detection of JS frameworks like React, Vue, or Angular
+                            "AJAX calls": r"XMLHttpRequest|fetch",  # AJAX calls via XMLHttpRequest or fetch
+                            "Media queries": r"@media",  # CSS media queries for dynamic styling
+                            "CSS transitions/animations": r"transition|animation",  # Detection of CSS transitions or animations
+                            "JavaScript timers": r"setInterval|setTimeout",  # Detection of JavaScript timers (setInterval, setTimeout)
+                            "AJAX content markers": r"data-ajax",  # Markers for AJAX calls in HTML data (e.g., data-ajax="true")
+                            "Vue.js or React markers": r"v-bind|v-for|data-v-",  # Detection of Vue.js (specific markers) or React
+                            "WebSocket indicators": r"WebSocket",  # Detection of WebSocket (indicator of real-time dynamic content)
+                            "Dynamic event listeners": r"addEventListener",  # Detection of dynamic JavaScript event listener additions
+                            "Inline CSS for dynamic styles": r"style=['\"].*?display\s*:\s*none.*?['\"]",  # Inline CSS styles for dynamic elements (e.g., display: none)
+                            "Loading indicators": r'loading|lazy|spinner|progress',  # Detection of loading elements like "lazy", "loading", "spinner", "progress"
+                            "Dynamic data attributes": r"data-\w+",  # Detection of dynamic data attributes (e.g., data-id, data-src)
+                            "Content injected by JavaScript": r"document\.write|innerHTML|outerHTML",  # Detection of content injected by JS
+                            "MutationObserver": r"MutationObserver",  # Detection of MutationObserver usage (used to detect DOM changes)
+                            "IntersectionObserver": r"IntersectionObserver",  # Detection of IntersectionObserver usage for elements appearing in view
+                            "Lazy-loaded content": r"data-src|data-lazy",  # Detection of lazy-loaded content
+                            "Viewport-related dynamic elements": r"viewport|resize",  # Dynamic elements related to the viewport (e.g., during window resizing)
+                            "SVG graphics": r"<svg",  # Detection of SVG graphics often dynamically manipulated via JavaScript
+                            "Web components": r"<\w+-\w+",  # Detection of custom web components (e.g., <my-component>)
+                            "Dynamic background images": r"background-image\s*:\s*url",  # Detection of background images often changed dynamically
                         }
 
                         for desc, pattern in dynamic_patterns.items():
