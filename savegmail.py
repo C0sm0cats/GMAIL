@@ -18,6 +18,8 @@ import requests
 import pytz
 import re
 
+logging.getLogger('tzlocal').setLevel(logging.ERROR)
+
 def check_playwright_chromium_browser():
     # Path to the Playwright cache directory
     cache_path = os.path.expanduser("~/.cache/ms-playwright")
@@ -74,7 +76,22 @@ def shutdown():
     return '', 200
 
 def run_server():
-    app.run(port=PORT, debug=False)
+    try:
+        app.run(port=PORT, debug=False)
+    except Exception as e:
+        print(f"[ERROR] Failed to start Flask server: {e}")
+        raise
+
+def wait_for_flask(port, timeout=10):
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            response = requests.get(f"http://127.0.0.1:{port}/")
+            if response.status_code == 404:  # Flask répond, même avec une 404 pour une route inexistante
+                return True
+        except requests.exceptions.ConnectionError:
+            time.sleep(0.1)
+    raise Exception("Flask server did not start within timeout")
 
 def get_real_date(date_string):
     if date_string == 'No Date':
@@ -150,11 +167,11 @@ def replace_src_with_url(html_content, attachments_files, port):
         print(f"No matching attachment found for cid: {cid_value}")
         return match.group(0)
 
-    updated_html_content = re.sub(src_pattern, replace_src, html_content)
-
+    return re.sub(src_pattern, replace_src, html_content)
+    # updated_html_content = re.sub(src_pattern, replace_src, html_content)
     # print("\nUpdated HTML content:")
     # print(updated_html_content)
-    return updated_html_content
+    # return updated_html_content
 
 
 def delete_matching_attachments(html_content, attachments_files, download_path):
@@ -212,21 +229,15 @@ def save_attachments(service, user_id, msg_id, save_dir, attachments_files):
     if attachments_files:
         filtered_attachments = [attachment for attachment in attachments_files if attachment]
         if filtered_attachments:
-            attachments_html = "<div>Attachments :</div>\n"
-            attachments_html += "<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
+            attachments_html = "<div>Attachments :</div>\n<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
+            attachments_html_pdf = "<div>Attachments :</div>\n<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
             for attachment in filtered_attachments:
                 attachment_path = os.path.join(DOWNLOAD_PATH, attachment)
                 attachment_url = f"file://{os.path.abspath(attachment_path)}"
                 attachments_html += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
-            attachments_html += "</ul>\n"
-
-            attachments_html_pdf = "<div>Attachments :</div>\n"
-            attachments_html_pdf += "<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
-            for attachment in filtered_attachments:
                 if attachment.lower().endswith('.pdf'):
-                    attachment_path = os.path.join(DOWNLOAD_PATH, attachment)
-                    attachment_url = f"file://{os.path.abspath(attachment_path)}"
                     attachments_html_pdf += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
+            attachments_html += "</ul>\n"
             attachments_html_pdf += "</ul>\n"
     else:
         attachments_html = "<div>No Attachments for this mail</div>"
@@ -285,12 +296,12 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
     if 'payload' in message and 'headers' in message['payload']:
         for header in message['payload']['headers']:
             if header['name'] == 'Reply-To':
-                reply  = header['value']
-                if '<' in reply and '>' in reply :
+                reply = header['value']
+                if '<' in reply and '>' in reply:
                     reply_name, reply_email = reply.split('<', 1)
                     reply_email = reply_email.rstrip('>')
                     reply_email = f" {reply_email}"
-                    reply  = f"{reply_name.strip()} {reply_email.strip()} "
+                    reply = f"{reply_name.strip()} {reply_email.strip()} "
                 break
 
     to = ""
@@ -324,6 +335,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
 
     parts = message.get('payload', {}).get('parts', [])
     attachments_files = []
+    server_flask_started = False
 
     def extract_parts(parts):
         valid_mime_types = ['text/html', 'text/plain', 'multipart/alternative', 'multipart/related', 'multipart/mixed']
@@ -371,7 +383,6 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
 
                 # Handle inline images encoded directly in the body
                 if part.get('body') and part['body'].get('data'):
-                    import base64
                     image_data = part['body']['data'] # Get base64-encoded image data
                     file_path = os.path.join(save_dir, filename) # Define file path
                     with open(file_path, 'wb') as f:
@@ -420,8 +431,14 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 print(f"\033[36m[INFO] Starting Flask server to handle CID attachment(s) file(s) for PDF processing.\033[0m")
                 server_thread = Thread(target=run_server, daemon=True)
                 server_thread.start()
-                time.sleep(1)
-                html_content = replace_src_with_url(html_content, attachments_files, PORT)
+                # time.sleep(1)
+                try:
+                    wait_for_flask(PORT)
+                    server_flask_started = True
+                    html_content = replace_src_with_url(html_content, attachments_files, PORT)
+                except Exception as e:
+                    print(f"[ERROR] Could not start Flask server: {e}")
+                    server_flask_started = False
         else:
             html_content = "The message contains neither plain text nor HTML."
 
@@ -472,11 +489,16 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
 
                     browser = p.chromium.launch(headless=headless_mode)
                     page = browser.new_page()
-                    page.set_content(html_content, timeout=30000)  # Set content to the page
+                    page.set_content(html_content, timeout=60000)  # Set content to the page
 
                     # browser = p.chromium.launch(headless=False) # `headless=False` to show the interface
                     # page = browser.new_page()
                     # page.set_content(html_content, timeout=30000)
+
+                    if server_flask_started:
+                        images = page.query_selector_all('img[src^="http://127.0.0.1"]')
+                        for img in images:
+                            page.wait_for_function('img => img.complete && img.naturalHeight !== 0', arg=img, timeout=10000)
 
                     header_template = """
                         <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
@@ -489,20 +511,31 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                         </div>
                     """.format(fro=fro, reply=reply, to=to, cc=cc, date=date, subject=subject)
                     contains_pdf = any(file.lower().endswith('.pdf') for file in attachments_files)
-                    if attachments_files and re.search(r'http://127.0.0.1:\d+/.+?\.jpg|\.png|\.gif|\.jpeg', html_content):
-                        if contains_pdf:
-                            footer_template = """
-                                <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
-                                    {attachments_html_pdf}
-                                    <span class="pageNumber"></span> / <span class="totalPages"></span>
-                                </div>
-                            """.format(attachments_html_pdf=attachments_html_pdf)
+                    if attachments_files:
+                        url_pattern = re.compile(r'http://127.0.0.1:\d+/(.+?\.(jpg|png|gif|jpeg))')
+                        urls_in_html = re.findall(url_pattern, html_content)
+                        has_matching_files = any(url[0] in attachments_files for url in urls_in_html)
+                        if server_flask_started and has_matching_files:
+                            if contains_pdf:
+                                footer_template = """
+                                    <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                                        {attachments_html_pdf}
+                                        <span class="pageNumber"></span> / <span class="totalPages"></span>
+                                    </div>
+                                """.format(attachments_html_pdf=attachments_html_pdf)
+                            else:
+                                footer_template = """
+                                    <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                                        <span class="pageNumber"></span> / <span class="totalPages"></span>
+                                    </div>
+                                """
                         else:
                             footer_template = """
                                 <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                                    {attachments_html}
                                     <span class="pageNumber"></span> / <span class="totalPages"></span>
                                 </div>
-                            """
+                            """.format(attachments_html=attachments_html)
                     else:
                         footer_template = """
                             <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
@@ -517,40 +550,38 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                         display_header_footer=True,
                         header_template=header_template,
                         footer_template=footer_template,
-                        margin={
-                            "top": "150px",
-                            "bottom": "150px",
-                            "left": "0",
-                            "right": "0",
-                        },
+                        margin={"top": "150px", "bottom": "150px", "left": "0", "right": "0"},
                         path=final_pdf_path
                     )
 
                     browser.close()
-                    # print(f"The PDF has been saved in {final_pdf_path}")
-                    if attachments_files and re.search(r'http://127.0.0.1:\d+/.+?\.jpg|\.png|\.gif|\.jpeg', html_content):
-                        delete_matching_attachments(html_content, attachments_files, DOWNLOAD_PATH)
                 except Exception as e:
                     print(f"Playwright error during PDF generation: {e}")
-
-            print(f"\033[36m[INFO] PDF document saved for message ID {msg_id} at {DOWNLOAD_PATH}\033[0m")
-            now = datetime.now()
-            timestamp = now.strftime("%y%m%d_%H%M%S")
-            milliseconds = now.microsecond // 1000
-            new_pdf_path = os.path.join(save_dir, f"{timestamp}{milliseconds}_{file_safe_subject}.pdf")
-            os.rename(final_pdf_path, new_pdf_path)
-            print(f"\033[34m  - {os.path.basename(new_pdf_path)}\033[0m")
-            print(f"\033[92m[INFO] Finished saving email and attachment(s) for message ID {msg_id}\033[0m\n")
+                    raise
+        except Exception as e:
+            print(f"[ERROR] Unexpected error during PDF generation for message {msg_id}: {e}")
+            raise
         finally:
-            try:
-                if attachments_files and re.search(r'http://127.0.0.1:\d+/.+?\.jpg|\.png|\.gif|\.jpeg', html_content):
+            if server_flask_started:
+                if 'html_content' in locals() and re.search(r'http://127.0.0.1:\d+/.+?\.jpg|\.png|\.gif|\.jpeg', html_content):
+                    delete_matching_attachments(html_content, attachments_files, DOWNLOAD_PATH)
+                try:
                     response = requests.post(f"http://127.0.0.1:{PORT}/shutdown")
                     if response.status_code == 200:
                         print("[INFO] Server Flask has been successfully stopped (HTTP 200).")
                     else:
                         print("[ERROR] Server Flask shutdown failed with status code:", response.status_code)
-            except requests.exceptions.RequestException as e:
-                print(f"[ERROR] Error during Flask shutdown request: {e}")
+                except requests.exceptions.RequestException as e:
+                    print(f"[ERROR] Error during Flask shutdown request: {e}")
+
+        print(f"\033[36m[INFO] PDF document saved for message ID {msg_id} at {DOWNLOAD_PATH}\033[0m")
+        now = datetime.now()
+        timestamp = now.strftime("%y%m%d_%H%M%S")
+        milliseconds = now.microsecond // 1000
+        new_pdf_path = os.path.join(save_dir, f"{timestamp}{milliseconds}_{file_safe_subject}.pdf")
+        os.rename(final_pdf_path, new_pdf_path)
+        print(f"\033[34m  - {os.path.basename(new_pdf_path)}\033[0m")
+        print(f"\033[92m[INFO] Finished saving email and attachment(s) for message ID {msg_id}\033[0m\n")
     else:
         print(f"No HTML content found for message {msg_id}.")
 
