@@ -29,11 +29,22 @@ def check_playwright_chromium_browser():
     chromium_headless_installed = False
 
     # Loop through the cache and look for chromium directories
-    for folder in os.listdir(cache_path):
-        if folder.startswith("chromium-"):
-            chromium_installed = True
-        elif folder.startswith("chromium_headless_shell-"):
-            chromium_headless_installed = True
+    try:
+        folders = os.listdir(cache_path)
+        if not folders:
+            print("\033[92m[INFO] Playwright cache does not exist. Install...\033[0m")
+            subprocess.run(["playwright", "install", "chromium"], check=True)
+            return
+        for folder in folders:
+            if folder.startswith("chromium-"):
+                chromium_installed = True
+            elif folder.startswith("chromium_headless_shell-"):
+                chromium_headless_installed = True
+    except FileNotFoundError:
+        print("\033[92m[INFO] Playwright cache does not exist. Installing Chromium (Playwright) and Headless Chromium (Playwright)...\033[0m")
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+        print("\033[92m[INFO] Chromium (Playwright) and Headless Chromium (Playwright) installed successfully.\033[0m")
+        return
 
     # If either Chromium or Headless Chromium is missing, install the missing one
     if not chromium_installed and not chromium_headless_installed:
