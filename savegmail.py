@@ -429,11 +429,21 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         # print(f"data found")
         if mime_type == 'text/plain':
             # print(f"text/plain detected")
-            html_content = decode_base64(data).decode('utf-8')
-            html_content = re.sub(r'(>>?|>)', r'<br>', html_content)
-            html_content = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'<br><br><hr>\1', html_content)
+            plain_text = decode_base64(data).decode('utf-8')         
+            plain_text = re.sub(r'(>>?|>)', r'\1', plain_text)            
+            plain_text = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'\n\n\1', plain_text)            
             date_regex = r'((Le|The) \d{1,2} (janv\.|févr\.|mars\.|avr\.|mai\.|juin\.|juil\.|août\.|sept\.|oct\.|nov\.|déc\.|Jan\.|Feb\.|Mar\.|Apr\.|May\.|Jun\.|Jul\.|Aug\.|Sep\.|Oct\.|Nov\.|Dec\.) \d{4}( (à|at) \d{1,2}:\d{2})?)'
-            html_content = re.sub(date_regex, r'<hr>\1', html_content)
+            plain_text = re.sub(date_regex, r'\n\n\1', plain_text)            
+            html_text = plain_text.replace('\n', '<br>')            
+            html_content = f"""
+            <html>
+            <body>
+                <div style="font-family: Arial, sans-serif; white-space: nowrap;">
+                    {html_text}
+                </div>
+            </body>
+            </html>
+            """
         elif mime_type == 'text/html':
             # print(f"text/html detected")
             html_content = decode_base64(data).decode('utf-8')
