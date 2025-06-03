@@ -61,6 +61,16 @@ def check_playwright_chromium_browser():
         print("\033[92m[INFO] Headless Chromium (Playwright) installed successfully.\033[0m")
     else:
         print("\033[92m[INFO] Both Chromium (Playwright) and Headless Chromium (Playwright) are already installed.\033[0m")
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                browser.close()
+            print("\033[92m[INFO] Chromium is functional.\033[0m")
+        except Exception as e:
+            print(f"\033[91m[ERROR] Chromium is not functional: {e}\033[0m")
+            print("\033[92m[INFO] Reinstalling Chromium (Playwright)...\033[0m")
+            subprocess.run(["playwright", "install", "chromium"], check=True)
+            print("\033[92m[INFO] Chromium (Playwright) and Headless Chromium (Playwright) reinstalled successfully.\033[0m")
 
 SCOPES = ["https://mail.google.com/"]
 # SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]
