@@ -173,57 +173,205 @@ def decode_base64(data):
     return base64.urlsafe_b64decode(data)
 
 
+# Global dictionary to track CID -> filename mappings
+cid_to_attachment = {}
+
 def replace_src_with_url(html_content, attachments_files, port):
-    src_pattern = re.compile(r'src=["\']cid:([^"\']+)["\']')
+    # Replace src in HTML while ignoring case
+    src_pattern = re.compile(r'src=["\']cid:([^"\']+)["\']', re.IGNORECASE)
+    
+    # Track used attachments and their mappings
+    used_attachments = set()
+    global cid_to_attachment
+    
+    # Filter to keep only images (exclude .wmz)
+    image_extensions = ('.png', '.jpg', '.jpeg', '.gif')
+    image_attachments = [a for a in attachments_files 
+                        if a.lower().endswith(image_extensions)]
+    
+    # Sort images by name for consistent ordering
+    image_attachments.sort()
+    
+    def should_process_cid(cid):
+        """Determine if we should process this CID"""
+        cid_lower = cid.lower()
+        if '.wmz' in cid_lower:
+            return False
+        # Accept all CID potentially linked to an image
+        return True
+    
+    def find_best_image_match(cid_value, used_images, available_images):
+        """Find the best available image for a given CID dynamically"""
+        cid_lower = cid_value.lower()
+        # Extract the extension if it's present in the CID
+        ext_match = re.search(r'\.(png|jpg|jpeg|gif)', cid_lower)
+        extension = ext_match.group(1) if ext_match else None
+        
+        # Sort available images by relevance (e.g. those with a matching extension)
+        potential_matches = []
+        for img in available_images:
+            if img not in used_images:
+                img_lower = img.lower()
+                if extension and img_lower.endswith(f'.{extension}'):
+                    potential_matches.append((1, img))  # Priority 1: same extension
+                elif any(ext in img_lower for ext in ['.png', '.jpg', '.jpeg', '.gif']):
+                    potential_matches.append((0, img))  # Priority 0: other valid extension
+        
+        # Sort by priority and take the first one
+        if potential_matches:
+            potential_matches.sort(key=lambda x: x[0], reverse=True)
+            return potential_matches[0][1]
+        return None
+    
+    # def replace_src(match):
+    #     cid_value = match.group(1)
+    #     print(f"[DEBUG] Processing CID: {cid_value}")
+    #     if not should_process_cid(cid_value):
+    #         print(f"[DEBUG] Ignoring CID: {cid_value}")
+    #         return match.group(0)
+        
+    #     if cid_value in cid_to_attachment:
+    #         attachment = cid_to_attachment[cid_value]
+    #         print(f"[DEBUG] Using cached mapping: {cid_value} -> {attachment}")
+    #         return f'src="http://127.0.0.1:{port}/{attachment}"'
+        
+    #     print(f"[DEBUG] Available images: {image_attachments}")
+    #     if image_attachments:
+    #         attachment = find_best_image_match(cid_value, used_attachments, image_attachments)
+    #         if attachment:
+    #             used_attachments.add(attachment)
+    #             cid_to_attachment[cid_value] = attachment
+    #             print(f"[DEBUG] Mapped {cid_value} to {attachment}")
+    #             return f'src="http://127.0.0.1:{port}/{attachment}"'
+    #         else:
+    #             attachment = image_attachments[0]  # Force the first available file
+    #             used_attachments.add(attachment)
+    #             cid_to_attachment[cid_value] = attachment
+    #             print(f"[DEBUG] Forced mapping {cid_value} to {attachment}")
+    #             return f'src="http://127.0.0.1:{port}/{attachment}"'
+    #     print(f"[WARNING] No match found for CID: {cid_value}")
+    #     return match.group(0)
+    
 
     def replace_src(match):
-        cid_value = match.group(1).split('@')[0]
-        # print(f"Found cid: {cid_value}")
-        for attachment in attachments_files:
-            if cid_value in attachment:
-                attachment_url = f"http://127.0.0.1:{port}/{attachment}"
-                # print(f"Generated URL: {attachment_url}")
-                return f'src="{attachment_url}"'
+        cid_value = match.group(1)
+        print(f"[DEBUG] Processing CID: {cid_value}")
+        if not should_process_cid(cid_value):
+            print(f"[DEBUG] Ignoring CID: {cid_value}")
+            return match.group(0)
+        
+        if cid_value in cid_to_attachment:
+            attachment = cid_to_attachment[cid_value]
+            print(f"[DEBUG] Using cached mapping: {cid_value} -> {attachment}")
+            return f'src="http://127.0.0.1:{port}/{attachment}"'
+        
+        print(f"[DEBUG] Available images: {image_attachments}")
+        if image_attachments:
+            attachment = find_best_image_match(cid_value, used_attachments, image_attachments)
+            if attachment:
+                used_attachments.add(attachment)
+                cid_to_attachment[cid_value] = attachment
+                print(f"[DEBUG] Mapped {cid_value} to {attachment}")
+                return f'src="http://127.0.0.1:{port}/{attachment}"'
+        print(f"[WARNING] No available image for CID: {cid_value}, leaving cid: intact")
+        return match.group(0)  # Leave the cid: intact if no image is available
 
-        print(f"No matching attachment found for cid: {cid_value}")
-        return match.group(0)
+    result = re.sub(src_pattern, replace_src, html_content)
+    
+    # Clean up only unused temporary image files (those that start with 'image' and end with .png/.jpg/etc.)
+    for attachment in image_attachments:
+        if (attachment not in used_attachments and 
+            re.match(r'^\d+_\w+\.(png|jpg|jpeg|gif)$', attachment, re.IGNORECASE)):
+            try:
+                os.remove(os.path.join(DOWNLOAD_PATH, attachment))
+                print(f"Cleaned up temporary image: {attachment}")
+            except Exception as e:
+                print(f"Error cleaning up {attachment}: {e}")
+    
+    return result
 
-    return re.sub(src_pattern, replace_src, html_content)
-    # updated_html_content = re.sub(src_pattern, replace_src, html_content)
-    # print("\nUpdated HTML content:")
-    # print(updated_html_content)
-    # return updated_html_content
 
-
-def delete_matching_attachments(html_content, attachments_files, download_path):
-    url_pattern = re.compile(r'http://127.0.0.1:\d+/(.+?\.(jpg|png|gif|jpeg))')
-    urls_in_html = re.findall(url_pattern, html_content)
-
-    print(f"\033[36m[INFO] Cleaning up CID attachment(s) file(s):\033[0m")
-    for attachment in attachments_files:
-        for url in urls_in_html:
-            filename = url[0]
-            if filename == attachment:
-                attachment_path = os.path.join(download_path, attachment)
-                if os.path.exists(attachment_path):
-                    os.remove(attachment_path)
-                    print(f"\033[34m  - {attachment}\033[0m")
+def delete_matching_attachments(html_content, attachments_files, download_path, cid_mapping=None):
+    """
+    Clean up temporary files used for HTML rendering.
+    
+    Args:
+        html_content (str): The HTML content of the email
+        attachments_files (list): List of attached files
+        download_path (str): Path where files are stored
+        cid_mapping (dict, optional): Dictionnaire de mapping CID -> nom de fichier
+    """
+    print("\n[INFO] Cleaning up temporary files:")
+    cleaned_files = set()
+    
+    # Clean up files from the CID mapping first
+    if cid_mapping:
+        for cid, filename in cid_mapping.items():
+            if filename in cleaned_files:
+                continue
+                
+            # Clean up any image file that was referenced via CID
+            if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                filepath = os.path.join(download_path, filename)
+                try:
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                        print(f"  - {filename} (from CID mapping)")
+                        cleaned_files.add(filename)
+                except Exception as e:
+                    print(f"  - Error removing {filename}: {e}")
+    
+    # Then, clean up global temporary files
+    global temp_attachment_files
+    temp_files = globals().get('temp_attachment_files', [])
+    
+    for filename in temp_files:
+        if filename in cleaned_files:
+            continue
+            
+        # Clean up any image file that was marked as temporary
+        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+            filepath = os.path.join(download_path, filename)
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    print(f"  - {filename} (temporary file)")
+                    cleaned_files.add(filename)
+            except Exception as e:
+                print(f"  - Error removing {filename}: {e}")
+    
+    if not cleaned_files:
+        print("  No temporary files to clean up")
 
 
 def save_attachments(service, user_id, msg_id, save_dir, attachments_files):
     message = service.users().messages().get(userId=user_id, id=msg_id).execute()
     parts = message['payload'].get('parts', [])
     attachments_html = ""
-    attachments_html_pdf = ""
+    real_attachments = []
+    temp_files = []
+
     for part in parts:
-        if part.get('filename'):
-            filename = part['filename']
+        if part.get('filename') or (part.get('body') and part['body'].get('attachmentId')):
+            filename = part.get('filename', '')
+            if not filename:
+                # Generate a name based on Content-ID for inline images
+                headers_dict = {header['name'].lower(): header['value'] for header in part.get('headers', [])}
+                content_id = headers_dict.get('content-id', '').strip('<>')
+                if content_id and part.get('mimeType', '').startswith('image/'):
+                    ext = part['mimeType'].split('/')[1]
+                    filename = f"inline_{content_id}.{ext}"
+            
             if 'data' in part['body']:
                 data = part['body']['data']
             else:
-                att_id = part['body']['attachmentId']
-                att = service.users().messages().attachments().get(userId=user_id, messageId=msg_id, id=att_id).execute()
-                data = att['data']
+                att_id = part['body'].get('attachmentId')
+                if att_id:
+                    att = service.users().messages().attachments().get(userId=user_id, messageId=msg_id, id=att_id).execute()
+                    data = att['data']
+                else:
+                    continue
+            
             file_data = base64.urlsafe_b64decode(data.encode('UTF-8'))
             path = os.path.join(save_dir, filename)
             with open(path, 'wb') as f:
@@ -232,12 +380,26 @@ def save_attachments(service, user_id, msg_id, save_dir, attachments_files):
             now = datetime.now()
             timestamp = now.strftime("%y%m%d_%H%M%S")
             milliseconds = now.microsecond // 1000
-            new_filename = f"{timestamp}{milliseconds}_{filename}"
+            name, ext = os.path.splitext(filename)
+            clean_name = name.replace('.', ' ').replace("'", "")
+            new_filename = f"{timestamp}{milliseconds}_{clean_name}{ext}"
             new_path = os.path.join(save_dir, new_filename)
             os.rename(path, new_path)
-            attachments_files.append(new_filename)
 
-    if len(attachments_files) == 1:
+            if new_filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                temp_files.append(new_filename)
+            elif new_filename.lower().endswith('.pdf'):
+                real_attachments.append(new_filename)
+            else:
+                real_attachments.append(new_filename)
+        
+    attachments_files.extend(real_attachments)
+    global temp_attachment_files
+    temp_attachment_files = temp_files
+
+    if len(attachments_files) == 0 and temp_files:
+        print(f"\033[36m[INFO] No permanent attachments, but {len(temp_files)} temporary file(s) saved for message ID {msg_id} at {DOWNLOAD_PATH}: {temp_files}\033[0m")
+    elif len(attachments_files) == 1:
         print(f"\033[36m[INFO] 1 Attachment saved for message ID {msg_id} at {DOWNLOAD_PATH}\033[0m")
         print(f"\033[34m  - {attachments_files[0]}\033[0m")
     elif len(attachments_files) > 1:
@@ -557,9 +719,10 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                             else:
                                 footer_template = """
                                     <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                                        {attachments_html}
                                         <span class="pageNumber"></span> / <span class="totalPages"></span>
                                     </div>
-                                """
+                                """.format(attachments_html=attachments_html)
                         else:
                             footer_template = """
                                 <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
@@ -595,7 +758,8 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         finally:
             if server_flask_started:
                 if 'html_content' in locals() and re.search(r'http://127.0.0.1:\d+/.+?\.jpg|\.png|\.gif|\.jpeg', html_content):
-                    delete_matching_attachments(html_content, attachments_files, DOWNLOAD_PATH)
+                    # Use the global CID mapping for cleanup
+                    delete_matching_attachments(html_content, attachments_files, DOWNLOAD_PATH, cid_to_attachment)
                 try:
                     response = requests.post(f"http://127.0.0.1:{PORT}/shutdown")
                     if response.status_code == 200:
@@ -617,7 +781,39 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         print(f"No HTML content found for message {msg_id}.")
 
 
+def empty_trash(service):
+    """
+    Permanently deletes all messages from the trash.
+    """
+    try:
+        # List messages in trash
+        results = service.users().messages().list(userId='me', labelIds=['TRASH']).execute()
+        messages = results.get('messages', [])
+        
+        if not messages:
+            print("The trash is already empty.")
+            return
+
+        # Permanently delete messages
+        for msg in messages:
+            service.users().messages().delete(userId='me', id=msg['id']).execute()
+
+        print(f"{len(messages)} message(s) permanently deleted from trash.")
+
+    except Exception as e:
+        print(f"Error while emptying trash: {e}")
+
+
 def main():
+    import sys
+    
+    # Check if the --trash option is passed
+    if '--trash' in sys.argv:
+        creds = authenticate()
+        service = build("gmail", "v1", credentials=creds)
+        empty_trash(service)
+        return
+        
     os.system('clear')
     creds = authenticate()
     try:
