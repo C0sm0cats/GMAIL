@@ -252,7 +252,6 @@ def replace_src_with_url(html_content, attachments_files, port):
     #     print(f"[WARNING] No match found for CID: {cid_value}")
     #     return match.group(0)
     
-
     def replace_src(match):
         cid_value = match.group(1)
         print(f"[DEBUG] Processing CID: {cid_value}")
