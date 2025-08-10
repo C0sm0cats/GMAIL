@@ -176,6 +176,35 @@ def decode_base64(data):
 # Global dictionary to track CID -> filename mappings
 cid_to_attachment = {}
 
+def find_best_image_match(cid_value, used_images, available_images):
+    """Find the best available image for a given CID dynamically"""
+    cid_lower = cid_value.lower()
+    # Extract the extension if it's present in the CID
+    ext_match = re.search(r'\.(png|jpg|jpeg|gif)', cid_lower)
+    extension = ext_match.group(1) if ext_match else None
+    
+    potential_matches = []
+    for img in available_images:
+        if img not in used_images:
+            img_lower = img.lower()
+            priority = 0
+            if cid_lower in img_lower:  # Highest priority: CID is part of the filename
+                priority = 2
+            elif extension and img_lower.endswith(f'.{extension}'):
+                priority = 1  # Medium priority: same extension
+            elif any(ext in img_lower for ext in ['.png', '.jpg', '.jpeg', '.gif']):
+                priority = 0  # Lowest priority: any valid image extension
+            potential_matches.append((priority, img))
+    
+    # Sort by priority (descending) and take the first one
+    if potential_matches:
+        potential_matches.sort(key=lambda x: x[0], reverse=True)
+        selected_image = potential_matches[0][1]
+        print(f"[DEBUG] Selected image for CID {cid_value}: {selected_image} (priority: {potential_matches[0][0]})")
+        return selected_image
+    print(f"[WARNING] No match found for CID: {cid_value}")
+    return None
+
 def replace_src_with_url(html_content, attachments_files, port):
     # Replace src in HTML while ignoring case
     src_pattern = re.compile(r'src=["\']cid:([^"\']+)["\']', re.IGNORECASE)
@@ -191,7 +220,7 @@ def replace_src_with_url(html_content, attachments_files, port):
     
     # Sort images by name for consistent ordering
     image_attachments.sort()
-    
+
     def should_process_cid(cid):
         """Determine if we should process this CID"""
         cid_lower = cid.lower()
@@ -199,59 +228,7 @@ def replace_src_with_url(html_content, attachments_files, port):
             return False
         # Accept all CID potentially linked to an image
         return True
-    
-    def find_best_image_match(cid_value, used_images, available_images):
-        """Find the best available image for a given CID dynamically"""
-        cid_lower = cid_value.lower()
-        # Extract the extension if it's present in the CID
-        ext_match = re.search(r'\.(png|jpg|jpeg|gif)', cid_lower)
-        extension = ext_match.group(1) if ext_match else None
-        
-        # Sort available images by relevance (e.g. those with a matching extension)
-        potential_matches = []
-        for img in available_images:
-            if img not in used_images:
-                img_lower = img.lower()
-                if extension and img_lower.endswith(f'.{extension}'):
-                    potential_matches.append((1, img))  # Priority 1: same extension
-                elif any(ext in img_lower for ext in ['.png', '.jpg', '.jpeg', '.gif']):
-                    potential_matches.append((0, img))  # Priority 0: other valid extension
-        
-        # Sort by priority and take the first one
-        if potential_matches:
-            potential_matches.sort(key=lambda x: x[0], reverse=True)
-            return potential_matches[0][1]
-        return None
-    
-    # def replace_src(match):
-    #     cid_value = match.group(1)
-    #     print(f"[DEBUG] Processing CID: {cid_value}")
-    #     if not should_process_cid(cid_value):
-    #         print(f"[DEBUG] Ignoring CID: {cid_value}")
-    #         return match.group(0)
-        
-    #     if cid_value in cid_to_attachment:
-    #         attachment = cid_to_attachment[cid_value]
-    #         print(f"[DEBUG] Using cached mapping: {cid_value} -> {attachment}")
-    #         return f'src="http://127.0.0.1:{port}/{attachment}"'
-        
-    #     print(f"[DEBUG] Available images: {image_attachments}")
-    #     if image_attachments:
-    #         attachment = find_best_image_match(cid_value, used_attachments, image_attachments)
-    #         if attachment:
-    #             used_attachments.add(attachment)
-    #             cid_to_attachment[cid_value] = attachment
-    #             print(f"[DEBUG] Mapped {cid_value} to {attachment}")
-    #             return f'src="http://127.0.0.1:{port}/{attachment}"'
-    #         else:
-    #             attachment = image_attachments[0]  # Force the first available file
-    #             used_attachments.add(attachment)
-    #             cid_to_attachment[cid_value] = attachment
-    #             print(f"[DEBUG] Forced mapping {cid_value} to {attachment}")
-    #             return f'src="http://127.0.0.1:{port}/{attachment}"'
-    #     print(f"[WARNING] No match found for CID: {cid_value}")
-    #     return match.group(0)
-    
+
     def replace_src(match):
         cid_value = match.group(1)
         print(f"[DEBUG] Processing CID: {cid_value}")
@@ -277,7 +254,7 @@ def replace_src_with_url(html_content, attachments_files, port):
 
     result = re.sub(src_pattern, replace_src, html_content)
     
-    # Clean up only unused temporary image files (those that start with 'image' and end with .png/.jpg/etc.)
+    # Clean up only unused temporary image files
     for attachment in image_attachments:
         if (attachment not in used_attachments and 
             re.match(r'^\d+_\w+\.(png|jpg|jpeg|gif)$', attachment, re.IGNORECASE)):
@@ -359,7 +336,10 @@ def save_attachments(service, user_id, msg_id, save_dir, attachments_files):
                 content_id = headers_dict.get('content-id', '').strip('<>')
                 if content_id and part.get('mimeType', '').startswith('image/'):
                     ext = part['mimeType'].split('/')[1]
-                    filename = f"inline_{content_id}.{ext}"
+                    if content_id.lower().endswith(f".{ext}"):
+                        filename = f"inline_image_{content_id}"
+                    else:
+                        filename = f"inline_image_{content_id}.{ext}"
             
             if 'data' in part['body']:
                 data = part['body']['data']
