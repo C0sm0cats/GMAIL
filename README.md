@@ -112,7 +112,7 @@ This project is licensed under the MIT License. See the `LICENSE` file for detai
 
 ### Activity
 
-![Alt](https://repobeats.axiom.co/api/embed/b190ab0f74186972651fce8c254740af2387dc97 "Repobeats analytics image")
+![Alt](https://repobeats.axiom.co/api/embed/b190ab0f74186972651fce8c254740af2387dc97.svg "Repobeats analytics image")
 
 ---
 
