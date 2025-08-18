@@ -1,9 +1,6 @@
 import os
 import base64
 from playwright.sync_api import sync_playwright
-from flask import Flask, send_from_directory, request
-from threading import Thread
-import time
 from datetime import datetime
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -14,9 +11,11 @@ from tzlocal import get_localzone
 from email.utils import parsedate_to_datetime
 import subprocess
 import logging
-import requests
 import pytz
 import re
+import io
+from email.parser import BytesParser
+from email.policy import default as policy_default
 
 logging.getLogger('tzlocal').setLevel(logging.ERROR)
 
@@ -76,44 +75,6 @@ SCOPES = ["https://mail.google.com/"]
 # SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]
 DOWNLOAD_PATH = '~/Downloads/'
 
-PORT = 5000
-app = Flask(__name__)
-log = logging.getLogger('werkzeug')
-log.disabled = True
-
-@app.route('/<path:filename>')
-def serve_static(filename):
-    return send_from_directory(DOWNLOAD_PATH, filename)
-
-def shutdown_server():
-    print("[INFO] Server Flask shutting down...")
-    func = request.environ.get('werkzeug.server.shutdown')
-    if func:
-        func()
-
-@app.route('/shutdown', methods=['POST'])
-def shutdown():
-    shutdown_server()
-    return '', 200
-
-def run_server():
-    try:
-        app.run(port=PORT, debug=False)
-    except Exception as e:
-        print(f"[ERROR] Failed to start Flask server: {e}")
-        raise
-
-def wait_for_flask(port, timeout=10):
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(f"http://127.0.0.1:{port}/")
-            if response.status_code == 404:  # Flask répond, même avec une 404 pour une route inexistante
-                return True
-        except requests.exceptions.ConnectionError:
-            time.sleep(0.1)
-    raise Exception("Flask server did not start within timeout")
-
 def get_real_date(date_string):
     if date_string == 'No Date':
         return date_string
@@ -165,600 +126,229 @@ def authenticate():
             token.write(creds.to_json())
     return creds
 
-
-def decode_base64(data):
-    missing_padding = 4 - len(data) % 4
-    if missing_padding:
-        data += '=' * missing_padding
-    return base64.urlsafe_b64decode(data)
-
-
-# Global dictionary to track CID -> filename mappings
-cid_to_attachment = {}
-
-def find_best_image_match(cid_value, used_images, available_images):
-    """Find the best available image for a given CID dynamically"""
-    cid_lower = cid_value.lower()
-    # Extract the extension if it's present in the CID
-    ext_match = re.search(r'\.(png|jpg|jpeg|gif)', cid_lower)
-    extension = ext_match.group(1) if ext_match else None
-    
-    potential_matches = []
-    for img in available_images:
-        if img not in used_images:
-            img_lower = img.lower()
-            priority = 0
-            if cid_lower in img_lower:  # Highest priority: CID is part of the filename
-                priority = 2
-            elif extension and img_lower.endswith(f'.{extension}'):
-                priority = 1  # Medium priority: same extension
-            elif any(ext in img_lower for ext in ['.png', '.jpg', '.jpeg', '.gif']):
-                priority = 0  # Lowest priority: any valid image extension
-            potential_matches.append((priority, img))
-    
-    # Sort by priority (descending) and take the first one
-    if potential_matches:
-        potential_matches.sort(key=lambda x: x[0], reverse=True)
-        selected_image = potential_matches[0][1]
-        print(f"[DEBUG] Selected image for CID {cid_value}: {selected_image} (priority: {potential_matches[0][0]})")
-        return selected_image
-    print(f"[WARNING] No match found for CID: {cid_value}")
-    return None
-
-def replace_src_with_url(html_content, attachments_files, port):
-    # Replace src in HTML while ignoring case
-    src_pattern = re.compile(r'src=["\']cid:([^"\']+)["\']', re.IGNORECASE)
-    
-    # Track used attachments and their mappings
-    used_attachments = set()
-    global cid_to_attachment
-    
-    # Filter to keep only images (exclude .wmz)
-    image_extensions = ('.png', '.jpg', '.jpeg', '.gif')
-    image_attachments = [a for a in attachments_files 
-                        if a.lower().endswith(image_extensions)]
-    
-    # Sort images by name for consistent ordering
-    image_attachments.sort()
-
-    def should_process_cid(cid):
-        """Determine if we should process this CID"""
-        cid_lower = cid.lower()
-        if '.wmz' in cid_lower:
-            return False
-        # Accept all CID potentially linked to an image
-        return True
-
-    def replace_src(match):
-        cid_value = match.group(1)
-        print(f"[DEBUG] Processing CID: {cid_value}")
-        if not should_process_cid(cid_value):
-            print(f"[DEBUG] Ignoring CID: {cid_value}")
-            return match.group(0)
-        
-        if cid_value in cid_to_attachment:
-            attachment = cid_to_attachment[cid_value]
-            print(f"[DEBUG] Using cached mapping: {cid_value} -> {attachment}")
-            return f'src="http://127.0.0.1:{port}/{attachment}"'
-        
-        print(f"[DEBUG] Available images: {image_attachments}")
-        if image_attachments:
-            attachment = find_best_image_match(cid_value, used_attachments, image_attachments)
-            if attachment:
-                used_attachments.add(attachment)
-                cid_to_attachment[cid_value] = attachment
-                print(f"[DEBUG] Mapped {cid_value} to {attachment}")
-                return f'src="http://127.0.0.1:{port}/{attachment}"'
-        print(f"[WARNING] No available image for CID: {cid_value}, leaving cid: intact")
-        return match.group(0)  # Leave the cid: intact if no image is available
-
-    result = re.sub(src_pattern, replace_src, html_content)
-    
-    # Clean up only unused temporary image files
-    for attachment in image_attachments:
-        if (attachment not in used_attachments and 
-            re.match(r'^\d+_\w+\.(png|jpg|jpeg|gif)$', attachment, re.IGNORECASE)):
-            try:
-                os.remove(os.path.join(DOWNLOAD_PATH, attachment))
-                print(f"Cleaned up temporary image: {attachment}")
-            except Exception as e:
-                print(f"Error cleaning up {attachment}: {e}")
-    
-    return result
-
-
-def delete_matching_attachments(html_content, attachments_files, download_path, cid_mapping=None):
-    """
-    Clean up temporary files used for HTML rendering.
-    
-    Args:
-        html_content (str): The HTML content of the email
-        attachments_files (list): List of attached files
-        download_path (str): Path where files are stored
-        cid_mapping (dict, optional): Dictionnaire de mapping CID -> nom de fichier
-    """
-    print("\n[INFO] Cleaning up temporary files:")
-    cleaned_files = set()
-    
-    # Clean up files from the CID mapping first
-    if cid_mapping:
-        for cid, filename in cid_mapping.items():
-            if filename in cleaned_files:
-                continue
-                
-            # Clean up any image file that was referenced via CID
-            if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
-                filepath = os.path.join(download_path, filename)
-                try:
-                    if os.path.exists(filepath):
-                        os.remove(filepath)
-                        print(f"  - {filename} (from CID mapping)")
-                        cleaned_files.add(filename)
-                except Exception as e:
-                    print(f"  - Error removing {filename}: {e}")
-    
-    # Then, clean up global temporary files
-    global temp_attachment_files
-    temp_files = globals().get('temp_attachment_files', [])
-    
-    for filename in temp_files:
-        if filename in cleaned_files:
-            continue
-            
-        # Clean up any image file that was marked as temporary
-        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
-            filepath = os.path.join(download_path, filename)
-            try:
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-                    print(f"  - {filename} (temporary file)")
-                    cleaned_files.add(filename)
-            except Exception as e:
-                print(f"  - Error removing {filename}: {e}")
-    
-    if not cleaned_files:
-        print("  No temporary files to clean up")
-
-
-def save_attachments(service, user_id, msg_id, save_dir, attachments_files):
-    message = service.users().messages().get(userId=user_id, id=msg_id).execute()
-    parts = message['payload'].get('parts', [])
-    attachments_html = ""
-    real_attachments = []
-    temp_files = []
-
-    for part in parts:
-        if part.get('filename') or (part.get('body') and part['body'].get('attachmentId')):
-            filename = part.get('filename', '')
-            if not filename:
-                # Generate a name based on Content-ID for inline images
-                headers_dict = {header['name'].lower(): header['value'] for header in part.get('headers', [])}
-                content_id = headers_dict.get('content-id', '').strip('<>')
-                if content_id and part.get('mimeType', '').startswith('image/'):
-                    ext = part['mimeType'].split('/')[1]
-                    if content_id.lower().endswith(f".{ext}"):
-                        filename = f"inline_image_{content_id}"
-                    else:
-                        filename = f"inline_image_{content_id}.{ext}"
-            
-            if 'data' in part['body']:
-                data = part['body']['data']
-            else:
-                att_id = part['body'].get('attachmentId')
-                if att_id:
-                    att = service.users().messages().attachments().get(userId=user_id, messageId=msg_id, id=att_id).execute()
-                    data = att['data']
-                else:
-                    continue
-            
-            file_data = base64.urlsafe_b64decode(data.encode('UTF-8'))
-            path = os.path.join(save_dir, filename)
-            with open(path, 'wb') as f:
-                f.write(file_data)
-
-            now = datetime.now()
-            timestamp = now.strftime("%y%m%d_%H%M%S")
-            milliseconds = now.microsecond // 1000
-            name, ext = os.path.splitext(filename)
-            clean_name = name.replace('.', ' ').replace("'", "")
-            new_filename = f"{timestamp}{milliseconds}_{clean_name}{ext}"
-            new_path = os.path.join(save_dir, new_filename)
-            os.rename(path, new_path)
-
-            if new_filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
-                temp_files.append(new_filename)
-            elif new_filename.lower().endswith('.pdf'):
-                real_attachments.append(new_filename)
-            else:
-                real_attachments.append(new_filename)
-        
-    attachments_files.extend(real_attachments)
-    global temp_attachment_files
-    temp_attachment_files = temp_files
-
-    if len(attachments_files) == 0 and temp_files:
-        print(f"\033[36m[INFO] No permanent attachments, but {len(temp_files)} temporary file(s) saved for message ID {msg_id} at {DOWNLOAD_PATH}: {temp_files}\033[0m")
-    elif len(attachments_files) == 1:
-        print(f"\033[36m[INFO] 1 Attachment saved for message ID {msg_id} at {DOWNLOAD_PATH}\033[0m")
-        print(f"\033[34m  - {attachments_files[0]}\033[0m")
-    elif len(attachments_files) > 1:
-        print(f"\033[36m[INFO] {len(attachments_files)} Attachments saved for message ID {msg_id} at {DOWNLOAD_PATH}\033[0m")
-        for file in attachments_files:
-            print(f"\033[34m  - {file}\033[0m")
-    else:
-        print(f"\033[36m[INFO] No attachments to save for message ID {msg_id} at {DOWNLOAD_PATH}.\033[0m")
-
-    if attachments_files:
-        filtered_attachments = [attachment for attachment in attachments_files if attachment]
-        if filtered_attachments:
-            attachments_html = "<div>Attachments :</div>\n<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
-            attachments_html_pdf = "<div>Attachments :</div>\n<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
-            for attachment in filtered_attachments:
-                attachment_path = os.path.join(DOWNLOAD_PATH, attachment)
-                attachment_url = f"file://{os.path.abspath(attachment_path)}"
-                attachments_html += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
-                if attachment.lower().endswith('.pdf'):
-                    attachments_html_pdf += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
-            attachments_html += "</ul>\n"
-            attachments_html_pdf += "</ul>\n"
-    else:
-        attachments_html = "<div>No Attachments for this mail</div>"
-        attachments_html_pdf = "<div>No PDF Attachments for this mail</div>"
-    return attachments_html, attachments_html_pdf
-
-
-def download_attachment(service, user_id, attachment_id, save_dir, filename, msg_id):
-    try:
-        attachment = service.users().messages().attachments().get(userId=user_id, messageId=msg_id, id=attachment_id).execute()
-        file_data = base64.urlsafe_b64decode(attachment['data'].encode('UTF-8'))
-        filepath = os.path.join(save_dir, filename)
-        with open(filepath, 'wb') as f:
-            f.write(file_data)
-        # print(f"Attachment saved to {filepath}")
-        return filepath
-    except Exception as e:
-        print(f"Error downloading attachment {filename}: {e}")
-        return None
-
-
 def save_email_and_attachments(service, user_id, msg_id, save_dir):
-    message = service.users().messages().get(userId=user_id, id=msg_id, format="full").execute()
+    message = service.users().messages().get(userId=user_id, id=msg_id, format='raw').execute()
+    raw = message['raw']
+    email_bytes = base64.urlsafe_b64decode(raw)
+    msg = BytesParser(policy=policy_default).parse(io.BytesIO(email_bytes))
 
-    # print(f"Message: {message}")
+    # Extract headers
+    subject = msg['Subject'] or ""
+    file_safe_subject = subject.replace("/", "-").replace("\\", "-").replace(":", "-").replace("*", "-").replace("+", "-").replace("é", "e").replace("à", "a")
+    fro = msg['From'] or ""
+    if '<' in fro and '>' in fro:
+        fro_name, fro_email = fro.split('<', 1)
+        fro_email = fro_email.rstrip('>')
+        fro_email = f" {fro_email}"
+        fro = f"{fro_name.strip()} {fro_email.strip()} "
+    reply = msg['Reply-To'] or ""
+    if '<' in reply and '>' in reply:
+        reply_name, reply_email = reply.split('<', 1)
+        reply_email = reply_email.rstrip('>')
+        reply_email = f" {reply_email}"
+        reply = f"{reply_name.strip()} {reply_email.strip()} "
+    to = msg['To'] or ""
+    if '<' in to and '>' in to:
+        to_name, to_email = to.split('<', 1)
+        to_email = to_email.rstrip('>')
+        to_email = f" {to_email}"
+        to = f"{to_name.strip()} {to_email.strip()} "
+    cc = msg['Cc'] or ""
+    if cc:
+        cc_list = []
+        for email in cc.split(','):
+            email = email.strip()
+            if '<' in email and '>' in email:
+                cc_name, cc_email = email.split('<', 1)
+                cc_email = cc_email.rstrip('>')
+                cc_email = f" {cc_email}"
+                cc_list.append(f"{cc_name.strip()} {cc_email.strip()}")
+            else:
+                cc_list.append(email.strip())
+        cc = ', '.join(cc_list)
+    date = get_real_date(msg['Date'] or 'No Date')
 
-    # payload = message.get('payload', {})
-    # print(f"Payload: {payload}")
-
-    subject = ""
-    if 'payload' in message and 'headers' in message['payload']:
-        for header in message['payload']['headers']:
-            if header['name'] == 'Subject':
-                subject = header['value']
-                break
-
-    payload = message.get('payload', {})
-    headers = {header['name']: header['value'] for header in payload.get('headers', [])}
-    date = headers.get('Date', 'No Date')
-    real_date = get_real_date(date)
-    date = real_date
-
-    fro = ""
-    if 'payload' in message and 'headers' in message['payload']:
-        for header in message['payload']['headers']:
-            if header['name'] == 'From':
-                fro = header['value']
-                if '<' in fro and '>' in fro:
-                    fro_name, fro_email = fro.split('<', 1)
-                    fro_email = fro_email.rstrip('>')
-                    fro_email = f" {fro_email}"
-                    fro = f"{fro_name.strip()} {fro_email.strip()} "
-                break
-
-    reply = ""
-    if 'payload' in message and 'headers' in message['payload']:
-        for header in message['payload']['headers']:
-            if header['name'] == 'Reply-To':
-                reply = header['value']
-                if '<' in reply and '>' in reply:
-                    reply_name, reply_email = reply.split('<', 1)
-                    reply_email = reply_email.rstrip('>')
-                    reply_email = f" {reply_email}"
-                    reply = f"{reply_name.strip()} {reply_email.strip()} "
-                break
-
-    to = ""
-    cc = ""
-    if 'payload' in message and 'headers' in message['payload']:
-        for header in message['payload']['headers']:
-            if header['name'] == 'To':
-                to = header['value']
-                if '<' in to and '>' in to:
-                    to_name, to_email = to.split('<', 1)
-                    to_email = to_email.rstrip('>')
-                    to_email = f" {to_email}"
-                    to = f"{to_name.strip()} {to_email.strip()} "
-
-            if header['name'] == 'Cc':
-                cc = header['value']
-                cc_list = []
-                for email in cc.split(','):
-                    email = email.strip()
-                    if '<' in email and '>' in email:
-                        cc_name, cc_email = email.split('<', 1)
-                        cc_email = cc_email.rstrip('>')
-                        cc_email = f" {cc_email}"
-                        cc_list.append(f"{cc_name.strip()} {cc_email.strip()}")
-                    else:
-                        cc_list.append(email.strip())
-                cc = ', '.join(cc_list)
-
-            if to and cc:
-                break
-
-    parts = message.get('payload', {}).get('parts', [])
-    attachments_files = []
-    server_flask_started = False
-
-    def extract_parts(parts):
-        valid_mime_types = ['text/html', 'text/plain', 'multipart/alternative', 'multipart/related', 'multipart/mixed']
-        mime_type = None
-        data = ""
-        html_data = None
-        plain_data = None
-
-        # Loop through each part of the email
-        for part in parts:
-            mime_type = part.get('mimeType')
-
-            # Handle text-based MIME types (HTML, plain text, multipart)
-            if mime_type in valid_mime_types:
-                # Check if the part has a body with data
-                if part.get('body') and part['body'].get('data'):
-                    if mime_type == 'text/html':
-                        html_data = part['body']['data'] # Store HTML data
-                    elif mime_type == 'text/plain':
-                        plain_data = part['body']['data'] # Store plain text data
-                # Recursively process nested parts if present
-                elif 'parts' in part:
-                    html_data, plain_data = extract_parts(part['parts'])
-
-            # Handle image attachments (with Content-ID for inline images)
-            if mime_type and mime_type.startswith('image/'):
-                filename = part.get('filename', '')
-                if not filename:
-                    # Generate a default filename if none is provided
-                    headers_dict = {header['name'].lower(): header['value'] for header in part.get('headers', [])}
-                    content_id = headers_dict.get('content-id')
-                    if content_id:
-                        filename = f"inline_image_{content_id.strip('<>')}.{mime_type.split('/')[1]}"
-                    else:
-                        continue  # Skip if no filename and no content_id
-
-                # Retrieve headers as a dictionary
-                headers_dict = {header['name'].lower(): header['value'] for header in part.get('headers', [])}
-                content_id = headers_dict.get('content-id')
-                content_disposition = headers_dict.get('content-disposition', '').lower()
-
-                # Ensure the image is inline (has CID and is not an attachment)
-                if not content_id or ('attachment' in content_disposition):
-                    continue
-
-                # Handle inline images encoded directly in the body
-                if part.get('body') and part['body'].get('data'):
-                    image_data = part['body']['data'] # Get base64-encoded image data
-                    file_path = os.path.join(save_dir, filename) # Define file path
-                    with open(file_path, 'wb') as f:
-                        f.write(base64.b64decode(image_data)) # Decode and save the image
-                    attachments_files.append(filename) # Add to attachments list
-                    continue # Move to next part after processing inline image
-
-                # Handle attachments with an attachmentId (original logic)
-                attachment_id = part.get('body', {}).get('attachmentId')
-                if not attachment_id:
-                    continue # Skip if no attachmentId
-                file_path = download_attachment(service, user_id, attachment_id, save_dir, filename, msg_id)
-                if file_path:
-                    attachments_files.append(filename) # Add to attachments list if downloaded
-
-        # Return the extracted data based on priority (HTML first, then plain text)
-        if html_data:
-            return html_data, 'text/html'
-        if plain_data:
-            return plain_data, 'text/plain'
-        return data, mime_type
-
-    attachments_html, attachments_html_pdf = save_attachments(service, user_id, msg_id, save_dir, attachments_files)
-
-    if 'body' in payload and 'data' in payload['body']:
-        data = payload['body']['data']
-        mime_type = payload.get('mimeType', '')
+    # Extract HTML or plain text
+    html_part = msg.get_body(preferencelist=('html'))
+    if html_part:
+        html_content = html_part.get_content()
     else:
-        # print(f"Running extract_parts")
-        data, mime_type = extract_parts(parts)
-
-    if data:
-        # print(f"data found")
-        if mime_type == 'text/plain':
-            # print(f"text/plain detected")
-            plain_text = decode_base64(data).decode('utf-8')         
-            plain_text = re.sub(r'(>>?|>)', r'\1', plain_text)            
-            plain_text = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'\n\n\1', plain_text)            
+        plain_part = msg.get_body(preferencelist=('plain'))
+        if plain_part:
+            plain_text = plain_part.get_content()
+            plain_text = re.sub(r'(>>?|>)', r'\1', plain_text)
+            plain_text = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'\n\n\1', plain_text)
             date_regex = r'((Le|The) \d{1,2} (janv\.|févr\.|mars\.|avr\.|mai\.|juin\.|juil\.|août\.|sept\.|oct\.|nov\.|déc\.|Jan\.|Feb\.|Mar\.|Apr\.|May\.|Jun\.|Jul\.|Aug\.|Sep\.|Oct\.|Nov\.|Dec\.) \d{4}( (à|at) \d{1,2}:\d{2})?)'
-            plain_text = re.sub(date_regex, r'\n\n\1', plain_text)            
-            html_text = plain_text.replace('\n', '<br>')            
+            plain_text = re.sub(date_regex, r'\n\n\1', plain_text)
+            html_content = plain_text.replace('\n', '<br>')
             html_content = f"""
             <html>
             <body>
                 <div style="font-family: Arial, sans-serif; white-space: nowrap;">
-                    {html_text}
+                    {html_content}
                 </div>
             </body>
             </html>
             """
-        elif mime_type == 'text/html':
-            # print(f"text/html detected")
-            html_content = decode_base64(data).decode('utf-8')
-            # print(f"html_content: {html_content}")
-            if attachments_files and re.search(r'src=["\']cid:([^"\']+)["\']', html_content):
-                print(f"\033[36m[INFO] Starting Flask server to handle CID attachment(s) file(s) for PDF processing.\033[0m")
-                server_thread = Thread(target=run_server, daemon=True)
-                server_thread.start()
-                # time.sleep(1)
-                try:
-                    wait_for_flask(PORT)
-                    server_flask_started = True
-                    html_content = replace_src_with_url(html_content, attachments_files, PORT)
-                except Exception as e:
-                    print(f"[ERROR] Could not start Flask server: {e}")
-                    server_flask_started = False
         else:
-            html_content = "The message contains neither plain text nor HTML."
+            html_content = "No content found in email."
 
-        file_safe_subject = subject.replace("/", "-").replace("\\", "-").replace(":", "-").replace("*", "-").replace("+", "-").replace("é", "e").replace("à", "a")
-        # print(f"file_safe_subject: {file_safe_subject}")
-        final_pdf_path = os.path.join(save_dir, f"{file_safe_subject}.pdf")
-        # print(f"final_pdf_path: {final_pdf_path}")
+    def clean_filename(filename):
+        if not filename:
+            return None
+        # Remplacer les caractères non valides par '_'
+        return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
-        try:
-            with sync_playwright() as p:
-                try:
-                    def has_dynamic_content(html_content):
-                        dynamic_patterns = {
-                            "script tags": r"<script.*?>.*?</script>",  # Detection of <script> tags
-                            "iframe tags": r"<iframe.*?>.*?</iframe>",  # Detection of <iframe> tags
-                            "JS frameworks (React/Vue/Angular)": r"data-reactroot|ng-app|vue",  # Detection of JS frameworks like React, Vue, or Angular
-                            "AJAX calls": r"XMLHttpRequest|fetch",  # AJAX calls via XMLHttpRequest or fetch
-                            "Media queries": r"@media",  # CSS media queries for dynamic styling
-                            "CSS transitions/animations": r"transition|animation",  # Detection of CSS transitions or animations
-                            "JavaScript timers": r"setInterval|setTimeout",  # Detection of JavaScript timers (setInterval, setTimeout)
-                            "AJAX content markers": r"data-ajax",  # Markers for AJAX calls in HTML data (e.g., data-ajax="true")
-                            "Vue.js or React markers": r"v-bind|v-for|data-v-",  # Detection of Vue.js (specific markers) or React
-                            "WebSocket indicators": r"WebSocket",  # Detection of WebSocket (indicator of real-time dynamic content)
-                            "Dynamic event listeners": r"addEventListener",  # Detection of dynamic JavaScript event listener additions
-                            "Inline CSS for dynamic styles": r"style=['\"].*?display\s*:\s*none.*?['\"]",  # Inline CSS styles for dynamic elements (e.g., display: none)
-                            "Loading indicators": r'loading|lazy|spinner|progress',  # Detection of loading elements like "lazy", "loading", "spinner", "progress"
-                            "Dynamic data attributes": r"data-\w+",  # Detection of dynamic data attributes (e.g., data-id, data-src)
-                            "Content injected by JavaScript": r"document\.write|innerHTML|outerHTML",  # Detection of content injected by JS
-                            "MutationObserver": r"MutationObserver",  # Detection of MutationObserver usage (used to detect DOM changes)
-                            "IntersectionObserver": r"IntersectionObserver",  # Detection of IntersectionObserver usage for elements appearing in view
-                            "Lazy-loaded content": r"data-src|data-lazy",  # Detection of lazy-loaded content
-                            "Viewport-related dynamic elements": r"viewport|resize",  # Dynamic elements related to the viewport (e.g., during window resizing)
-                            "SVG graphics": r"<svg",  # Detection of SVG graphics often dynamically manipulated via JavaScript
-                            "Web components": r"<\w+-\w+",  # Detection of custom web components (e.g., <my-component>)
-                            "Dynamic background images": r"background-image\s*:\s*url",  # Detection of background images often changed dynamically
-                        }
+    # Extract attachments and inline images
+    attachments_files = []
+    cid_map = {}
+    counter = 0  # Compteur pour les Content-ID fictifs
+    for part in msg.walk():
+        print(f"[DEBUG] Part: Content-Type={part.get_content_type()}, Content-ID={part.get('Content-ID')}, Filename={part.get_filename()}")
+        if part.get_content_maintype() == 'multipart':
+            continue
+        filename = clean_filename(part.get_filename())  # Nettoyer le nom du fichier
+        content_type = part.get_content_type()
+        if filename:
+            # Real attachment (not inline image)
+            if not content_type.startswith('image/'):
+                payload = part.get_payload(decode=True)
+                path = os.path.join(save_dir, filename)
+                with open(path, 'wb') as f:
+                    f.write(payload)
+                attachments_files.append(filename)
+                print(f"\033[36m[INFO] Attachment saved: {filename}\033[0m")
+        content_id = part['Content-ID']
+        if content_type.startswith('image/'):
+            payload = part.get_payload(decode=True)
+            base64_data = base64.b64encode(payload).decode('utf-8')
+            data_url = f"data:{content_type};base64,{base64_data}"
+            if content_id:
+                content_id = content_id.strip('<>')
+                cid_map[content_id] = data_url
+                print(f"[DEBUG] Mapped CID {content_id} to data URL: {data_url[:50]}...")
+            else:
+                # Gérer les images inline sans Content-ID
+                generated_cid = f"generated_cid_{counter}"
+                cid_map[generated_cid] = data_url
+                print(f"[DEBUG] Generated CID {generated_cid} for inline image without Content-ID: {data_url[:50]}...")
+                counter += 1
 
-                        for desc, pattern in dynamic_patterns.items():
-                            if re.search(pattern, html_content, re.IGNORECASE):
-                                print(f"Dynamic content detected: Found {desc}")
-                                return True
+    # Replace cid: in HTML with data: URLs
+    def replace_cid(match):
+        cid_value = match.group(1)
+        if cid_value in cid_map:
+            print(f"[DEBUG] Replacing CID: {cid_value} with data URL: {cid_map[cid_value][:50]}...")
+            return f'src="{cid_map[cid_value]}"'
+        print(f"[WARNING] No mapping found for CID: {cid_value}")
+        return match.group(0)
 
-                        return False
+    html_content = re.sub(r'src=["\']cid:([^"\']+)["\']', replace_cid, html_content)
 
-                    # Check if dynamic content exists
-                    headless_mode = not has_dynamic_content(html_content)
-                    print(f"headless_mode: {headless_mode}")
+    # Handle external URLs (keep intact)
+    # The regex already skips them since it looks for cid:
 
-                    browser = p.chromium.launch(headless=headless_mode)
-                    page = browser.new_page()
-                    page.set_content(html_content, timeout=60000)  # Set content to the page
+    # Generate attachments_html
+    attachments_html = "<div>No Attachments for this mail</div>"
+    attachments_html_pdf = "<div>No PDF Attachments for this mail</div>"
+    if attachments_files:
+        attachments_html = "<div>Attachments :</div>\n<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
+        attachments_html_pdf = "<div>Attachments :</div>\n<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
+        for attachment in attachments_files:
+            attachment_path = os.path.join(save_dir, attachment)
+            attachment_url = f"file://{os.path.abspath(attachment_path)}"
+            attachments_html += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
+            if attachment.lower().endswith('.pdf'):
+                attachments_html_pdf += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
+        attachments_html += "</ul>\n"
+        attachments_html_pdf += "</ul>\n"
 
-                    # browser = p.chromium.launch(headless=False) # `headless=False` to show the interface
-                    # page = browser.new_page()
-                    # page.set_content(html_content, timeout=30000)
+    # Generate PDF
+    final_pdf_path = os.path.join(save_dir, f"{file_safe_subject}.pdf")
 
-                    if server_flask_started:
-                        images = page.query_selector_all('img[src^="http://127.0.0.1"]')
-                        for img in images:
-                            page.wait_for_function('img => img.complete && img.naturalHeight !== 0', arg=img, timeout=10000)
+    try:
+        with sync_playwright() as p:
+            def has_dynamic_content(html_content):
+                dynamic_patterns = {
+                    "script tags": r"<script.*?>.*?</script>",
+                    "iframe tags": r"<iframe.*?>.*?</iframe>",
+                    "JS frameworks": r"data-reactroot|ng-app|vue",
+                    "AJAX calls": r"XMLHttpRequest|fetch",
+                    "Media queries": r"@media",
+                    "CSS transitions/animations": r"transition|animation",
+                    "JavaScript timers": r"setInterval|setTimeout",
+                    "AJAX content markers": r"data-ajax",
+                    "Vue.js or React markers": r"v-bind|v-for|data-v-",
+                    "WebSocket indicators": r"WebSocket",
+                    "Dynamic event listeners": r"addEventListener",
+                    "Inline CSS for dynamic styles": r"style=['\"].*?display\s*:\s*none.*?['\"]",
+                    "Loading indicators": r'loading|lazy|spinner|progress',
+                    "Dynamic data attributes": r"data-\w+",
+                    "Content injected by JavaScript": r"document\.write|innerHTML|outerHTML",
+                    "MutationObserver": r"MutationObserver",
+                    "IntersectionObserver": r"IntersectionObserver",
+                    "Lazy-loaded content": r"data-src|data-lazy",
+                    "Viewport-related dynamic elements": r"viewport|resize",
+                    "SVG graphics": r"<svg",
+                    "Web components": r"<\w+-\w+",
+                    "Dynamic background images": r"background-image\s*:\s*url",
+                }
+                for desc, pattern in dynamic_patterns.items():
+                    if re.search(pattern, html_content, re.IGNORECASE):
+                        print(f"Dynamic content detected: Found {desc}")
+                        return True
+                return False
 
-                    header_template = """
-                        <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
-                            <h3 style='margin-top: 0px;'>{subject}</h3>
-                            <div>From : {fro}</div>
-                            <div>Reply To : {reply}</div>
-                            <div>To : {to}</div>
-                            <div>Cc : {cc}</div>
-                            <div>Date : {date}</div>
-                        </div>
-                    """.format(fro=fro, reply=reply, to=to, cc=cc, date=date, subject=subject)
-                    contains_pdf = any(file.lower().endswith('.pdf') for file in attachments_files)
-                    if attachments_files:
-                        url_pattern = re.compile(r'http://127.0.0.1:\d+/(.+?\.(jpg|png|gif|jpeg))')
-                        urls_in_html = re.findall(url_pattern, html_content)
-                        has_matching_files = any(url[0] in attachments_files for url in urls_in_html)
-                        if server_flask_started and has_matching_files:
-                            if contains_pdf:
-                                footer_template = """
-                                    <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
-                                        {attachments_html_pdf}
-                                        <span class="pageNumber"></span> / <span class="totalPages"></span>
-                                    </div>
-                                """.format(attachments_html_pdf=attachments_html_pdf)
-                            else:
-                                footer_template = """
-                                    <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
-                                        {attachments_html}
-                                        <span class="pageNumber"></span> / <span class="totalPages"></span>
-                                    </div>
-                                """.format(attachments_html=attachments_html)
-                        else:
-                            footer_template = """
-                                <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
-                                    {attachments_html}
-                                    <span class="pageNumber"></span> / <span class="totalPages"></span>
-                                </div>
-                            """.format(attachments_html=attachments_html)
-                    else:
-                        footer_template = """
-                            <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
-                                {attachments_html}
-                                <span class="pageNumber"></span> / <span class="totalPages"></span>
-                            </div>
-                        """.format(attachments_html=attachments_html)
+            headless_mode = not has_dynamic_content(html_content)
+            print(f"headless_mode: {headless_mode}")
 
-                    page.pdf(
-                        format='A4',
-                        print_background=True,
-                        display_header_footer=True,
-                        header_template=header_template,
-                        footer_template=footer_template,
-                        margin={"top": "150px", "bottom": "150px", "left": "0", "right": "0"},
-                        path=final_pdf_path
-                    )
+            browser = p.chromium.launch(headless=headless_mode)
+            page = browser.new_page()
+            page.set_content(html_content, timeout=120000)
+            page.wait_for_load_state('networkidle')
 
-                    browser.close()
-                except Exception as e:
-                    print(f"Playwright error during PDF generation: {e}")
-                    raise
-        except Exception as e:
-            print(f"[ERROR] Unexpected error during PDF generation for message {msg_id}: {e}")
-            raise
-        finally:
-            if server_flask_started:
-                if 'html_content' in locals() and re.search(r'http://127.0.0.1:\d+/.+?\.jpg|\.png|\.gif|\.jpeg', html_content):
-                    # Use the global CID mapping for cleanup
-                    delete_matching_attachments(html_content, attachments_files, DOWNLOAD_PATH, cid_to_attachment)
-                try:
-                    response = requests.post(f"http://127.0.0.1:{PORT}/shutdown")
-                    if response.status_code == 200:
-                        print("[INFO] Server Flask has been successfully stopped (HTTP 200).")
-                    else:
-                        print("[ERROR] Server Flask shutdown failed with status code:", response.status_code)
-                except requests.exceptions.RequestException as e:
-                    print(f"[ERROR] Error during Flask shutdown request: {e}")
+            header_template = """
+                <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                    <h3 style='margin-top: 0px;'>{subject}</h3>
+                    <div>From : {fro}</div>
+                    <div>Reply To : {reply}</div>
+                    <div>To : {to}</div>
+                    <div>Cc : {cc}</div>
+                    <div>Date : {date}</div>
+                </div>
+            """.format(fro=fro, reply=reply, to=to, cc=cc, date=date, subject=subject)
+            contains_pdf = any(file.lower().endswith('.pdf') for file in attachments_files)
+            footer_template = """
+                <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                    {attachments_html}
+                    <div><a href='https://mail.google.com/mail/u/0/#inbox/{msg_id}'>View in Gmail</a></div>
+                    <span class="pageNumber"></span> / <span class="totalPages"></span>
+                </div>
+            """.format(attachments_html=attachments_html if not contains_pdf else attachments_html_pdf, msg_id=msg_id)
 
-        print(f"\033[36m[INFO] PDF document saved for message ID {msg_id} at {DOWNLOAD_PATH}\033[0m")
-        now = datetime.now()
-        timestamp = now.strftime("%y%m%d_%H%M%S")
-        milliseconds = now.microsecond // 1000
-        new_pdf_path = os.path.join(save_dir, f"{timestamp}{milliseconds}_{file_safe_subject}.pdf")
-        os.rename(final_pdf_path, new_pdf_path)
-        print(f"\033[34m  - {os.path.basename(new_pdf_path)}\033[0m")
-        print(f"\033[92m[INFO] Finished saving email and attachment(s) for message ID {msg_id}\033[0m\n")
-    else:
-        print(f"No HTML content found for message {msg_id}.")
+            page.pdf(
+                format='A4',
+                print_background=True,
+                display_header_footer=True,
+                header_template=header_template,
+                footer_template=footer_template,
+                margin={"top": "150px", "bottom": "150px", "left": "0", "right": "0"},
+                path=final_pdf_path
+            )
 
+            browser.close()
+    except Exception as e:
+        print(f"[ERROR] Unexpected error during PDF generation for message {msg_id}: {e}")
+        raise
+
+    print(f"\033[36m[INFO] PDF document saved for message ID {msg_id} at {save_dir}\033[0m")
+    now = datetime.now()
+    timestamp = now.strftime("%y%m%d_%H%M%S")
+    milliseconds = now.microsecond // 1000
+    new_pdf_path = os.path.join(save_dir, f"{timestamp}{milliseconds}_{file_safe_subject}.pdf")
+    os.rename(final_pdf_path, new_pdf_path)
+    print(f"\033[34m  - {os.path.basename(new_pdf_path)}\033[0m")
+    print(f"\033[92m[INFO] Finished saving email and attachment(s) for message ID {msg_id}\033[0m\n")
 
 def empty_trash(service):
     """
