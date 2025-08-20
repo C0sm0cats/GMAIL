@@ -196,29 +196,30 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
     def clean_filename(filename):
         if not filename:
             return None
-        # Remplacer les caractères non valides par '_'
         return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
     # Extract attachments and inline images
     attachments_files = []
     cid_map = {}
-    counter = 0  # Compteur pour les Content-ID fictifs
+    counter = 0  # Counter for generated Content-IDs
     for part in msg.walk():
         print(f"[DEBUG] Part: Content-Type={part.get_content_type()}, Content-ID={part.get('Content-ID')}, Filename={part.get_filename()}")
         if part.get_content_maintype() == 'multipart':
             continue
-        filename = clean_filename(part.get_filename())  # Nettoyer le nom du fichier
+        filename = clean_filename(part.get_filename())  # Clean the filename
         content_type = part.get_content_type()
+        
+        # Handle attachments (including images with filenames)
         if filename:
-            # Real attachment (not inline image)
-            if not content_type.startswith('image/'):
-                payload = part.get_payload(decode=True)
-                path = os.path.join(save_dir, filename)
-                with open(path, 'wb') as f:
-                    f.write(payload)
-                attachments_files.append(filename)
-                print(f"\033[36m[INFO] Attachment saved: {filename}\033[0m")
-        content_id = part['Content-ID']
+            payload = part.get_payload(decode=True)
+            path = os.path.join(save_dir, filename)
+            with open(path, 'wb') as f:
+                f.write(payload)
+            attachments_files.append(filename)
+            print(f"\033[36m[INFO] Attachment saved: {filename}\033[0m")
+        
+        # Handle inline images (embed in HTML)
+        content_id = part.get('Content-ID')
         if content_type.startswith('image/'):
             payload = part.get_payload(decode=True)
             base64_data = base64.b64encode(payload).decode('utf-8')
@@ -227,8 +228,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 content_id = content_id.strip('<>')
                 cid_map[content_id] = data_url
                 print(f"[DEBUG] Mapped CID {content_id} to data URL: {data_url[:50]}...")
-            else:
-                # Gérer les images inline sans Content-ID
+            elif not filename:  # Only generate CID for images without filename (true inline images)
                 generated_cid = f"generated_cid_{counter}"
                 cid_map[generated_cid] = data_url
                 print(f"[DEBUG] Generated CID {generated_cid} for inline image without Content-ID: {data_url[:50]}...")
