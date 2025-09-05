@@ -24,15 +24,9 @@ SaveGmail is a powerful Python script designed to backup emails and attachments 
 1. Clone the repository :
    ```bash
    git clone https://github.com/C0sm0cats/GMAIL.git
-   cd GMAIL
    ```
 
 2. Install dependencies :
-   ```bash
-   pip install -r requirements.txt
-   ```
-   
-   For advanced users, dependencies include:
    - `playwright` for browser automation
    - `google-auth` and `google-api-python-client` for Gmail API
    - `pytz` and `tzlocal` for timezone handling
