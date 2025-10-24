@@ -180,11 +180,13 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
             plain_text = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'\n\n\1', plain_text)
             date_regex = r'((Le|The) \d{1,2} (janv\.|févr\.|mars\.|avr\.|mai\.|juin\.|juil\.|août\.|sept\.|oct\.|nov\.|déc\.|Jan\.|Feb\.|Mar\.|Apr\.|May\.|Jun\.|Jul\.|Aug\.|Sep\.|Oct\.|Nov\.|Dec\.) \d{4}( (à|at) \d{1,2}:\d{2})?)'
             plain_text = re.sub(date_regex, r'\n\n\1', plain_text)
+            url_regex = r'(https?://[^\s<>"]+|www\.[^\s<>"]+)'
+            plain_text = re.sub(url_regex, r'<a href="\1" target="_blank">\1</a>', plain_text)
             html_content = plain_text.replace('\n', '<br>')
             html_content = f"""
             <html>
             <body>
-                <div style="font-family: Arial, sans-serif; white-space: nowrap;">
+                <div style="font-family: Arial, sans-serif;font-size: 10px">
                     {html_content}
                 </div>
             </body>
