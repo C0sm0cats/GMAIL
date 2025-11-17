@@ -252,19 +252,15 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
     # The regex already skips them since it looks for cid:
 
     # Generate attachments_html
-    attachments_html = "<div>No Attachments for this mail</div>"
-    attachments_html_pdf = "<div>No PDF Attachments for this mail</div>"
     if attachments_files:
-        attachments_html = "<div>Attachments :</div>\n<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
-        attachments_html_pdf = "<div>Attachments :</div>\n<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
+        attachments_html_footer = "<div>Attachments:</div>\n<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
         for attachment in attachments_files:
             attachment_path = os.path.join(save_dir, attachment)
             attachment_url = f"file://{os.path.abspath(attachment_path)}"
-            attachments_html += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
-            if attachment.lower().endswith('.pdf'):
-                attachments_html_pdf += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
-        attachments_html += "</ul>\n"
-        attachments_html_pdf += "</ul>\n"
+            attachments_html_footer += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
+        attachments_html_footer += "</ul>\n"
+    else:
+        attachments_html_footer = "<div>No attachments for this mail</div>"
 
     # Generate PDF
     final_pdf_path = os.path.join(save_dir, f"{file_safe_subject}.pdf")
@@ -320,14 +316,13 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                     <div>Date : {date}</div>
                 </div>
             """.format(fro=fro, reply=reply, to=to, cc=cc, date=date, subject=subject)
-            contains_pdf = any(file.lower().endswith('.pdf') for file in attachments_files)
-            footer_template = """
+            footer_template = f"""
                 <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
-                    {attachments_html}
-                    <div><a href='https://mail.google.com/mail/u/0/#inbox/{msg_id}'>View in Gmail</a></div>
+                    {attachments_html_footer}
+                    <div style="margin-top: 8px;"><a href='https://mail.google.com/mail/u/0/#inbox/{msg_id}'>View in Gmail</a></div>
                     <span class="pageNumber"></span> / <span class="totalPages"></span>
                 </div>
-            """.format(attachments_html=attachments_html if not contains_pdf else attachments_html_pdf, msg_id=msg_id)
+            """
 
             page.pdf(
                 format='A4',
