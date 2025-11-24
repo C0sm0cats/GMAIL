@@ -149,10 +149,21 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         reply = f"{reply_name.strip()} {reply_email.strip()} "
     to = msg['To'] or ""
     if '<' in to and '>' in to:
-        to_name, to_email = to.split('<', 1)
-        to_email = to_email.rstrip('>')
-        to_email = f" {to_email}"
-        to = f"{to_name.strip()} {to_email.strip()} "
+        # First split all recipients by comma
+        recipients = [r.strip() for r in to.split(',')]
+
+        formatted = []
+        for recipient in recipients:
+            if '<' in recipient and '>' in recipient:
+                to_name, to_email = recipient.split('<', 1)
+                to_email = to_email.rstrip('>')
+                to_email = f" {to_email}"
+                formatted.append(f"{to_name.strip()} {to_email.strip()} ")
+            else:
+                formatted.append(recipient)
+
+        # Rebuild the full string
+        to = ", ".join(formatted)
     cc = msg['Cc'] or ""
     if cc:
         cc_list = []
