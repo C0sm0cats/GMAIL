@@ -209,7 +209,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
     def clean_filename(filename):
         if not filename:
             return None
-        return re.sub(r'[<>:"/\\|?*]', '_', filename)
+        return re.sub(r"[<>:\"/\\|?*']", "_", filename)
 
     # Extract attachments and inline images
     attachments_files = []
