@@ -206,20 +206,34 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
         else:
             html_content = "No content found in email."
 
-    def clean_filename(filename):
-        if not filename:
-            return None
-        return re.sub(r"[<>:\"/\\|?*']", "_", filename)
-
     # Extract attachments and inline images
     attachments_files = []
     cid_map = {}
     counter = 0  # Counter for generated Content-IDs
+    used_filenames = set()
+
+    def clean_filename(filename):
+        if not filename:
+            return None
+        filename = re.sub(r'[<>:\"/\\|?*]', '_', filename).strip()
+        base, ext = os.path.splitext(filename)
+        counter = 1
+        candidate = filename
+
+        while (os.path.exists(os.path.join(save_dir, candidate)) or 
+               candidate in used_filenames):
+            candidate = f"{base}({counter}){ext}"
+            counter += 1
+
+        used_filenames.add(candidate)
+        return candidate
+
     for part in msg.walk():
         print(f"[DEBUG] Part: Content-Type={part.get_content_type()}, Content-ID={part.get('Content-ID')}, Filename={part.get_filename()}, Disposition={part.get_content_disposition()}")
         if part.get_content_maintype() == 'multipart':
             continue
-        filename = clean_filename(part.get_filename())
+        original_filename = part.get_filename()
+        filename = clean_filename(original_filename) if original_filename else None
         content_type = part.get_content_type()
         content_id = part.get('Content-ID')
         content_disposition = part.get_content_disposition()  # New: Get disposition
@@ -421,12 +435,24 @@ def main():
         if label_id:
             response = service.users().messages().list(userId=user_id, labelIds=[label_id]).execute()
             messages = response.get("messages", [])
-            if len(messages) == 1:
-                print(f"[INFO] Processing 1 email with label 'HasAttachment' for PDF generation\n")
-            elif len(messages) > 1:
-                print(f"[INFO] Processing {len(messages)} emails with label 'HasAttachment' for PDF generation\n")
-            if len(messages) > 0:
-
+            if messages:
+                print(f"[INFO] {len(messages)} email(s) found → sorting by date (oldest first) ...")
+                dated_messages = []
+                for msg in messages:
+                    try:
+                        msg_detail = service.users().messages().get(
+                            userId=user_id,
+                            id=msg['id'],
+                            fields='internalDate'
+                        ).execute()
+                        internal_date = int(msg_detail.get('internalDate', 0))
+                        dated_messages.append((internal_date, msg['id']))
+                    except Exception as e:
+                        print(f"[WARNING] Could not get date for message {msg['id']}: {e}")
+                        dated_messages.append((0, msg['id']))
+                dated_messages.sort(key=lambda x: x[0])
+                messages = [{"id": msg_id} for _, msg_id in dated_messages]
+                print("[INFO] Sorting done. Processing from oldest to newest.\n")
                 for message in messages:
                     msg_id = message["id"]
                     print(f"\033[92m[INFO] Starting to save email and attachment(s) for message ID {msg_id}\033[0m")
