@@ -127,6 +127,19 @@ def authenticate():
     return creds
 
 def save_email_and_attachments(service, user_id, msg_id, save_dir):
+    def sanitize_subject_for_filename(subject):
+        safe = (subject or "")
+        safe = (safe
+            .replace("/", "-")
+            .replace("\\", "-")
+            .replace(":", "-")
+            .replace("*", "-")
+            .replace("+", "-")
+            .replace("é", "e")
+            .replace("à", "a"))
+        safe = safe.strip().rstrip(". ")
+        return safe or "No_Subject"
+
     message = service.users().messages().get(userId=user_id, id=msg_id, format='raw').execute()
     raw = message['raw']
     email_bytes = base64.urlsafe_b64decode(raw)
@@ -134,7 +147,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
 
     # Extract headers
     subject = msg['Subject'] or ""
-    file_safe_subject = subject.replace("/", "-").replace("\\", "-").replace(":", "-").replace("*", "-").replace("+", "-").replace("é", "e").replace("à", "a")
+    file_safe_subject = sanitize_subject_for_filename(subject)
     fro = msg['From'] or ""
     if '<' in fro and '>' in fro:
         fro_name, fro_email = fro.split('<', 1)
