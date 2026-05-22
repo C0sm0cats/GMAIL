@@ -10,6 +10,7 @@ from googleapiclient.errors import HttpError
 from tzlocal import get_localzone
 from email.utils import parsedate_to_datetime
 import subprocess
+import sys
 import logging
 import pytz
 import re
@@ -20,56 +21,20 @@ from email.policy import default as policy_default
 logging.getLogger('tzlocal').setLevel(logging.ERROR)
 
 def check_playwright_chromium_browser():
-    # Path to the Playwright cache directory
-    cache_path = os.path.expanduser("~/.cache/ms-playwright")
+    def launch_chromium():
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
 
-    # Initialize flags to check if the browsers are installed
-    chromium_installed = False
-    chromium_headless_installed = False
-
-    # Loop through the cache and look for chromium directories
     try:
-        folders = os.listdir(cache_path)
-        if not folders:
-            print("\033[92m[INFO] Playwright cache does not exist. Install...\033[0m")
-            subprocess.run(["playwright", "install", "chromium"], check=True)
-            return
-        for folder in folders:
-            if folder.startswith("chromium-"):
-                chromium_installed = True
-            elif folder.startswith("chromium_headless_shell-"):
-                chromium_headless_installed = True
-    except FileNotFoundError:
-        print("\033[92m[INFO] Playwright cache does not exist. Installing Chromium (Playwright) and Headless Chromium (Playwright)...\033[0m")
-        subprocess.run(["playwright", "install", "chromium"], check=True)
-        print("\033[92m[INFO] Chromium (Playwright) and Headless Chromium (Playwright) installed successfully.\033[0m")
-        return
+        launch_chromium()
+    except Exception as error:
+        print(f"\033[93m[WARNING] Playwright Chromium is not ready: {error}\033[0m")
+        print("\033[92m[INFO] Installing Chromium for Playwright...\033[0m")
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+        launch_chromium()
 
-    # If either Chromium or Headless Chromium is missing, install the missing one
-    if not chromium_installed and not chromium_headless_installed:
-        print("\033[92m[INFO] Both Chromium (Playwright) and Headless Chromium (Playwright) are missing. Installing...\033[0m")
-        subprocess.run(["playwright", "install", "chromium"], check=True)  # Install Chromium (both versions)
-        print("\033[92m[INFO] Chromium (Playwright) and Headless Chromium (Playwright) installed successfully.\033[0m")
-    elif not chromium_installed:
-        print("\033[92m[INFO] Chromium (Playwright) is missing. Installing Chromium (Playwright)...\033[0m")
-        subprocess.run(["playwright", "install", "chromium"], check=True)  # Install Chromium
-        print("\033[92m[INFO] Chromium (Playwright) installed successfully.\033[0m")
-    elif not chromium_headless_installed:
-        print("\033[92m[INFO] Headless Chromium (Playwright) is missing. Installing Headless Chromium (Playwright)...\033[0m")
-        subprocess.run(["playwright", "install", "chromium"], check=True)  # Install Chromium (Headless version)
-        print("\033[92m[INFO] Headless Chromium (Playwright) installed successfully.\033[0m")
-    else:
-        print("\033[92m[INFO] Both Chromium (Playwright) and Headless Chromium (Playwright) are already installed.\033[0m")
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                browser.close()
-            print("\033[92m[INFO] Chromium is functional.\033[0m")
-        except Exception as e:
-            print(f"\033[91m[ERROR] Chromium is not functional: {e}\033[0m")
-            print("\033[92m[INFO] Reinstalling Chromium (Playwright)...\033[0m")
-            subprocess.run(["playwright", "install", "chromium"], check=True)
-            print("\033[92m[INFO] Chromium (Playwright) and Headless Chromium (Playwright) reinstalled successfully.\033[0m")
+    print("\033[92m[INFO] Chromium (Playwright) is functional.\033[0m")
 
 SCOPES = ["https://mail.google.com/"]
 # SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]
@@ -410,8 +375,6 @@ def empty_trash(service):
 
 
 def main():
-    import sys
-    
     # Check if the --trash option is passed
     if '--trash' in sys.argv:
         creds = authenticate()

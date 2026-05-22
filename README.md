@@ -26,12 +26,17 @@ SaveGmail is a powerful Python script designed to backup emails and attachments 
    git clone https://github.com/C0sm0cats/GMAIL.git
    ```
 
-2. Install dependencies :
-   - `playwright` for browser automation
-   - `google-auth` and `google-api-python-client` for Gmail API
-   - `pytz` and `tzlocal` for timezone handling
-   - `python-dateutil` for date processing
-   - `email.parser.BytesParser` for email parsing (included in Python standard library)
+2. Make the launcher executable if needed :
+   ```bash
+   chmod +x run-savegmail.sh
+   ```
+
+3. Run the launcher once to bootstrap the local Python environment :
+   ```bash
+   ./run-savegmail.sh
+   ```
+
+   The launcher creates a local `.venv` when it is missing, installs the Python dependencies, and installs the Playwright Chromium browser binaries inside that virtual environment.
 
 ## Configuration
 
@@ -53,7 +58,7 @@ SaveGmail is a powerful Python script designed to backup emails and attachments 
 
 2. **Run the Script**
    ```bash
-   python savegmail.py
+   ./run-savegmail.sh
    ```
 
 3. **Authentication**
@@ -95,6 +100,10 @@ You can customize the script's behavior by modifying these variables :
 2. **Download Issues**
    - Check destination directory permissions
    - Ensure sufficient disk space
+
+3. **Playwright Browser Setup**
+   - Use `./run-savegmail.sh` instead of running `python savegmail.py` directly.
+   - The launcher keeps Playwright, its bundled driver runtime, and its Chromium browser binaries inside the local `.venv`.
 
 ## Contributing
 
