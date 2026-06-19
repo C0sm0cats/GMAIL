@@ -15,6 +15,7 @@ import logging
 import pytz
 import re
 import io
+import shutil
 from email.parser import BytesParser
 from email.policy import default as policy_default
 
@@ -158,12 +159,14 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
     date = get_real_date(msg['Date'] or 'No Date')
 
     # Extract HTML or plain text
-    html_part = msg.get_body(preferencelist=('html'))
+    html_part = msg.get_body(preferencelist=('html',))
     if html_part:
+        print("[INFO] Email body selected: HTML")
         html_content = html_part.get_content()
     else:
-        plain_part = msg.get_body(preferencelist=('plain'))
+        plain_part = msg.get_body(preferencelist=('plain',))
         if plain_part:
+            print("[INFO] Email body selected: plain text")
             plain_text = plain_part.get_content()
             plain_text = re.sub(r'(>>?|>)', r'\1', plain_text)
             plain_text = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'\n\n\1', plain_text)
@@ -182,6 +185,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
             </html>
             """
         else:
+            print("[WARNING] No HTML or plain text body found in email.")
             html_content = "No content found in email."
 
     # Extract attachments and inline images
@@ -356,10 +360,13 @@ def empty_trash(service):
     Permanently deletes all messages from the trash.
     """
     try:
-        # List messages in trash
-        results = service.users().messages().list(userId='me', labelIds=['TRASH']).execute()
-        messages = results.get('messages', [])
-        
+        messages = []
+        request = service.users().messages().list(userId='me', labelIds=['TRASH'])
+        while request is not None:
+            results = request.execute()
+            messages.extend(results.get('messages', []))
+            request = service.users().messages().list_next(request, results)
+
         if not messages:
             print("The trash is already empty.")
             return
@@ -374,78 +381,361 @@ def empty_trash(service):
         print(f"Error while emptying trash: {e}")
 
 
-def main():
-    # Check if the --trash option is passed
-    if '--trash' in sys.argv:
+def move_message_to_trash(service, user_id, msg_id):
+    """Move a Gmail message to trash after a successful local save."""
+    service.users().messages().trash(userId=user_id, id=msg_id).execute()
+    print(f"\033[93m[INFO] Message moved to Gmail trash: {msg_id}\033[0m")
+
+
+
+def extract_header(headers, name, default=""):
+    for header in headers or []:
+        if header.get("name", "").lower() == name.lower():
+            return header.get("value", default)
+    return default
+
+
+def list_candidate_messages(service, user_id, query="", max_results=50):
+    """Return Gmail messages matching a search query, sorted oldest first.
+
+    Empty query means: list all visible Gmail messages, letting the user choose
+    which ones to download afterwards.
+    """
+    messages = []
+    request = service.users().messages().list(
+        userId=user_id,
+        q=query,
+        maxResults=min(max_results, 500),
+    )
+
+    while request is not None and len(messages) < max_results:
+        response = request.execute()
+        messages.extend(response.get("messages", []))
+        if len(messages) >= max_results:
+            break
+        request = service.users().messages().list_next(request, response)
+
+    detailed_messages = []
+    for message in messages[:max_results]:
+        msg_id = message["id"]
+        try:
+            detail = service.users().messages().get(
+                userId=user_id,
+                id=msg_id,
+                format="metadata",
+                metadataHeaders=["Subject", "From", "Date"],
+                fields="id,threadId,internalDate,payload/headers,snippet",
+            ).execute()
+            headers = detail.get("payload", {}).get("headers", [])
+            detailed_messages.append({
+                "id": detail["id"],
+                "threadId": detail.get("threadId", ""),
+                "internalDate": int(detail.get("internalDate", 0)),
+                "date": get_real_date(extract_header(headers, "Date", "No Date")),
+                "from": extract_header(headers, "From", ""),
+                "subject": extract_header(headers, "Subject", "No Subject"),
+                "snippet": detail.get("snippet", ""),
+            })
+        except Exception as exc:
+            print(f"[WARNING] Could not read metadata for message {msg_id}: {exc}")
+            detailed_messages.append({
+                "id": msg_id,
+                "threadId": "",
+                "internalDate": 0,
+                "date": "Invalid Date",
+                "from": "",
+                "subject": "No Subject",
+                "snippet": "",
+            })
+
+    detailed_messages.sort(key=lambda item: item["internalDate"])
+    return detailed_messages
+
+
+def shorten(value, width):
+    value = re.sub(r"\s+", " ", value or "").strip()
+    if width <= 0:
+        return ""
+    if len(value) <= width:
+        return value
+    return value[: max(0, width - 1)] + "…"
+
+
+def supports_color():
+    return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def colorize(text, code):
+    if not supports_color():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def strip_ansi(text):
+    return re.sub(r"\033\[[0-9;]*m", "", text)
+
+
+def visible_len(text):
+    return len(strip_ansi(text))
+
+
+def line_pad(text, width):
+    """Pad a full line to the requested visible width."""
+    return text + " " * max(0, width - visible_len(text))
+
+
+def terminal_width(default=118):
+    return max(88, min(shutil.get_terminal_size((default, 24)).columns, 160))
+
+
+def fit_ansi(text, width):
+    """Pad plain/colored text to a visible width after stripping ANSI codes."""
+    plain = strip_ansi(text)
+    fitted = shorten(plain, width)
+    return fitted + " " * max(0, width - len(fitted))
+
+
+def clean_sender(sender):
+    sender = re.sub(r"\s+", " ", sender or "").strip()
+    sender = sender.replace('"', '')
+    match = re.match(r"(.+?)\s*<([^>]+)>", sender)
+    if match:
+        name, email_addr = match.groups()
+        name = name.strip() or email_addr
+        return f"{name} <{email_addr}>"
+    return sender or "—"
+
+
+def format_email_date(date_text):
+    date_text = date_text or ""
+    match = re.match(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})", date_text)
+    if match:
+        return f"{match.group(1)} {match.group(2)}"
+    return date_text or "—"
+
+
+def print_box_line(width, left="╭", fill="─", right="╮"):
+    print(colorize(left + fill * (width - 2) + right, "90"))
+
+
+def print_box_text(text, width, accent=False):
+    content_width = width - 4
+    clean = shorten(text, content_width)
+    code = "96;1" if accent else "37"
+    print(colorize("│ ", "90") + colorize(line_pad(clean, content_width), code) + colorize(" │", "90"))
+
+
+def print_candidate_messages(messages):
+    width = terminal_width()
+    date_w = 16
+    num_w = max(3, len(str(len(messages))))
+    max_table_width = width
+
+    sender_values = [clean_sender(message.get('from')) for message in messages]
+    subject_values = [message.get('subject') or "No Subject" for message in messages]
+
+    from_w = max(
+        len("EXPÉDITEUR"),
+        min(max((visible_len(sender) for sender in sender_values), default=0), 42),
+        22,
+    )
+    subject_w = max(
+        len("SUJET"),
+        min(max((visible_len(subject) for subject in subject_values), default=0), 72),
+        24,
+    )
+
+    # If content is wider than the terminal, shrink subject first, then sender.
+    while num_w + date_w + from_w + subject_w + 11 > max_table_width and subject_w > 24:
+        subject_w -= 1
+    while num_w + date_w + from_w + subject_w + 11 > max_table_width and from_w > 22:
+        from_w -= 1
+
+    # Visible width of a row:
+    # borders(2) + num/date/from/subject widths + separators/marker(9)
+    table_width = num_w + date_w + from_w + subject_w + 11
+
+    print()
+    print_box_line(table_width)
+    print_box_text("GMAIL · Emails disponibles pour téléchargement", table_width, accent=True)
+    print_box_text(f"{len(messages)} email(s) listé(s) · sélection par numéro, plage ou all", table_width)
+    print_box_line(table_width, left="├", right="┤")
+
+    header = (
+        f" {'N°':>{num_w}}  "
+        f" "
+        f"{'DATE':<{date_w}}  "
+        f"{'EXPÉDITEUR':<{from_w}}  "
+        f"{'SUJET':<{subject_w}} "
+    )
+    print(colorize("│", "90") + colorize(header, "90;1") + colorize("│", "90"))
+    print_box_line(table_width, left="├", right="┤")
+
+    for index, message in enumerate(messages, start=1):
+        marker = colorize("●", "36") if index % 2 else colorize("•", "90")
+        number = colorize(f"{index:>{num_w}}", "96;1")
+        date = fit_ansi(format_email_date(message.get('date')), date_w)
+        sender = fit_ansi(clean_sender(message.get('from')), from_w)
+        subject = fit_ansi(message.get('subject') or "No Subject", subject_w)
+        print(
+            colorize("│", "90")
+            + f" {number} {marker} "
+            + colorize(date, "37")
+            + "  "
+            + colorize(sender, "36")
+            + "  "
+            + colorize(subject, "97;1")
+            + " "
+            + colorize("│", "90")
+        )
+    print_box_line(table_width, left="╰", right="╯")
+
+
+def parse_selection(selection, total):
+    selection = (selection or "").strip().lower()
+    if selection in {"q", "quit", "exit"}:
+        return []
+    if selection in {"a", "all", "tous", "tout"}:
+        return list(range(total))
+
+    selected = set()
+    for part in re.split(r"[,\s]+", selection):
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            try:
+                start = int(start_text)
+                end = int(end_text)
+            except ValueError:
+                raise ValueError(f"Sélection invalide: {part}")
+            if start > end:
+                start, end = end, start
+            for number in range(start, end + 1):
+                if 1 <= number <= total:
+                    selected.add(number - 1)
+                else:
+                    raise ValueError(f"Numéro hors limite: {number}")
+        else:
+            try:
+                number = int(part)
+            except ValueError:
+                raise ValueError(f"Sélection invalide: {part}")
+            if 1 <= number <= total:
+                selected.add(number - 1)
+            else:
+                raise ValueError(f"Numéro hors limite: {number}")
+    return sorted(selected)
+
+
+def ask_user_to_select_messages(messages):
+    if not messages:
+        return []
+
+    print_candidate_messages(messages)
+    print(colorize("\nSélection", "96;1"))
+    print("  " + colorize("1,3,5", "97;1") + "      numéros séparés par virgules/espaces")
+    print("  " + colorize("2-6", "97;1") + "        plage de numéros")
+    print("  " + colorize("2-6,8-10", "97;1") + "   plages multiples")
+    print("  " + colorize("1,3,7-9", "97;1") + "    mélange numéros + plages")
+    print("  " + colorize("all", "97;1") + "        tout sélectionner")
+    print("  " + colorize("q", "97;1") + "          quitter sans téléchargement")
+
+    while True:
+        answer = input("\nVotre sélection > ")
+        try:
+            selected_indexes = parse_selection(answer, len(messages))
+        except ValueError as exc:
+            print(colorize(f"[WARNING] {exc}. Réessayez.", "93"))
+            continue
+
+        if not selected_indexes:
+            return []
+
+        print(colorize("\nSélection retenue :", "96;1"))
+        for index in selected_indexes:
+            message = messages[index]
+            print(f"  {colorize(str(index + 1), '96;1')}. {format_email_date(message['date'])} — {message['subject']}")
+
+        confirm = input("Confirmer le téléchargement ? [o/N] ").strip().lower()
+        if confirm in {"o", "oui", "y", "yes"}:
+            return [messages[index] for index in selected_indexes]
+        print("Sélection annulée. Vous pouvez choisir à nouveau.")
+
+
+def interactive_download_main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Liste tous les emails Gmail disponibles, permet de choisir ceux à télécharger en PDF, "
+            "puis déplace les emails traités dans la corbeille Gmail."
+        )
+    )
+    parser.add_argument(
+        "--query",
+        default="",
+        help="Recherche Gmail optionnelle pour filtrer la liste (défaut: aucune, donc tous les emails). Ex: 'newer_than:30d', 'from:foo' ou 'has:attachment'.",
+    )
+    parser.add_argument(
+        "--max",
+        type=int,
+        default=50,
+        help="Nombre maximum d'emails à afficher (défaut: 50).",
+    )
+    parser.add_argument(
+        "--download-path",
+        metavar="PATH",
+        default=DOWNLOAD_PATH,
+        help="Dossier de téléchargement (défaut: %(default)s).",
+    )
+    parser.add_argument(
+        "--trash",
+        action="store_true",
+        help="Vide la corbeille Gmail uniquement. Option manuelle, non lancée automatiquement après téléchargement.",
+    )
+    args = parser.parse_args()
+
+    if args.trash:
         creds = authenticate()
         service = build("gmail", "v1", credentials=creds)
         empty_trash(service)
         return
-        
+
     os.system('clear')
     creds = authenticate()
     try:
-        check_playwright_chromium_browser()
         service = build("gmail", "v1", credentials=creds)
         user_id = "me"
-        label_name = "HasAttachment"
-        label_name_processed = "HasAttachment/SavedAsPDF"
+        save_dir = os.path.expanduser(args.download_path)
+        os.makedirs(save_dir, exist_ok=True)
 
-        if not os.path.exists(DOWNLOAD_PATH):
-            os.makedirs(DOWNLOAD_PATH)
+        print(f"[INFO] Recherche Gmail: {args.query or '(aucun filtre — tous les emails)'}")
+        print(f"[INFO] Dossier de téléchargement: {save_dir}")
+        messages = list_candidate_messages(service, user_id, query=args.query, max_results=args.max)
 
-        label_id = None
-        label_name_processed_id = None
+        if not messages:
+            print("[INFO] Aucun email trouvé pour cette recherche.")
+            return
 
-        labels = service.users().labels().list(userId=user_id).execute().get("labels", [])
-        for label in labels:
-            if label["name"] == label_name_processed:
-                label_name_processed_id = label["id"]
-                break
+        selected_messages = ask_user_to_select_messages(messages)
+        if not selected_messages:
+            print("[INFO] Aucun email sélectionné. Goodbye!")
+            return
 
-        for label in labels:
-            if label["name"] == label_name:
-                label_id = label["id"]
-                break
+        print(f"\n[INFO] {len(selected_messages)} email(s) sélectionné(s). Préparation de Chromium/Playwright...\n")
+        check_playwright_chromium_browser()
+        print(f"\n[INFO] Traitement du plus ancien au plus récent.\n")
+        for message in selected_messages:
+            msg_id = message["id"]
+            print(f"\033[92m[INFO] Starting to save email and attachment(s) for message ID {msg_id}\033[0m")
+            save_email_and_attachments(service, user_id, msg_id, save_dir)
+            move_message_to_trash(service, user_id, msg_id)
 
-        if label_id:
-            response = service.users().messages().list(userId=user_id, labelIds=[label_id]).execute()
-            messages = response.get("messages", [])
-            if messages:
-                print(f"[INFO] {len(messages)} email(s) found → sorting by date (oldest first) ...")
-                dated_messages = []
-                for msg in messages:
-                    try:
-                        msg_detail = service.users().messages().get(
-                            userId=user_id,
-                            id=msg['id'],
-                            fields='internalDate'
-                        ).execute()
-                        internal_date = int(msg_detail.get('internalDate', 0))
-                        dated_messages.append((internal_date, msg['id']))
-                    except Exception as e:
-                        print(f"[WARNING] Could not get date for message {msg['id']}: {e}")
-                        dated_messages.append((0, msg['id']))
-                dated_messages.sort(key=lambda x: x[0])
-                messages = [{"id": msg_id} for _, msg_id in dated_messages]
-                print("[INFO] Sorting done. Processing from oldest to newest.\n")
-                for message in messages:
-                    msg_id = message["id"]
-                    print(f"\033[92m[INFO] Starting to save email and attachment(s) for message ID {msg_id}\033[0m")
-                    service.users().messages().modify(userId=user_id, id=msg_id, body={"removeLabelIds": [label_id]}).execute()
-                    service.users().messages().modify(userId=user_id, id=msg_id, body={"addLabelIds": [label_name_processed_id]}).execute()
-                    #service.users().messages().delete(userId=user_id, id=msg_id).execute()
-                    save_email_and_attachments(service, user_id, msg_id, DOWNLOAD_PATH)
-                print(f"[INFO] {len(messages)} email(s) processed. Goodbye!")
-
-            else:
-                print("[INFO] No emails to process with label '{}' for PDF generation.".format(label_name))
-        else:
-            print(f"Label '{label_name}' not found.")
+        print(f"[INFO] {len(selected_messages)} email(s) processed and moved to Gmail trash. Goodbye!")
 
     except HttpError as error:
         print(f"An error occurred: {error}")
 
-
 if __name__ == "__main__":
-    main()
+    interactive_download_main()
