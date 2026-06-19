@@ -535,12 +535,12 @@ def print_candidate_messages(messages):
     subject_values = [message.get('subject') or "No Subject" for message in messages]
 
     from_w = max(
-        len("EXPÉDITEUR"),
+        len("SENDER"),
         min(max((visible_len(sender) for sender in sender_values), default=0), 42),
         22,
     )
     subject_w = max(
-        len("SUJET"),
+        len("SUBJECT"),
         min(max((visible_len(subject) for subject in subject_values), default=0), 72),
         24,
     )
@@ -557,16 +557,16 @@ def print_candidate_messages(messages):
 
     print()
     print_box_line(table_width)
-    print_box_text("GMAIL · Emails disponibles pour téléchargement", table_width, accent=True)
-    print_box_text(f"{len(messages)} email(s) listé(s) · sélection par numéro, plage ou all", table_width)
+    print_box_text("GMAIL · Emails available for download", table_width, accent=True)
+    print_box_text(f"{len(messages)} email(s) listed · select numbers, ranges, or all", table_width)
     print_box_line(table_width, left="├", right="┤")
 
     header = (
         f" {'N°':>{num_w}}  "
         f" "
         f"{'DATE':<{date_w}}  "
-        f"{'EXPÉDITEUR':<{from_w}}  "
-        f"{'SUJET':<{subject_w}} "
+        f"{'SENDER':<{from_w}}  "
+        f"{'SUBJECT':<{subject_w}} "
     )
     print(colorize("│", "90") + colorize(header, "90;1") + colorize("│", "90"))
     print_box_line(table_width, left="├", right="┤")
@@ -608,23 +608,23 @@ def parse_selection(selection, total):
                 start = int(start_text)
                 end = int(end_text)
             except ValueError:
-                raise ValueError(f"Sélection invalide: {part}")
+                raise ValueError(f"Invalid selection: {part}")
             if start > end:
                 start, end = end, start
             for number in range(start, end + 1):
                 if 1 <= number <= total:
                     selected.add(number - 1)
                 else:
-                    raise ValueError(f"Numéro hors limite: {number}")
+                    raise ValueError(f"Number out of range: {number}")
         else:
             try:
                 number = int(part)
             except ValueError:
-                raise ValueError(f"Sélection invalide: {part}")
+                raise ValueError(f"Invalid selection: {part}")
             if 1 <= number <= total:
                 selected.add(number - 1)
             else:
-                raise ValueError(f"Numéro hors limite: {number}")
+                raise ValueError(f"Number out of range: {number}")
     return sorted(selected)
 
 
@@ -633,34 +633,34 @@ def ask_user_to_select_messages(messages):
         return []
 
     print_candidate_messages(messages)
-    print(colorize("\nSélection", "96;1"))
-    print("  " + colorize("1,3,5", "97;1") + "      numéros séparés par virgules/espaces")
-    print("  " + colorize("2-6", "97;1") + "        plage de numéros")
-    print("  " + colorize("2-6,8-10", "97;1") + "   plages multiples")
-    print("  " + colorize("1,3,7-9", "97;1") + "    mélange numéros + plages")
-    print("  " + colorize("all", "97;1") + "        tout sélectionner")
-    print("  " + colorize("q", "97;1") + "          quitter sans téléchargement")
+    print(colorize("\nSelection", "96;1"))
+    print("  " + colorize("1,3,5", "97;1") + "      individual numbers, comma/space separated")
+    print("  " + colorize("2-6", "97;1") + "        number range")
+    print("  " + colorize("2-6,8-10", "97;1") + "   multiple ranges")
+    print("  " + colorize("1,3,7-9", "97;1") + "    mix of numbers and ranges")
+    print("  " + colorize("all", "97;1") + "        select all listed emails")
+    print("  " + colorize("q", "97;1") + "          quit without downloading")
 
     while True:
-        answer = input("\nVotre sélection > ")
+        answer = input("\nYour selection > ")
         try:
             selected_indexes = parse_selection(answer, len(messages))
         except ValueError as exc:
-            print(colorize(f"[WARNING] {exc}. Réessayez.", "93"))
+            print(colorize(f"[WARNING] {exc}. Try again.", "93"))
             continue
 
         if not selected_indexes:
             return []
 
-        print(colorize("\nSélection retenue :", "96;1"))
+        print(colorize("\nSelected emails:", "96;1"))
         for index in selected_indexes:
             message = messages[index]
             print(f"  {colorize(str(index + 1), '96;1')}. {format_email_date(message['date'])} — {message['subject']}")
 
-        confirm = input("Confirmer le téléchargement ? [o/N] ").strip().lower()
+        confirm = input("Confirm download? [y/N] ").strip().lower()
         if confirm in {"o", "oui", "y", "yes"}:
             return [messages[index] for index in selected_indexes]
-        print("Sélection annulée. Vous pouvez choisir à nouveau.")
+        print("Selection cancelled. You can choose again.")
 
 
 def interactive_download_main():
@@ -668,31 +668,31 @@ def interactive_download_main():
 
     parser = argparse.ArgumentParser(
         description=(
-            "Liste tous les emails Gmail disponibles, permet de choisir ceux à télécharger en PDF, "
-            "puis déplace les emails traités dans la corbeille Gmail."
+            "List available Gmail messages, let the user choose which ones to download as PDFs, "
+            "then move processed emails to the Gmail trash."
         )
     )
     parser.add_argument(
         "--query",
         default="",
-        help="Recherche Gmail optionnelle pour filtrer la liste (défaut: aucune, donc tous les emails). Ex: 'newer_than:30d', 'from:foo' ou 'has:attachment'.",
+        help="Optional Gmail search query used to filter the list (default: none, so all emails). Examples: 'newer_than:30d', 'from:foo', or 'has:attachment'.",
     )
     parser.add_argument(
         "--max",
         type=int,
         default=50,
-        help="Nombre maximum d'emails à afficher (défaut: 50).",
+        help="Maximum number of emails to list (default: 50).",
     )
     parser.add_argument(
         "--download-path",
         metavar="PATH",
         default=DOWNLOAD_PATH,
-        help="Dossier de téléchargement (défaut: %(default)s).",
+        help="Download directory (default: %(default)s).",
     )
     parser.add_argument(
         "--trash",
         action="store_true",
-        help="Vide la corbeille Gmail uniquement. Option manuelle, non lancée automatiquement après téléchargement.",
+        help="Empty the Gmail trash only. Manual option, not run automatically after downloads.",
     )
     args = parser.parse_args()
 
@@ -710,22 +710,22 @@ def interactive_download_main():
         save_dir = os.path.expanduser(args.download_path)
         os.makedirs(save_dir, exist_ok=True)
 
-        print(f"[INFO] Recherche Gmail: {args.query or '(aucun filtre — tous les emails)'}")
-        print(f"[INFO] Dossier de téléchargement: {save_dir}")
+        print(f"[INFO] Gmail search query: {args.query or '(no filter — all emails)'}")
+        print(f"[INFO] Download directory: {save_dir}")
         messages = list_candidate_messages(service, user_id, query=args.query, max_results=args.max)
 
         if not messages:
-            print("[INFO] Aucun email trouvé pour cette recherche.")
+            print("[INFO] No emails found for this query.")
             return
 
         selected_messages = ask_user_to_select_messages(messages)
         if not selected_messages:
-            print("[INFO] Aucun email sélectionné. Goodbye!")
+            print("[INFO] No email selected. Goodbye!")
             return
 
-        print(f"\n[INFO] {len(selected_messages)} email(s) sélectionné(s). Préparation de Chromium/Playwright...\n")
+        print(f"\n[INFO] {len(selected_messages)} email(s) selected. Preparing Chromium/Playwright...\n")
         check_playwright_chromium_browser()
-        print(f"\n[INFO] Traitement du plus ancien au plus récent.\n")
+        print(f"\n[INFO] Processing from oldest to newest.\n")
         for message in selected_messages:
             msg_id = message["id"]
             print(f"\033[92m[INFO] Starting to save email and attachment(s) for message ID {msg_id}\033[0m")
