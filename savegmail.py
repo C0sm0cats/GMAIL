@@ -21,6 +21,36 @@ from email.policy import default as policy_default
 
 logging.getLogger('tzlocal').setLevel(logging.ERROR)
 
+def measure_pdf_margins(browser, header_template, footer_template):
+    """Measure isolated print templates at A4 width, including wrapped lines."""
+    measurement_page = browser.new_page()
+    try:
+        measurement_page.emulate_media(media="print")
+        heights = []
+        for template in (header_template, footer_template):
+            measurement_page.set_content(
+                '<html><head><style>html,body{margin:0;padding:0;}'
+                'body{width:210mm;font-family:Arial,sans-serif;}'
+                '</style></head><body>' + template + '</body></html>'
+            )
+            height = measurement_page.evaluate("""async () => {
+                await document.fonts.ready;
+                // Reserve realistic space for Chromium's injected page numbers.
+                document.querySelectorAll('.pageNumber, .totalPages')
+                    .forEach(element => element.textContent = '9999');
+                return Math.ceil(document.body.firstElementChild
+                    .getBoundingClientRect().height);
+            }""")
+            # Chromium's header/footer edge padding (20px) plus an 8px body gap.
+            heights.append(height + 28)
+        if sum(heights) >= 297 / 25.4 * 96:
+            raise ValueError("Email header and footer exceed the height of an A4 page")
+        return {"top": f"{heights[0]}px", "bottom": f"{heights[1]}px",
+                "left": "0", "right": "0"}
+    finally:
+        measurement_page.close()
+
+
 def check_playwright_chromium_browser():
     def launch_chromium():
         with sync_playwright() as p:
@@ -314,7 +344,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
             page.wait_for_load_state('networkidle')
 
             header_template = """
-                <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                <div style="font-family: Arial, sans-serif; font-size: 10px; line-height: normal; color: #666; text-align: center; width: 100%; box-sizing: border-box; padding: 0 12px; overflow-wrap: anywhere; display: flow-root">
                     <h3 style='margin-top: 0px;'>{subject}</h3>
                     <div>From : {fro}</div>
                     <div>Reply To : {reply}</div>
@@ -324,12 +354,14 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 </div>
             """.format(fro=fro, reply=reply, to=to, cc=cc, date=date, subject=subject)
             footer_template = f"""
-                <div style="font-size: 10px; color: #666; text-align: center; width: 100%">
+                <div style="font-family: Arial, sans-serif; font-size: 10px; line-height: normal; color: #666; text-align: center; width: 100%; box-sizing: border-box; padding: 0 12px; overflow-wrap: anywhere; display: flow-root">
                     {attachments_html_footer}
                     <div style="margin-top: 8px;"><a href='https://mail.google.com/mail/u/0/#inbox/{msg_id}'>View in Gmail</a></div>
                     <span class="pageNumber"></span> / <span class="totalPages"></span>
                 </div>
             """
+
+            pdf_margins = measure_pdf_margins(browser, header_template, footer_template)
 
             page.pdf(
                 format='A4',
@@ -337,7 +369,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir):
                 display_header_footer=True,
                 header_template=header_template,
                 footer_template=footer_template,
-                margin={"top": "150px", "bottom": "150px", "left": "0", "right": "0"},
+                margin=pdf_margins,
                 path=final_pdf_path
             )
 
