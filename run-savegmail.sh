@@ -10,9 +10,11 @@ fi
 # Observed with the official pip bootstrap on 2026-05-22:
 #   playwright 1.60.0
 #   bundled Playwright driver Node v24.15.0
-if ! "$script_dir/.venv/bin/python" -c 'import googleapiclient, google_auth_oauthlib, playwright, pytz, tzlocal' >/dev/null 2>&1; then
+if ! "$script_dir/.venv/bin/python" -c 'import googleapiclient, google_auth_oauthlib, playwright, prompt_toolkit, pytz, rich, tzlocal' >/dev/null 2>&1; then
     "$script_dir/.venv/bin/python" -m pip install \
         playwright \
+        prompt_toolkit \
+        rich \
         google-api-python-client \
         google-auth \
         google-auth-oauthlib \

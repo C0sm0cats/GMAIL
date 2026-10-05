@@ -4,21 +4,23 @@ SaveGmail is a Python script for archiving Gmail messages as PDFs and saving the
 
 ## Key Features
 
-- Lists available Gmail messages directly in the terminal
-- Lets you choose emails interactively by number, ranges, or multiple ranges
+- Interactive terminal picker: arrow keys, space to select, `/` to filter, `m` to load older emails
+- Compact, borderless list with sender, subject, preview snippet and mail-client style dates
 - Downloads selected emails as PDFs with complete metadata
-- Extracts and saves email attachments
-- Preserves HTML email formatting where possible
+- Extracts and saves email attachments, embeds inline images
+- Renders in headless Chromium, waiting for lazy-loaded images and web fonts
+- Live progress with a per-email ✓/✗ line and a final summary
+- Failed emails stay in Gmail and leave no partial files behind
 - Moves successfully processed Gmail messages to the Gmail trash
-- Provides a manual option to empty the Gmail trash
+- Provides a manual, confirmed option to empty the Gmail trash
 - Secure OAuth 2.0 authentication
 - Local Playwright/Chromium setup through the launcher
 
 ## Prerequisites
 
-- Python 3.6 or higher
+- Python 3.9 or higher
 - Google Cloud Platform project with Gmail API enabled
-- OAuth 2.0 credentials file (`credentials.json`) in the project directory
+- OAuth 2.0 credentials file (`credentials.json`) next to `savegmail.py`
 
 ## Installation
 
@@ -46,14 +48,14 @@ SaveGmail is a Python script for archiving Gmail messages as PDFs and saving the
    - Create a project on [Google Cloud Console](https://console.cloud.google.com/)
    - Enable Gmail API
    - Create OAuth 2.0 credentials
-   - Download `credentials.json` to the project directory
+   - Download `credentials.json` next to `savegmail.py` (the script finds it there whatever directory you launch it from)
 
 2. **Download directory**
 
    The default download path is defined in `savegmail.py`:
 
    ```python
-   DOWNLOAD_PATH = '~/Downloads/'
+   DOWNLOAD_PATH = '~/GMail/'
    ```
 
    You can either change that variable in the script or override it at runtime:
@@ -72,18 +74,29 @@ Run:
 ./run-savegmail.sh
 ```
 
-By default, the script lists Gmail messages without requiring the old `HasAttachment` label workflow. You then select which messages to download from the terminal.
-
-Supported selections:
+The script lists your Gmail messages (oldest to newest) in an interactive picker:
 
 ```text
-1,3,5      numbers separated by commas or spaces
-2-6        number range
-2-6,8-10   multiple ranges
-1,3,7-9    mix of numbers and ranges
-all        select everything listed
-q          quit without downloading
+ Gmail · 50 emails · oldest → newest
+
+   ○ 2025-08-31  Amazon        Your order has shipped        Hello, your parcel arrives…
+ ❯ ● 5 Sep       Jean Dupont   Re: roofing quote             OK for Thursday, I'll come…
+   ○ 12:31       GitHub        [repo] PR #42 merged          Merged #42 into main.
+
+ ↑↓ move · space select · a all · / filter · m more · enter download · q quit   1 selected
 ```
+
+| Key | Action |
+| --- | --- |
+| `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `Home` `End` | Move |
+| `space` | Select / unselect the current email |
+| `a` | Select / unselect all visible emails |
+| `/` | Filter by sender or subject (`enter` to apply, `esc` to clear) |
+| `m` | Load older emails |
+| `enter` | Download the selection (or the current email if none is selected) |
+| `q` / `esc` | Quit without downloading |
+
+When the output is not a terminal (pipe, CI), the script falls back to typed selections such as `1,3`, `2-6`, `2-6,8-10`, `all` or `q`.
 
 After a selected email is successfully saved locally, the script moves the corresponding Gmail message to the Gmail trash.
 
@@ -109,7 +122,23 @@ Use Gmail search syntax with `--query`:
 ./run-savegmail.sh --trash
 ```
 
-This option only empties the Gmail trash. It is not run automatically after downloads.
+This option only empties the Gmail trash, after showing the number of messages and asking for confirmation. It is not run automatically after downloads.
+
+### Render in a visible browser window
+
+```bash
+./run-savegmail.sh --headed
+```
+
+PDFs are rendered in headless Chromium by default. Use `--headed` as a fallback if an email captures badly.
+
+### Show details
+
+```bash
+./run-savegmail.sh --verbose
+```
+
+Shows token, Chromium, MIME parts and PDF rendering details.
 
 ### Show help
 
@@ -123,15 +152,17 @@ For each selected message, SaveGmail:
 
 1. retrieves the email through the Gmail API
 2. extracts metadata such as subject, sender, recipients, and date
-3. renders the message body to PDF using Playwright/Chromium
-4. saves attachments in the configured download directory
+3. saves attachments in the configured download directory
+4. renders the message body to PDF using headless Chromium, named `<timestamp>_<subject>.pdf`
 5. moves the processed Gmail message to the Gmail trash
+
+If any step fails, the files written for that email are removed and the email stays in Gmail, so a later retry starts clean.
 
 ## Troubleshooting
 
 ### Authentication errors
 
-- Verify `credentials.json` exists in the project directory
+- Verify `credentials.json` exists next to `savegmail.py`
 - Check that Gmail API is enabled in Google Cloud Console
 - If the OAuth token is invalid, remove `token.json` and run the script again
 
@@ -140,6 +171,11 @@ For each selected message, SaveGmail:
 - Check destination directory permissions
 - Ensure sufficient disk space
 - Use `--download-path` to test another output directory
+
+### PDF rendering
+
+- If an email renders badly, retry it with `--headed`
+- Use `--verbose` to see which MIME parts and inline images were processed
 
 ### Playwright browser setup
 
