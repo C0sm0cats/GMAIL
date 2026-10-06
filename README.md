@@ -79,11 +79,11 @@ The script lists your Gmail messages (oldest to newest) in an interactive picker
 ```text
  Gmail · 50 emails · oldest → newest
 
-   ○ 2025-08-31  Amazon        Your order has shipped        Hello, your parcel arrives…
- ❯ ● 5 Sep       Jean Dupont   Re: roofing quote             OK for Thursday, I'll come…
-   ○ 12:31       GitHub        [repo] PR #42 merged          Merged #42 into main.
+   ○ 📎 2025-08-31  Amazon        Your order has shipped        Hello, your parcel arrives…
+ ❯ ●    5 Sep       Jean Dupont   Re: roofing quote             OK for Thursday, I'll come…
+   ○    12:31       GitHub        [repo] PR #42 merged          Merged #42 into main.
 
- ↑↓ move · space select · a all · / filter · m more · enter download · q quit   1 selected
+ ↑↓ move · a all · space select · / filter · m more · p preview · enter save+trash · s save · d trash · q quit   1 selected
 ```
 
 | Key | Action |
@@ -93,12 +93,18 @@ The script lists your Gmail messages (oldest to newest) in an interactive picker
 | `a` | Select / unselect all visible emails |
 | `/` | Filter by sender or subject (`enter` to apply, `esc` to clear) |
 | `m` | Load older emails |
-| `enter` | Download the selection (or the current email if none is selected) |
-| `q` / `esc` | Quit without downloading |
+| `p` | Preview the current email (full text, in a pager) |
+| `enter` | Save the selection as PDFs, then move it to the Gmail trash (the current email if none is selected) |
+| `s` | Save the selection as PDFs and keep it in Gmail (marked `✓` in the list) |
+| `d` | Move the selection to the Gmail trash without saving, after a `y` confirmation |
+| `u` | Undo the last move to trash |
+| `q` / `esc` | Quit |
 
-When the output is not a terminal (pipe, CI), the script falls back to typed selections such as `1,3`, `2-6`, `2-6,8-10`, `all` or `q`.
+`📎` marks emails with attachments. After each action the list comes back with the result on top, so several batches can be handled in one session.
 
-After a selected email is successfully saved locally, the script moves the corresponding Gmail message to the Gmail trash.
+When the output is not a terminal (pipe, CI), the script falls back to typed selections such as `1,3`, `2-6`, `2-6,8-10`, `all` or `q`. Prefix with `s` to save only (`s 1,3`) or `d` to trash without saving (`d 2-6`, confirmed with `y`).
+
+After a selected email is successfully saved locally, the script moves the corresponding Gmail message to the Gmail trash (except with `s`).
 
 ### Filter the listed emails
 
@@ -154,7 +160,7 @@ For each selected message, SaveGmail:
 2. extracts metadata such as subject, sender, recipients, and date
 3. saves attachments in the configured download directory
 4. renders the message body to PDF using headless Chromium, named `<timestamp>_<subject>.pdf`
-5. moves the processed Gmail message to the Gmail trash
+5. moves the processed Gmail messages to the Gmail trash, in one batch (unless saved with `s`)
 
 If any step fails, the files written for that email are removed and the email stays in Gmail, so a later retry starts clean.
 
@@ -205,3 +211,9 @@ This project is licensed under the MIT License. See the `LICENSE` file for detai
 ---
 
 Built with ❤️ by C0sm0cats
+
+## Tests
+
+```bash
+.venv/bin/python -m unittest discover -s tests
+```

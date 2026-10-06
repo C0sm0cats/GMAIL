@@ -2,7 +2,7 @@ import os
 import base64
 from playwright.sync_api import sync_playwright
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -13,7 +13,6 @@ from email.utils import parsedate_to_datetime
 import subprocess
 import sys
 import logging
-import pytz
 import re
 import io
 import contextlib
@@ -112,8 +111,7 @@ def get_real_date(date_string):
 
 def convert_expiry_to_local_time(expiry_utc):
     local_timezone = get_localzone()
-    utc_timezone = pytz.utc
-    expiry_utc = utc_timezone.localize(expiry_utc)
+    expiry_utc = expiry_utc.replace(tzinfo=timezone.utc)
     expiry_local = expiry_utc.astimezone(local_timezone)
     return expiry_local
 
@@ -450,10 +448,49 @@ def empty_trash(service):
         console.print(f"[red]✗[/] Error while emptying trash: {escape(str(e))}")
 
 
-def move_message_to_trash(service, user_id, msg_id):
-    """Move a Gmail message to trash after a successful local save."""
-    service.users().messages().trash(userId=user_id, id=msg_id).execute()
-    debug(f"Message moved to Gmail trash: {msg_id}")
+API_BATCH_SIZE = 50  # Gmail throttles larger batches
+
+
+def run_batched(service, ids, make_request):
+    """Run make_request(id) for every id in Gmail batch calls, retrying failed entries one by one.
+
+    Returns ({id: response}, {id: exception}).
+    """
+    responses, errors = {}, {}
+
+    def collect(request_id, response, exception):
+        if exception is None:
+            responses[request_id] = response
+        else:
+            errors[request_id] = exception
+
+    for start in range(0, len(ids), API_BATCH_SIZE):
+        batch = service.new_batch_http_request(callback=collect)
+        for msg_id in ids[start:start + API_BATCH_SIZE]:
+            batch.add(make_request(msg_id), request_id=msg_id)
+        batch.execute()
+
+    # Retry throttled/failed batch entries one by one.
+    for msg_id in list(errors):
+        try:
+            responses[msg_id] = make_request(msg_id).execute()
+            del errors[msg_id]
+        except Exception as exc:
+            errors[msg_id] = exc
+            debug(f"Gmail request failed for message {msg_id}: {exc}")
+    return responses, errors
+
+
+def trash_messages(service, user_id, ids):
+    """Move messages to the Gmail trash. Returns {id: exception} for the ones that failed."""
+    _, errors = run_batched(service, ids, lambda msg_id: service.users().messages().trash(userId=user_id, id=msg_id))
+    return errors
+
+
+def untrash_messages(service, user_id, ids):
+    """Restore messages from the Gmail trash. Returns {id: exception} for the ones that failed."""
+    _, errors = run_batched(service, ids, lambda msg_id: service.users().messages().untrash(userId=user_id, id=msg_id))
+    return errors
 
 
 
@@ -464,8 +501,7 @@ def extract_header(headers, name, default=""):
     return default
 
 
-METADATA_FIELDS = "id,threadId,internalDate,payload/headers,snippet"
-METADATA_BATCH_SIZE = 50  # Gmail throttles larger batches
+METADATA_FIELDS = "id,threadId,internalDate,payload(mimeType,headers),snippet"
 
 
 def metadata_request(service, user_id, msg_id):
@@ -479,7 +515,8 @@ def metadata_request(service, user_id, msg_id):
 
 
 def to_candidate(detail):
-    headers = detail.get("payload", {}).get("headers", [])
+    payload = detail.get("payload", {})
+    headers = payload.get("headers", [])
     return {
         "id": detail["id"],
         "threadId": detail.get("threadId", ""),
@@ -488,6 +525,8 @@ def to_candidate(detail):
         "from": extract_header(headers, "From", ""),
         "subject": extract_header(headers, "Subject", "No Subject"),
         "snippet": detail.get("snippet", ""),
+        # Metadata has no parts; multipart/mixed is how mail clients wrap real attachments.
+        "attachment": payload.get("mimeType") == "multipart/mixed",
     }
 
 
@@ -510,28 +549,7 @@ def list_candidate_messages(service, user_id, query="", max_results=50, page_tok
         if not page_token:
             break
 
-    details = {}
-    failed = []
-
-    def collect(request_id, response, exception):
-        if exception is None:
-            details[request_id] = response
-        else:
-            failed.append(request_id)
-
-    for start in range(0, len(ids), METADATA_BATCH_SIZE):
-        batch = service.new_batch_http_request(callback=collect)
-        for msg_id in ids[start:start + METADATA_BATCH_SIZE]:
-            batch.add(metadata_request(service, user_id, msg_id), request_id=msg_id)
-        batch.execute()
-
-    # Retry throttled/failed batch entries one by one.
-    for msg_id in failed:
-        try:
-            details[msg_id] = metadata_request(service, user_id, msg_id).execute()
-        except Exception as exc:
-            debug(f"Could not read metadata for message {msg_id}: {exc}")
-
+    details, _ = run_batched(service, ids, lambda msg_id: metadata_request(service, user_id, msg_id))
     detailed_messages = [to_candidate(details[msg_id]) for msg_id in ids if msg_id in details]
     detailed_messages.sort(key=lambda item: item["internalDate"])
     return detailed_messages, page_token
@@ -581,13 +599,14 @@ def message_row(message):
         "sender": sender,
         "subject": subject,
         "snippet": snippet,
+        "attachment": bool(message.get("attachment")),
         "haystack": f"{sender} {message.get('from', '')} {subject}".lower(),
     }
 
 
 def column_widths(rows, total_width):
     """Return (sender, subject, snippet) widths for the space left after fixed columns."""
-    fixed = 4 + 10 + 2  # cursor + checkbox, date, gap
+    fixed = 4 + 3 + 10 + 2  # cursor + checkbox, attachment, date, gap
     sender_w = min(max((cell_len(row["sender"]) for row in rows), default=6), 22)
     rest = max(0, total_width - fixed - sender_w - 2 - 1)
     longest_subject = max((cell_len(row["subject"]) for row in rows), default=7)
@@ -596,10 +615,19 @@ def column_widths(rows, total_width):
     return sender_w, subject_w, snippet_w if snippet_w >= 10 else 0
 
 
-def pick_messages(messages, load_more=None):
-    """Interactive multi-select list. Returns selected messages, [] on quit.
+def new_picker_state():
+    """Picker state kept across runs, so cursor, filter and selection survive each action."""
+    return {"cursor": 0, "top": 0, "query": "", "filtering": False, "selected": set(), "saved": set(),
+            "loading": False, "exhausted": True, "confirm": None}
 
+
+def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=False):
+    """Interactive multi-select list over messages (extended in place when older emails load).
+
+    Returns (action, chosen messages) where action is "download" (save + trash), "save",
+    "trash", "preview", "undo" or "quit".
     load_more() returns (older messages sorted oldest first, whether even older ones remain).
+    notice is a list of formatted-text lines shown under the header (last action result).
     """
     from prompt_toolkit.application import Application, get_app
     from prompt_toolkit.filters import Condition
@@ -609,10 +637,10 @@ def pick_messages(messages, load_more=None):
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.styles import Style
 
-    messages = list(messages)
     rows = [message_row(message) for message in messages]
-    state = {"cursor": 0, "top": 0, "query": "", "filtering": False, "selected": set(),
-             "loading": False, "exhausted": load_more is None}
+    state = new_picker_state() if state is None else state
+    state.update(filtering=False, loading=False, confirm=None, exhausted=load_more is None)
+    notice = list(notice)
 
     def visible():
         terms = state["query"].lower().split()
@@ -622,8 +650,8 @@ def pick_messages(messages, load_more=None):
         return get_app().output.get_size()
 
     def list_height():
-        # Leave room for the startup line above the picker and its own header/footer.
-        return max(1, min(len(rows), size().rows - 6))
+        # Leave room for the startup line above the picker, its own header/footer and the notice.
+        return max(1, min(len(rows), size().rows - 6 - len(notice)))
 
     def clamp():
         indexes = visible()
@@ -636,6 +664,16 @@ def pick_messages(messages, load_more=None):
         state["top"] = max(0, min(state["top"], max(0, len(indexes) - height)))
         return indexes
 
+    def current_id():
+        indexes = visible()
+        return messages[indexes[state["cursor"]]]["id"] if indexes else None
+
+    def chosen():
+        """Selected ids, or the email under the cursor when nothing is selected."""
+        if state["selected"]:
+            return set(state["selected"])
+        return {current_id()} - {None}
+
     def render_header():
         indexes = visible()
         parts = [("class:title", " Gmail"), ("class:dim", f" · {len(rows)} emails · oldest → newest")]
@@ -644,22 +682,37 @@ def pick_messages(messages, load_more=None):
             parts.append(("class:accent", state["query"]))
         return parts
 
+    def render_notice():
+        parts = []
+        for line in notice:
+            if parts:
+                parts.append(("", "\n"))
+            parts += line
+        return parts
+
     def render_list():
         indexes = clamp()
         if not indexes:
-            return [("class:dim", "   No email matches this filter.")]
+            return [("class:dim", "   No email matches this filter." if rows else "   No emails left.")]
         sender_w, subject_w, snippet_w = column_widths(rows, size().columns)
         lines = []
         for position in range(state["top"], min(len(indexes), state["top"] + list_height())):
             index = indexes[position]
             row = rows[index]
+            msg_id = messages[index]["id"]
             current = position == state["cursor"]
-            checked = messages[index]["id"] in state["selected"]
+            if msg_id in state["selected"]:
+                mark = ("class:checked", "● ")
+            elif msg_id in state["saved"]:
+                mark = ("class:saved", "✓ ")
+            else:
+                mark = ("class:dim", "○ ")
             if lines:
                 lines.append(("", "\n"))
             lines += [
                 ("class:cursor", " ❯ " if current else "   "),
-                ("class:checked" if checked else "class:dim", "● " if checked else "○ "),
+                mark,
+                ("", "📎 " if row["attachment"] else "   "),
                 ("class:dim", fit(row["date"], 10) + "  "),
                 ("class:sender", fit(row["sender"], sender_w) + "  "),
                 ("class:subject.current" if current else "", fit(row["subject"], subject_w)),
@@ -670,33 +723,49 @@ def pick_messages(messages, load_more=None):
 
     def render_footer():
         count = len(state["selected"])
-        if state["filtering"]:
+        status = f"{count} selected " if count else ""
+        if state["confirm"]:
+            n = len(state["confirm"])
+            hint = [("class:warn", f" Move {n} email{'s' * (n != 1)} to trash without saving?"),
+                    ("class:dim", "   "), ("class:key", "y"), ("class:dim", " confirm · any other key cancel")]
+        elif state["filtering"]:
             hint = [("class:accent", " / "), ("", state["query"]), ("class:accent", "▏"),
                     ("class:dim", "   enter apply · esc clear")]
         else:
-            hint = []
-            keys = [("↑↓", "move"), ("space", "select"), ("a", "all"), ("/", "filter")]
+            keys = [("↑↓", "move"), ("a", "all"), ("space", "select"), ("/", "filter")]
             if not state["exhausted"]:
                 keys.append(("m", "loading…" if state["loading"] else "more"))
-            for key, label in keys + [("enter", "download"), ("q", "quit")]:
+            keys += [("p", "preview"), ("enter", "save+trash"), ("s", "save"), ("d", "trash")]
+            if can_undo:
+                keys.append(("u", "undo"))
+            keys.append(("q", "quit"))
+            # Drop the most obvious hints first when the terminal is too narrow.
+            while len(keys) > 6 and sum(cell_len(f" · {key} {label}") for key, label in keys) + cell_len(status) + 2 > size().columns:
+                keys.pop(0)
+            hint = []
+            for key, label in keys:
                 hint += [("class:dim", " · " if hint else " "), ("class:key", key), ("class:dim", f" {label}")]
-        status = f"{count} selected " if count else ""
         used = sum(cell_len(text) for _, text in hint)
         gap = max(2, size().columns - used - cell_len(status) - 1)
         return hint + [("", " " * gap), ("class:checked", status)]
 
     filtering = Condition(lambda: state["filtering"])
-    browsing = ~filtering
+    confirming = Condition(lambda: bool(state["confirm"]))
+    browsing = ~filtering & ~confirming
     bindings = KeyBindings()
 
     def move(delta):
         state["cursor"] += delta
         clamp()
 
-    bindings.add("up")(lambda event: move(-1))
-    bindings.add("down")(lambda event: move(1))
-    bindings.add("pageup")(lambda event: move(-list_height()))
-    bindings.add("pagedown")(lambda event: move(list_height()))
+    def submit(event, action, ids):
+        if ids:
+            event.app.exit(result=(action, [message for message in messages if message["id"] in ids]))
+
+    bindings.add("up", filter=~confirming)(lambda event: move(-1))
+    bindings.add("down", filter=~confirming)(lambda event: move(1))
+    bindings.add("pageup", filter=~confirming)(lambda event: move(-list_height()))
+    bindings.add("pagedown", filter=~confirming)(lambda event: move(list_height()))
     bindings.add("k", filter=browsing)(lambda event: move(-1))
     bindings.add("j", filter=browsing)(lambda event: move(1))
     bindings.add("home", filter=browsing)(lambda event: move(-len(rows)))
@@ -704,9 +773,9 @@ def pick_messages(messages, load_more=None):
 
     @bindings.add("space", filter=browsing)
     def _(event):
-        indexes = visible()
-        if indexes:
-            state["selected"] ^= {messages[indexes[state["cursor"]]]["id"]}
+        msg_id = current_id()
+        if msg_id:
+            state["selected"] ^= {msg_id}
             move(1)
 
     @bindings.add("a", filter=browsing)
@@ -721,13 +790,23 @@ def pick_messages(messages, load_more=None):
     def _(event):
         state["filtering"] = True
 
-    @bindings.add("enter", filter=browsing)
+    bindings.add("enter", filter=browsing)(lambda event: submit(event, "download", chosen()))
+    bindings.add("s", filter=browsing)(lambda event: submit(event, "save", chosen()))
+    bindings.add("p", filter=browsing)(lambda event: submit(event, "preview", {current_id()} - {None}))
+
+    @bindings.add("d", filter=browsing)
     def _(event):
-        indexes = visible()
-        if not state["selected"] and indexes:
-            state["selected"].add(messages[indexes[state["cursor"]]]["id"])
-        if state["selected"]:
-            event.app.exit(result=[message for message in messages if message["id"] in state["selected"]])
+        state["confirm"] = chosen() or None
+
+    bindings.add("y", filter=confirming)(lambda event: submit(event, "trash", state["confirm"]))
+
+    @bindings.add("<any>", filter=confirming)
+    def _(event):
+        state["confirm"] = None
+
+    @bindings.add("u", filter=browsing & Condition(lambda: can_undo))
+    def _(event):
+        event.app.exit(result=("undo", []))
 
     @bindings.add("m", filter=browsing)
     def _(event):
@@ -739,15 +818,12 @@ def pick_messages(messages, load_more=None):
             older, more = await asyncio.to_thread(load_more)
             state["exhausted"] = not more
             # Older emails go on top; keep the cursor on the same email.
-            current_id = None
-            indexes = visible()
-            if indexes:
-                current_id = messages[indexes[state["cursor"]]]["id"]
+            current = current_id()
             messages[:0] = older
             rows[:0] = [message_row(message) for message in older]
-            if current_id:
+            if current:
                 state["cursor"] = next(
-                    position for position, index in enumerate(visible()) if messages[index]["id"] == current_id
+                    position for position, index in enumerate(visible()) if messages[index]["id"] == current
                 )
             state["loading"] = False
             event.app.invalidate()
@@ -758,7 +834,7 @@ def pick_messages(messages, load_more=None):
     @bindings.add("escape", filter=browsing)
     @bindings.add("c-c")
     def _(event):
-        event.app.exit(result=[])
+        event.app.exit(result=("quit", []))
 
     @bindings.add("enter", filter=filtering)
     def _(event):
@@ -786,20 +862,26 @@ def pick_messages(messages, load_more=None):
         "accent": "fg:ansicyan bold",
         "cursor": "fg:ansicyan bold",
         "checked": "fg:ansigreen bold",
+        "saved": "fg:ansigreen",
+        "error": "fg:ansired bold",
         "sender": "fg:ansicyan",
         "subject.current": "bold",
         "key": "bold",
+        "warn": "fg:ansiyellow bold",
     })
-    layout = Layout(HSplit([
-        Window(FormattedTextControl(render_header), height=1),
+    windows = [Window(FormattedTextControl(render_header), height=1)]
+    if notice:
+        windows.append(Window(FormattedTextControl(render_notice), height=len(notice)))
+    windows += [
         Window(height=1),
         Window(FormattedTextControl(render_list), height=lambda: Dimension.exact(list_height())),
         Window(height=1),
         Window(FormattedTextControl(render_footer), height=1),
-    ]))
-    app = Application(layout=layout, key_bindings=bindings, style=style, erase_when_done=True)
+    ]
+    app = Application(layout=Layout(HSplit(windows)), key_bindings=bindings, style=style, erase_when_done=True)
     app.ttimeoutlen = 0.05
-    return app.run() or []
+    # Own thread: Playwright's sync API keeps an event loop running in the main one between actions.
+    return app.run(in_thread=True) or ("quit", [])
 
 
 def print_message_line(mark, message, detail="", sender_w=22):
@@ -851,13 +933,30 @@ def parse_selection(selection, total):
     return sorted(selected)
 
 
-def ask_user_to_select_messages(messages, load_more=None):
-    """Pick emails interactively, or by typed numbers when not attached to a terminal."""
-    if not messages:
-        return []
-    if sys.stdin.isatty() and sys.stdout.isatty():
-        return pick_messages(messages, load_more)
+ACTION_PREFIXES = {"s": "save", "d": "trash"}
 
+
+def parse_command(answer):
+    """Split an optional action prefix from a typed selection: 's 1,3' saves only, 'd 1,3' trashes."""
+    parts = (answer or "").strip().split(None, 1)
+    if len(parts) == 2 and parts[0].lower() in ACTION_PREFIXES:
+        return ACTION_PREFIXES[parts[0].lower()], parts[1]
+    return "download", answer or ""
+
+
+def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), can_undo=False):
+    """Pick emails interactively, or by typed numbers when not attached to a terminal.
+
+    Returns (action, messages); see pick_messages for the actions.
+    """
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return pick_messages(messages, load_more, state, notice, can_undo)
+    if not messages:
+        return "quit", []
+
+    for line in notice:
+        # Key hints only make sense in the interactive picker.
+        console.print(escape("".join(text for style, text in line if "keyhint" not in style)))
     sender_w = min(max(cell_len(sender_name(m.get("from"))) for m in messages), 22)
     num_w = len(str(len(messages)))
     for number, message in enumerate(messages, start=1):
@@ -866,13 +965,128 @@ def ask_user_to_select_messages(messages, load_more=None):
         console.print(escape(f" {number:>{num_w}}  {fit(row['date'], 10)}  {fit(row['sender'], sender_w)}  {fit(row['subject'], subject_w)}"))
     while True:
         try:
-            answer = input("\nSelect (e.g. 1,3 · 2-6 · all · q) > ")
+            answer = input("\nSelect (e.g. 1,3 · 2-6 · all · s 1,3 save only · d 1,3 trash · q) > ")
         except EOFError:
-            return []
+            return "quit", []
+        action, selection = parse_command(answer)
         try:
-            return [messages[index] for index in parse_selection(answer, len(messages))]
+            chosen = [messages[index] for index in parse_selection(selection, len(messages))]
         except ValueError as exc:
             warn(f"{exc}. Try again.")
+            continue
+        if not chosen:
+            return "quit", []
+        if action == "trash":
+            try:
+                confirm = input(f"Move {len(chosen)} email(s) to trash without saving? [y/N] ")
+            except EOFError:
+                return "quit", []
+            if confirm.strip().lower() not in {"y", "yes", "o", "oui"}:
+                continue
+        return action, chosen
+
+
+def html_to_text(content):
+    """Rough HTML → readable text, good enough for a terminal preview."""
+    content = re.sub(r"(?is)<(script|style|head)\b.*?</\1\s*>", "", content)
+    content = re.sub(r"(?i)<br\s*/?>|</(p|div|tr|li|h\d|table)\s*>", "\n", content)
+    content = html.unescape(re.sub(r"<[^>]+>", "", content))
+    content = re.sub(r"[ \t\xa0]+", " ", content)
+    return re.sub(r"\n\s*\n+", "\n\n", content).strip()
+
+
+def message_text(msg):
+    """Body of a parsed email as text: the plain part, else the HTML part converted."""
+    part = msg.get_body(preferencelist=("plain", "html"))
+    if part is None:
+        return "No content found in email."
+    try:
+        content = part.get_content()
+    except Exception:
+        content = (part.get_payload(decode=True) or b"").decode("utf-8", "replace")
+    return html_to_text(content) if part.get_content_type() == "text/html" else content.strip()
+
+
+def preview_message(service, user_id, message):
+    with console.status("[dim]Loading email…[/]"):
+        raw = service.users().messages().get(userId=user_id, id=message["id"], format="raw").execute()["raw"]
+    msg = BytesParser(policy=policy_default).parse(io.BytesIO(base64.urlsafe_b64decode(raw)))
+    attachments = [
+        part.get_filename() for part in msg.walk()
+        if part.get_filename() and part.get_content_disposition() == "attachment"
+    ]
+    with console.pager():
+        console.print(escape(msg["Subject"] or "No Subject"))
+        for name in ("From", "To", "Cc", "Date"):
+            if msg[name]:
+                console.print(f"{name}: {escape(str(msg[name]))}")
+        if attachments:
+            console.print(f"Attachments: {escape(', '.join(attachments))}")
+        console.print()
+        console.print(escape(message_text(msg)))
+
+
+def save_messages(service, user_id, messages, save_dir, browser, trash_after):
+    """Save emails as PDFs + attachments, then (optionally) trash the saved ones in one batch.
+
+    Returns (saved messages, attachment count, {id: error text}).
+    """
+    sender_w = min(max(cell_len(sender_name(m.get("from"))) for m in messages), 22)
+    results, failed = {}, {}
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[dim]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+        transient=True,
+    )
+    with progress:
+        task = progress.add_task("", total=len(messages))
+        for message in messages:
+            subject = fit(message.get("subject") or "No Subject", 40).rstrip()
+
+            def on_step(step):
+                progress.update(task, description=escape(f"{subject} · {step}…"))
+
+            try:
+                result = save_email_and_attachments(service, user_id, message["id"], save_dir, browser, on_step)
+            except Exception as exc:
+                failed[message["id"]] = str(exc)
+                print_message_line("[red]✗[/]", message, "failed", sender_w)
+                console.print(f"      [dim]└ {escape(str(exc))}[/]")
+            else:
+                results[message["id"]] = result
+                count = result["attachments"]
+                detail = f"PDF + {count} attachment{'s' * (count > 1)}" if count else "PDF"
+                print_message_line("[green]✓[/]", message, detail, sender_w)
+            progress.advance(task)
+
+        if trash_after and results:
+            progress.update(task, description="moving to trash…")
+            for msg_id, exc in trash_messages(service, user_id, list(results)).items():
+                # Email stays in Gmail, so drop its files to keep a retry duplicate-free.
+                remove_files(results.pop(msg_id)["files"])
+                failed[msg_id] = f"could not move to trash: {exc}"
+
+    saved = [message for message in messages if message["id"] in results]
+    return saved, sum(result["attachments"] for result in results.values()), failed
+
+
+def plural(count, word):
+    return f"{count} {word}{'s' * (count != 1)}"
+
+
+def failure_notice(messages, failed, limit=3):
+    """Notice lines for failed emails (they stay in Gmail and selected, ready for a retry)."""
+    by_id = {message["id"]: message for message in messages}
+    lines = []
+    for msg_id, error in list(failed.items())[:limit]:
+        subject = fit(by_id[msg_id].get("subject") or "No Subject", 40).rstrip()
+        lines.append([("class:error", " ✗ "), ("", subject), ("class:dim", " · " + fit(str(error), 80).rstrip())])
+    if len(failed) > limit:
+        lines.append([("class:dim", f"   … and {len(failed) - limit} more failed")])
+    return lines
 
 
 def interactive_download_main():
@@ -880,8 +1094,8 @@ def interactive_download_main():
 
     parser = argparse.ArgumentParser(
         description=(
-            "List available Gmail messages, let the user choose which ones to download as PDFs, "
-            "then move processed emails to the Gmail trash."
+            "List available Gmail messages, let the user choose which ones to download as PDFs "
+            "(and move to the Gmail trash), keep as is, or trash without saving."
         )
     )
     parser.add_argument(
@@ -928,6 +1142,7 @@ def interactive_download_main():
 
     console.clear()
     creds = authenticate()
+    playwright = browser = None
     try:
         service = build("gmail", "v1", credentials=creds)
         user_id = "me"
@@ -936,10 +1151,11 @@ def interactive_download_main():
         shown_dir = save_dir.replace(os.path.expanduser("~"), "~", 1)
 
         account = service.users().getProfile(userId=user_id).execute().get("emailAddress", user_id)
-        console.print(
+        banner = (
             f" [bold]savegmail[/]  [dim]·[/]  {escape(account)}  [dim]·  query:[/] "
             f"{escape(args.query) if args.query else '[dim](all)[/]'}  [dim]·  →[/] {escape(shown_dir)}\n"
         )
+        console.print(banner)
         with console.status("[dim]Fetching emails…[/]"):
             messages, next_page = list_candidate_messages(service, user_id, query=args.query, max_results=args.max)
 
@@ -954,68 +1170,91 @@ def interactive_download_main():
             )
             return older, next_page is not None
 
-        selected_messages = ask_user_to_select_messages(messages, load_more if next_page else None)
-        if not selected_messages:
-            console.print("[dim]No email selected.[/]")
-            return
+        def drop(ids):
+            messages[:] = [message for message in messages if message["id"] not in ids]
+            state["selected"] -= ids
 
-        playwright = sync_playwright().start()
-        with console.status("[dim]Preparing Chromium…[/]"):
-            browser = launch_browser(playwright, headed=args.headed)
+        state = new_picker_state()
+        notice, last_trashed = [], []
+        totals = {"saved": 0, "trashed": 0}
+        # Back to the list after every action, until the user quits.
+        while messages or next_page or last_trashed:
+            action, chosen = ask_user_to_select_messages(
+                messages, load_more if next_page else None, state, notice, bool(last_trashed)
+            )
+            if action == "quit" or (action != "undo" and not chosen):
+                break
+            ids = {message["id"] for message in chosen}
 
-        sender_w = min(max(cell_len(sender_name(m.get("from"))) for m in selected_messages), 22)
-        saved, attachments, failed = 0, 0, 0
-        progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[dim]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            console=console,
-            transient=True,
-        )
-        try:
-            with progress:
-                task = progress.add_task("", total=len(selected_messages))
-                for message in selected_messages:
-                    subject = fit(message.get("subject") or "No Subject", 40).rstrip()
+            if action == "preview":
+                preview_message(service, user_id, chosen[0])
 
-                    def on_step(step):
-                        progress.update(task, description=escape(f"{subject} · {step}…"))
+            elif action == "undo":
+                with console.status("[dim]Restoring from trash…[/]"):
+                    errors = untrash_messages(service, user_id, [message["id"] for message in last_trashed])
+                restored = [message for message in last_trashed if message["id"] not in errors]
+                messages.extend(restored)
+                messages.sort(key=lambda message: message["internalDate"])
+                notice = [[("class:checked", " ↶ "), ("", f"{plural(len(restored), 'email')} restored from trash")]]
+                notice += failure_notice(last_trashed, {msg_id: str(exc) for msg_id, exc in errors.items()})
+                totals["trashed"] -= len(restored)
+                last_trashed = [message for message in last_trashed if message["id"] in errors]
 
-                    try:
-                        result = save_email_and_attachments(
-                            service, user_id, message["id"], save_dir, browser, on_step
-                        )
-                        on_step("moving to trash")
-                        try:
-                            move_message_to_trash(service, user_id, message["id"])
-                        except Exception:
-                            # Email stays in Gmail, so drop its files to keep a retry duplicate-free.
-                            remove_files(result["files"])
-                            raise
-                    except Exception as exc:
-                        failed += 1
-                        print_message_line("[red]✗[/]", message, "failed", sender_w)
-                        console.print(f"      [dim]└ {escape(str(exc))}[/]")
-                    else:
-                        saved += 1
-                        attachments += result["attachments"]
-                        count = result["attachments"]
-                        detail = f"PDF + {count} attachment{'s' * (count > 1)}" if count else "PDF"
-                        print_message_line("[green]✓[/]", message, detail, sender_w)
-                    progress.advance(task)
-        finally:
-            browser.close()
-            playwright.stop()
+            elif action == "trash":
+                with console.status("[dim]Moving to trash…[/]"):
+                    errors = trash_messages(service, user_id, list(ids))
+                trashed = [message for message in chosen if message["id"] not in errors]
+                drop({message["id"] for message in trashed})
+                if trashed:
+                    last_trashed = trashed
+                totals["trashed"] += len(trashed)
+                notice = [[("class:checked", " ✓ "), ("", f"{plural(len(trashed), 'email')} moved to trash (not saved)"),
+                           ("class:dim class:keyhint", " · u undo" if trashed else "")]]
+                notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
 
-        summary = f"{saved} email{'s' * (saved != 1)} · {saved} PDF{'s' * (saved != 1)}"
-        summary += f" · {attachments} attachment{'s' * (attachments != 1)} · moved to trash"
-        if failed:
-            summary += f" · [red]{failed} failed[/] (kept in Gmail)"
-        console.print(f"\n [bold]Done[/] [dim]·[/] {summary}\n [dim]→[/] {escape(shown_dir)}")
+            else:
+                if browser is None:
+                    playwright = sync_playwright().start()
+                    with console.status("[dim]Preparing Chromium…[/]"):
+                        browser = launch_browser(playwright, headed=args.headed)
+                trash_after = action == "download"
+                saved, attachments, failed = save_messages(service, user_id, chosen, save_dir, browser, trash_after)
+                saved_ids = {message["id"] for message in saved}
+                totals["saved"] += len(saved)
+                summary = f"{plural(len(saved), 'PDF')} · {plural(attachments, 'attachment')}"
+                if trash_after:
+                    drop(saved_ids)
+                    if saved:
+                        last_trashed = saved
+                    totals["trashed"] += len(saved)
+                    summary += " · moved to trash"
+                else:
+                    state["selected"] -= saved_ids
+                    state["saved"] |= saved_ids
+                    summary += " · kept in Gmail"
+                notice = [[("class:checked", " ✓ "), ("", summary), ("class:dim", f" → {shown_dir}")]]
+                if trash_after and saved:
+                    notice[0].append(("class:dim class:keyhint", " · u undo"))
+                notice += failure_notice(chosen, failed)
+
+            console.clear()
+            console.print(banner)
+
+        if not (messages or next_page):
+            console.print("[dim]No emails left.[/]")
+        if totals["saved"] or totals["trashed"]:
+            console.print(
+                f" [bold]Done[/] [dim]·[/] {plural(totals['saved'], 'email')} saved · "
+                f"{totals['trashed']} moved to trash\n [dim]→[/] {escape(shown_dir)}"
+            )
 
     except HttpError as error:
         console.print(f"[red]✗[/] Gmail API error: {escape(str(error))}")
+    finally:
+        if browser is not None:
+            browser.close()
+        if playwright is not None:
+            playwright.stop()
 
 if __name__ == "__main__":
     interactive_download_main()
