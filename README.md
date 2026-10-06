@@ -83,7 +83,7 @@ The script lists your Gmail messages (oldest to newest) in an interactive picker
  ❯ ●    5 Sep       Jean Dupont   Re: roofing quote             OK for Thursday, I'll come…
    ○    12:31       GitHub        [repo] PR #42 merged          Merged #42 into main.
 
- ↑↓ move · a all · space select · / filter · m more · p preview · enter save+trash · s save · d trash · q quit   1 selected
+ ↑↓ move · a all · space select · / filter · m more · p preview · enter save+trash · s save · d trash · D delete · q quit   1 selected
 ```
 
 | Key | Action |
@@ -97,12 +97,13 @@ The script lists your Gmail messages (oldest to newest) in an interactive picker
 | `enter` | Save the selection as PDFs, then move it to the Gmail trash (the current email if none is selected) |
 | `s` | Save the selection as PDFs and keep it in Gmail (marked `✓` in the list) |
 | `d` | Move the selection to the Gmail trash without saving, after a `y` confirmation |
+| `D` | Permanently delete the selection, bypassing the trash, after typing `delete` (cannot be undone) |
 | `u` | Undo the last move to trash |
 | `q` / `esc` | Quit |
 
 `📎` marks emails with attachments. After each action the list comes back with the result on top, so several batches can be handled in one session.
 
-When the output is not a terminal (pipe, CI), the script falls back to typed selections such as `1,3`, `2-6`, `2-6,8-10`, `all` or `q`. Prefix with `s` to save only (`s 1,3`) or `d` to trash without saving (`d 2-6`, confirmed with `y`).
+When the output is not a terminal (pipe, CI), the script falls back to typed selections such as `1,3`, `2-6`, `2-6,8-10`, `all` or `q`. Prefix with `s` to save only (`s 1,3`) `d` to trash without saving (`d 2-6`, confirmed with `y`), or `D` to delete permanently (`D 2-6`, confirmed by typing `delete`).
 
 After a selected email is successfully saved locally, the script moves the corresponding Gmail message to the Gmail trash (except with `s`).
 

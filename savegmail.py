@@ -439,8 +439,7 @@ def empty_trash(service):
             return
 
         with console.status("[dim]Deleting…[/]"):
-            for start in range(0, len(ids), 1000):
-                service.users().messages().batchDelete(userId='me', body={"ids": ids[start:start + 1000]}).execute()
+            delete_messages(service, 'me', ids)
 
         console.print(f"[green]✓[/] {len(ids)} message(s) permanently deleted from trash.")
 
@@ -479,6 +478,12 @@ def run_batched(service, ids, make_request):
             errors[msg_id] = exc
             debug(f"Gmail request failed for message {msg_id}: {exc}")
     return responses, errors
+
+
+def delete_messages(service, user_id, ids):
+    """Permanently delete messages, bypassing the trash. Cannot be undone."""
+    for start in range(0, len(ids), 1000):
+        service.users().messages().batchDelete(userId=user_id, body={"ids": ids[start:start + 1000]}).execute()
 
 
 def trash_messages(service, user_id, ids):
@@ -625,7 +630,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
     """Interactive multi-select list over messages (extended in place when older emails load).
 
     Returns (action, chosen messages) where action is "download" (save + trash), "save",
-    "trash", "preview", "undo" or "quit".
+    "trash", "delete" (permanent), "preview", "undo" or "quit".
     load_more() returns (older messages sorted oldest first, whether even older ones remain).
     notice is a list of formatted-text lines shown under the header (last action result).
     """
@@ -724,8 +729,14 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
     def render_footer():
         count = len(state["selected"])
         status = f"{count} selected " if count else ""
-        if state["confirm"]:
-            n = len(state["confirm"])
+        if state["confirm"] and state["confirm"]["action"] == "delete":
+            n = len(state["confirm"]["ids"])
+            hint = [("class:error", f" Permanently delete {n} email{'s' * (n != 1)}? Cannot be undone."),
+                    ("class:dim", " Type "), ("class:key", "delete"), ("class:dim", ": "),
+                    ("", state["confirm"]["typed"]), ("class:accent", "▏"),
+                    ("class:dim", "  enter confirm · esc cancel")]
+        elif state["confirm"]:
+            n = len(state["confirm"]["ids"])
             hint = [("class:warn", f" Move {n} email{'s' * (n != 1)} to trash without saving?"),
                     ("class:dim", "   "), ("class:key", "y"), ("class:dim", " confirm · any other key cancel")]
         elif state["filtering"]:
@@ -735,7 +746,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
             keys = [("↑↓", "move"), ("a", "all"), ("space", "select"), ("/", "filter")]
             if not state["exhausted"]:
                 keys.append(("m", "loading…" if state["loading"] else "more"))
-            keys += [("p", "preview"), ("enter", "save+trash"), ("s", "save"), ("d", "trash")]
+            keys += [("p", "preview"), ("enter", "save+trash"), ("s", "save"), ("d", "trash"), ("D", "delete")]
             if can_undo:
                 keys.append(("u", "undo"))
             keys.append(("q", "quit"))
@@ -751,6 +762,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
 
     filtering = Condition(lambda: state["filtering"])
     confirming = Condition(lambda: bool(state["confirm"]))
+    confirming_trash = Condition(lambda: bool(state["confirm"]) and state["confirm"]["action"] == "trash")
+    confirming_delete = Condition(lambda: bool(state["confirm"]) and state["confirm"]["action"] == "delete")
     browsing = ~filtering & ~confirming
     bindings = KeyBindings()
 
@@ -794,15 +807,35 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
     bindings.add("s", filter=browsing)(lambda event: submit(event, "save", chosen()))
     bindings.add("p", filter=browsing)(lambda event: submit(event, "preview", {current_id()} - {None}))
 
-    @bindings.add("d", filter=browsing)
-    def _(event):
-        state["confirm"] = chosen() or None
+    def ask_confirm(action):
+        ids = chosen()
+        state["confirm"] = {"action": action, "ids": ids, "typed": ""} if ids else None
 
-    bindings.add("y", filter=confirming)(lambda event: submit(event, "trash", state["confirm"]))
+    bindings.add("d", filter=browsing)(lambda event: ask_confirm("trash"))
+    bindings.add("D", filter=browsing)(lambda event: ask_confirm("delete"))
 
-    @bindings.add("<any>", filter=confirming)
+    bindings.add("y", filter=confirming_trash)(lambda event: submit(event, "trash", state["confirm"]["ids"]))
+
+    @bindings.add("<any>", filter=confirming_trash)
+    @bindings.add("escape", filter=confirming_delete)
     def _(event):
         state["confirm"] = None
+
+    @bindings.add("enter", filter=confirming_delete)
+    def _(event):
+        if state["confirm"]["typed"] == "delete":
+            submit(event, "delete", state["confirm"]["ids"])
+        else:
+            state["confirm"] = None
+
+    @bindings.add("backspace", filter=confirming_delete)
+    def _(event):
+        state["confirm"]["typed"] = state["confirm"]["typed"][:-1]
+
+    @bindings.add("<any>", filter=confirming_delete)
+    def _(event):
+        if event.data.isprintable():
+            state["confirm"]["typed"] += event.data
 
     @bindings.add("u", filter=browsing & Condition(lambda: can_undo))
     def _(event):
@@ -933,14 +966,19 @@ def parse_selection(selection, total):
     return sorted(selected)
 
 
-ACTION_PREFIXES = {"s": "save", "d": "trash"}
+ACTION_PREFIXES = {"s": "save", "d": "trash", "D": "delete"}
 
 
 def parse_command(answer):
-    """Split an optional action prefix from a typed selection: 's 1,3' saves only, 'd 1,3' trashes."""
+    """Split an optional action prefix from a typed selection.
+
+    's 1,3' saves only, 'd 1,3' trashes, 'D 1,3' deletes permanently.
+    """
     parts = (answer or "").strip().split(None, 1)
-    if len(parts) == 2 and parts[0].lower() in ACTION_PREFIXES:
-        return ACTION_PREFIXES[parts[0].lower()], parts[1]
+    if len(parts) == 2:
+        action = ACTION_PREFIXES.get(parts[0]) or ACTION_PREFIXES.get(parts[0].lower())
+        if action:
+            return action, parts[1]
     return "download", answer or ""
 
 
@@ -965,7 +1003,7 @@ def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(),
         console.print(escape(f" {number:>{num_w}}  {fit(row['date'], 10)}  {fit(row['sender'], sender_w)}  {fit(row['subject'], subject_w)}"))
     while True:
         try:
-            answer = input("\nSelect (e.g. 1,3 · 2-6 · all · s 1,3 save only · d 1,3 trash · q) > ")
+            answer = input("\nSelect (e.g. 1,3 · 2-6 · all · s 1,3 save only · d 1,3 trash · D 1,3 delete · q) > ")
         except EOFError:
             return "quit", []
         action, selection = parse_command(answer)
@@ -982,6 +1020,13 @@ def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(),
             except EOFError:
                 return "quit", []
             if confirm.strip().lower() not in {"y", "yes", "o", "oui"}:
+                continue
+        if action == "delete":
+            try:
+                confirm = input(f"Permanently delete {len(chosen)} email(s)? Cannot be undone. Type delete: ")
+            except EOFError:
+                return "quit", []
+            if confirm.strip() != "delete":
                 continue
         return action, chosen
 
@@ -1176,7 +1221,7 @@ def interactive_download_main():
 
         state = new_picker_state()
         notice, last_trashed = [], []
-        totals = {"saved": 0, "trashed": 0}
+        totals = {"saved": 0, "trashed": 0, "deleted": 0}
         # Back to the list after every action, until the user quits.
         while messages or next_page or last_trashed:
             action, chosen = ask_user_to_select_messages(
@@ -1212,6 +1257,19 @@ def interactive_download_main():
                            ("class:dim class:keyhint", " · u undo" if trashed else "")]]
                 notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
 
+            elif action == "delete":
+                try:
+                    with console.status("[dim]Deleting…[/]"):
+                        delete_messages(service, user_id, list(ids))
+                except Exception as exc:
+                    # batchDelete is all-or-nothing: nothing was deleted.
+                    notice = [[("class:error", " ✗ "), ("", f"Could not delete {plural(len(ids), 'email')}"),
+                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
+                else:
+                    drop(ids)
+                    totals["deleted"] += len(ids)
+                    notice = [[("class:checked", " ✓ "), ("", f"{plural(len(ids), 'email')} permanently deleted")]]
+
             else:
                 if browser is None:
                     playwright = sync_playwright().start()
@@ -1242,11 +1300,11 @@ def interactive_download_main():
 
         if not (messages or next_page):
             console.print("[dim]No emails left.[/]")
-        if totals["saved"] or totals["trashed"]:
-            console.print(
-                f" [bold]Done[/] [dim]·[/] {plural(totals['saved'], 'email')} saved · "
-                f"{totals['trashed']} moved to trash\n [dim]→[/] {escape(shown_dir)}"
-            )
+        if any(totals.values()):
+            summary = f"{plural(totals['saved'], 'email')} saved · {totals['trashed']} moved to trash"
+            if totals["deleted"]:
+                summary += f" · {totals['deleted']} permanently deleted"
+            console.print(f" [bold]Done[/] [dim]·[/] {summary}\n [dim]→[/] {escape(shown_dir)}")
 
     except HttpError as error:
         console.print(f"[red]✗[/] Gmail API error: {escape(str(error))}")

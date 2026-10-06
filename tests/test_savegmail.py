@@ -46,6 +46,7 @@ class ParseSelectionTest(unittest.TestCase):
         self.assertEqual(savegmail.parse_command("d 1,3"), ("trash", "1,3"))
         self.assertEqual(savegmail.parse_command("S all"), ("save", "all"))
         self.assertEqual(savegmail.parse_command("1-2"), ("download", "1-2"))
+        self.assertEqual(savegmail.parse_command("D 2"), ("delete", "2"))
 
 
 class TextHelpersTest(unittest.TestCase):
@@ -128,6 +129,12 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick("dy"), ("trash", ["0"]))
         self.assertEqual(pick("dnq"), ("quit", []))
         self.assertEqual(pick("dn\r"), ("download", ["0"]))
+
+    def test_delete_needs_typed_confirmation(self):
+        self.assertEqual(pick("Ddelete\r"), ("delete", ["0"]))
+        self.assertEqual(pick("Dy\rq"), ("quit", []))
+        self.assertEqual(pick("Ddel\x1bq"), ("quit", []))
+        self.assertEqual(pick("Ddelx\x7f\x7f\x7f\x7f\x7f\x7fdelete\r"), ("delete", ["0"]))
 
     def test_trash_selection(self):
         self.assertEqual(pick("ady"), ("trash", ["0", "1", "2"]))
