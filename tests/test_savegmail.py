@@ -53,6 +53,40 @@ class TextHelpersTest(unittest.TestCase):
         self.assertEqual(savegmail.fit("abcdef", 4), "abc…")
         self.assertEqual(savegmail.fit("a\n  b", 3), "a b")
 
+    def test_draft(self):
+        detail = {"id": "1", "labelIds": ["DRAFT"], "payload": {"headers": [{"name": "From", "value": "Me <me@x>"}]}}
+        row = savegmail.message_row(savegmail.to_candidate(detail))
+        self.assertEqual(row["sender"], "Draft")
+        self.assertIn("draft", row["haystack"])
+        detail["labelIds"] = ["INBOX"]
+        self.assertEqual(savegmail.message_row(savegmail.to_candidate(detail))["sender"], "Me")
+
+    def test_sent_category_size_flags(self):
+        detail = {"id": "1", "labelIds": ["SENT", "UNREAD", "STARRED", "CATEGORY_PROMOTIONS"], "sizeEstimate": 12_400_000,
+                  "payload": {"headers": [{"name": "To", "value": "Paul Martin <p@x>, Jo <j@x>"}]}}
+        row = savegmail.message_row(savegmail.to_candidate(detail))
+        self.assertEqual((row["sender"], row["kind"]), ("Sent · Paul Martin", "sent"))
+        self.assertTrue(row["unread"] and row["starred"])
+        self.assertEqual(row["tags"], [("size", "12 MB"), ("category", "Promotions")])
+        self.assertIn("promotions", row["haystack"])
+        savegmail.ACCOUNT = "me@x"
+        detail["payload"]["headers"] = [{"name": "To", "value": "Me <ME@x>"}]
+        self.assertEqual(savegmail.message_row(savegmail.to_candidate(detail))["sender"], "Sent · me")
+        savegmail.ACCOUNT = None
+        detail.update(labelIds=["INBOX"], sizeEstimate=20_000)
+        row = savegmail.message_row(savegmail.to_candidate(detail))
+        self.assertEqual((row["tags"], row["unread"], row["starred"]), ([], False, False))
+
+    def test_user_labels(self):
+        savegmail.USER_LABELS = {"Label_1": "Factures", "Label_2": "Pro"}
+        try:
+            detail = {"id": "1", "labelIds": ["INBOX", "Label_2", "Label_1", "CATEGORY_UPDATES"], "payload": {"headers": []}}
+            row = savegmail.message_row(savegmail.to_candidate(detail))
+            self.assertEqual(row["tags"], [("category", "Updates"), ("label", "Factures"), ("label", "Pro")])
+            self.assertIn("factures", row["haystack"])
+        finally:
+            savegmail.USER_LABELS = {}
+
     def test_attachment_flag(self):
         detail = {"id": "1", "payload": {"mimeType": "multipart/mixed", "headers": []}}
         self.assertTrue(savegmail.to_candidate(detail)["attachment"])
@@ -147,19 +181,26 @@ class RefreshTest(unittest.TestCase):
         # Loaded: c(30) b(20) a(10). Since: n(40) arrived, b was deleted; z(5) is older, not loaded yet.
         service = FakeListService([("n", 40), ("c", 30), ("a", 10), ("z", 5)])
         new, gone = savegmail.refresh_messages(service, "me", "", self.loaded(("c", 30), ("b", 20), ("a", 10)),
-                                               page_size=2)
+                                               since=10, page_size=2)
         self.assertEqual([message["id"] for message in new], ["n"])
         self.assertEqual(gone, {"b"})
 
     def test_oldest_loaded_deleted(self):
         service = FakeListService([("n", 40), ("c", 30), ("z", 5), ("y", 4)])
         new, gone = savegmail.refresh_messages(service, "me", "", self.loaded(("c", 30), ("b", 20), ("a", 10)),
-                                               page_size=2)
+                                               since=10, page_size=2)
         self.assertEqual(([message["id"] for message in new], gone), (["n"], {"b", "a"}))
+
+    def test_whole_view_when_nothing_older_to_load(self):
+        # An email older than everything loaded (e.g. restored from the trash) shows up when since=None.
+        service = FakeListService([("c", 30), ("a", 10), ("z", 5)])
+        new, gone = savegmail.refresh_messages(service, "me", "", self.loaded(("c", 30), ("a", 10)), page_size=2)
+        self.assertEqual(([message["id"] for message in new], gone), (["z"], set()))
 
     def test_up_to_date_skips_older_metadata(self):
         service = FakeListService([("c", 30), ("a", 10), ("z", 5), ("y", 4)])
-        new, gone = savegmail.refresh_messages(service, "me", "", self.loaded(("c", 30), ("a", 10)), page_size=10)
+        new, gone = savegmail.refresh_messages(service, "me", "", self.loaded(("c", 30), ("a", 10)), since=10,
+                                               page_size=10)
         self.assertEqual((new, gone), ([], set()))
         self.assertEqual(service.sizes, [])  # z and y are older than the loaded range: no metadata fetched
 
@@ -241,6 +282,31 @@ class PickerTest(unittest.TestCase):
         action, ids = pick("m\r", messages, load_more=lambda: (older, False))
         self.assertEqual([message["id"] for message in messages], ["0", "1", "old"])
         self.assertEqual(ids, ["0"])
+
+    def test_star_and_open_keys(self):
+        self.assertEqual(pick(" j *"), ("star", ["0", "2"]))
+        self.assertEqual(pick(" o"), ("open", ["1"]))  # o: the email under the cursor
+
+    def test_archive_and_spam_keys(self):
+        self.assertEqual(pick(" j e"), ("archive", ["0", "2"]))
+        spam = dict(views=("All mail", "Spam", "Trash"), view=1)
+        self.assertEqual(pick("R", **spam), ("not_spam", ["0"]))
+        self.assertEqual(pick("eq", **spam), ("quit", []))  # e is off in Spam and Trash
+        self.assertEqual(pick("eq", views=("Trash",), view=0), ("quit", []))
+        archived = dict(views=("Inbox", "Archived"), view=1)
+        self.assertEqual(pick("R", **archived), ("unarchive", ["0"]))
+        self.assertEqual(pick("eq", **archived), ("quit", []))
+
+    def test_view_keys(self):
+        self.assertEqual(pick("\t"), ("next_view", []))
+        self.assertEqual(pick("\x1b[Z"), ("prev_view", []))  # Shift+Tab
+
+    def test_trash_view_keys(self):
+        trash = dict(views=("All mail", "Trash"), view=1)
+        self.assertEqual(pick("R", **trash), ("restore", ["0"]))
+        self.assertEqual(pick("\rdyq", **trash), ("quit", []))  # enter and d are off in Trash
+        self.assertEqual(pick("s", **trash), ("save", ["0"]))
+        self.assertEqual(pick("Rq"), ("quit", []))  # R only in Trash
 
     def test_refresh_key(self):
         self.assertEqual(pick("r"), ("refresh", []))

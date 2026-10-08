@@ -20,6 +20,7 @@ import contextlib
 import shutil
 import tempfile
 import webbrowser
+from urllib.parse import quote
 import html
 from email.parser import BytesParser
 from email.policy import default as policy_default
@@ -33,6 +34,8 @@ logging.getLogger('tzlocal').setLevel(logging.ERROR)
 
 console = Console(highlight=False)
 VERBOSE = False
+ACCOUNT = None  # signed-in address, so emails sent to yourself show "Sent · me"
+USER_LABELS = {}  # your own Gmail label ids -> names, shown and filterable like categories
 
 
 def debug(message):
@@ -532,6 +535,28 @@ def run_batched(service, ids, make_request):
     return responses, errors
 
 
+def user_labels(service, user_id):
+    """Your own Gmail labels, {id: name} (system labels and categories left out)."""
+    try:
+        labels = service.users().labels().list(userId=user_id).execute().get("labels", [])
+    except HttpError as exc:
+        debug(f"Could not list labels: {exc}")
+        return {}
+    return {label["id"]: label["name"] for label in labels if label.get("type") == "user"}
+
+
+def modify_labels(service, user_id, ids, add=(), remove=()):
+    """Add / remove Gmail labels (STARRED, INBOX, SPAM…) on messages, in one call per 1000."""
+    for start in range(0, len(ids), 1000):
+        body = {"ids": ids[start:start + 1000], "addLabelIds": list(add), "removeLabelIds": list(remove)}
+        service.users().messages().batchModify(userId=user_id, body=body).execute()
+
+
+def gmail_url(account, msg_id):
+    # authuser picks the right account when several are signed in (an address in /u/<…>/ gives a 404).
+    return f"https://mail.google.com/mail/?authuser={quote(account)}#all/{msg_id}"
+
+
 def list_trash_ids(service, user_id):
     ids = []
     request = service.users().messages().list(userId=user_id, labelIds=['TRASH'], maxResults=500)
@@ -568,7 +593,16 @@ def extract_header(headers, name, default=""):
     return default
 
 
-METADATA_FIELDS = "id,threadId,internalDate,payload(mimeType,headers),snippet"
+METADATA_FIELDS = "id,threadId,internalDate,labelIds,sizeEstimate,payload(mimeType,headers),snippet"
+# Tab cycles through these views; each is the Gmail search added to --query.
+# Archived is ours, not a Gmail label: archiving only removes INBOX, so it is All mail minus the rest.
+VIEWS = [("All mail", ""), ("Inbox", "in:inbox"), ("Archived", "-in:inbox -in:sent -in:drafts -in:chats"),
+         ("Starred", "is:starred"), ("Sent", "in:sent"),
+         ("Drafts", "in:drafts"), ("Spam", "in:spam"), ("Trash", "in:trash")]
+# Gmail category labels, shown as a short tag (Primary has no tag, like in Gmail).
+CATEGORIES = {"CATEGORY_PROMOTIONS": "Promotions", "CATEGORY_SOCIAL": "Social",
+              "CATEGORY_UPDATES": "Updates", "CATEGORY_FORUMS": "Forums"}
+BIG_EMAIL_BYTES = 1_000_000  # size shown from this size on
 
 
 def metadata_request(service, user_id, msg_id):
@@ -576,7 +610,7 @@ def metadata_request(service, user_id, msg_id):
         userId=user_id,
         id=msg_id,
         format="metadata",
-        metadataHeaders=["Subject", "From", "Date"],
+        metadataHeaders=["Subject", "From", "To", "Date"],
         fields=METADATA_FIELDS,
     )
 
@@ -594,10 +628,18 @@ def to_candidate(detail):
         "snippet": detail.get("snippet", ""),
         # Metadata has no parts; multipart/mixed is how mail clients wrap real attachments.
         "attachment": payload.get("mimeType") == "multipart/mixed",
+        "to": extract_header(headers, "To", ""),
+        "labels": detail.get("labelIds", []),
+        "size": int(detail.get("sizeEstimate", 0)),
     }
 
 
-def list_candidate_messages(service, user_id, query="", max_results=50, page_token=None):
+def list_options(in_trash):
+    # The Trash and Spam views need this: Gmail leaves spam and trash out of listings otherwise.
+    return {"includeSpamTrash": True} if in_trash else {}
+
+
+def list_candidate_messages(service, user_id, query="", max_results=50, page_token=None, in_trash=False):
     """Return (messages sorted newest first, token for the next older page or None).
 
     Empty query means: list all visible Gmail messages, letting the user choose
@@ -610,6 +652,7 @@ def list_candidate_messages(service, user_id, query="", max_results=50, page_tok
             q=query,
             maxResults=min(max_results - len(ids), 500),
             pageToken=page_token,
+            **list_options(in_trash),
         ).execute()
         ids.extend(message["id"] for message in response.get("messages", []))
         page_token = response.get("nextPageToken")
@@ -622,10 +665,12 @@ def list_candidate_messages(service, user_id, query="", max_results=50, page_tok
     return detailed_messages, page_token
 
 
-def estimate_total(service, user_id, query=""):
+def estimate_total(service, user_id, query="", in_trash=False):
     """Gmail's (approximate) count of emails matching query; None if unavailable."""
     try:
-        response = service.users().messages().list(userId=user_id, q=query, maxResults=1).execute()
+        response = service.users().messages().list(
+            userId=user_id, q=query, maxResults=1, **list_options(in_trash)
+        ).execute()
     except HttpError as exc:
         debug(f"Could not estimate the number of emails: {exc}")
         return None
@@ -654,38 +699,39 @@ def sender_name(sender):
     return name.strip().strip('"') or address or "—"
 
 
-def refresh_messages(service, user_id, query, loaded, page_size=100):
-    """Re-sync the loaded range (newest email down to the oldest loaded one) with Gmail.
+def refresh_messages(service, user_id, query, loaded, since=None, page_size=100, in_trash=False):
+    """Re-sync loaded emails with Gmail.
 
-    Returns (new messages in that range, ids of loaded messages Gmail no longer lists).
+    since is the internalDate the loaded range goes down to: older emails are left to load_more. With
+    since=None (nothing older to load) the whole query is synced.
+    Returns (new messages, ids of loaded messages Gmail no longer lists).
     """
     known = {message["id"] for message in loaded}
-    oldest = min((message["internalDate"] for message in loaded), default=None)
     seen, new, page_token = set(), [], None
     while True:
         response = service.users().messages().list(
-            userId=user_id, q=query, maxResults=page_size, pageToken=page_token
+            userId=user_id, q=query, maxResults=page_size, pageToken=page_token, **list_options(in_trash)
         ).execute()
         ids = [message["id"] for message in response.get("messages", [])]
         seen.update(msg_id for msg_id in ids if msg_id in known)
-        if seen == known:
+        crossed = False
+        candidates = [msg_id for msg_id in ids if msg_id not in known]
+        if since is not None and known and seen == known:
             # Every loaded email is accounted for: unknown ids after the last loaded one are older.
-            last = max((position for position, msg_id in enumerate(ids) if msg_id in known), default=-1)
+            last = max(position for position, msg_id in enumerate(ids) if msg_id in known)
             candidates = [msg_id for msg_id in ids[:last + 1] if msg_id not in known]
-        else:
-            candidates = [msg_id for msg_id in ids if msg_id not in known]
+            crossed = True
         details, _ = run_batched(service, candidates, lambda msg_id: metadata_request(service, user_id, msg_id))
-        crossed = seen == known and bool(known)
         for msg_id in candidates:
             if msg_id not in details:
                 continue
             message = to_candidate(details[msg_id])
-            if oldest is None or message["internalDate"] >= oldest:
+            if since is None or message["internalDate"] >= since:
                 new.append(message)
             else:
-                crossed = True  # past the oldest loaded email: the rest comes with load_more
+                crossed = True  # past the loaded range: the rest comes with load_more
         page_token = response.get("nextPageToken")
-        if crossed or not page_token or oldest is None:
+        if crossed or not page_token:
             return new, known - seen
 
 
@@ -705,9 +751,29 @@ def compact_date(internal_date_ms):
     return local_date.strftime("%Y-%m-%d %H:%M")
 
 
+def human_size(size):
+    return f"{size / 1_000_000:.0f} MB" if size >= 10_000_000 else f"{size / 1_000_000:.1f} MB"
+
+
 def message_row(message):
     subject = message.get("subject") or "No Subject"
-    sender = sender_name(message.get("from"))
+    labels = message.get("labels", [])
+    # Like Gmail: for drafts and sent emails the sender is you, so show what matters instead.
+    kind = "draft" if "DRAFT" in labels else "sent" if "SENT" in labels else None
+    if kind == "draft":
+        sender = "Draft"
+    elif kind == "sent":
+        recipient = (message.get("to") or "").split(",")[0]
+        is_me = ACCOUNT and parseaddr(recipient)[1].lower() == ACCOUNT.lower()
+        sender = "Sent · " + ("me" if is_me else sender_name(recipient))
+    else:
+        sender = sender_name(message.get("from"))
+    category = next((name for label, name in CATEGORIES.items() if label in labels), "")
+    user_labels = sorted(USER_LABELS[label] for label in labels if label in USER_LABELS)
+    size = message.get("size", 0)
+    # (style, text): each kind of tag gets its own color in the list.
+    tags = [("size", human_size(size))] if size >= BIG_EMAIL_BYTES else []
+    tags += ([("category", category)] if category else []) + [("label", label) for label in user_labels]
     snippet = html.unescape(message.get("snippet") or "")
     return {
         "date": compact_date(message.get("internalDate")),
@@ -715,13 +781,17 @@ def message_row(message):
         "subject": subject,
         "snippet": snippet,
         "attachment": bool(message.get("attachment")),
-        "haystack": f"{sender} {message.get('from', '')} {subject}".lower(),
+        "kind": kind,
+        "unread": "UNREAD" in labels,
+        "starred": "STARRED" in labels,
+        "tags": tags,
+        "haystack": " ".join([sender, message.get("from", ""), subject, category, *user_labels]).lower(),
     }
 
 
 def column_widths(rows, total_width):
     """Return (sender, subject, snippet) widths for the space left after fixed columns."""
-    fixed = 4 + 3 + DATE_W + 2  # cursor + checkbox, attachment, date, gap
+    fixed = 4 + 4 + DATE_W + 2  # cursor + checkbox, star + attachment, date, gap
     sender_w = min(max((cell_len(row["sender"]) for row in rows), default=6), 22)
     rest = max(0, total_width - fixed - sender_w - 2 - 1)
     longest_subject = max((cell_len(row["subject"]) for row in rows), default=7)
@@ -734,22 +804,32 @@ KEY_HELP = [
     ("↑↓ j k", "move (PgUp PgDn Home End too)"),
     ("space", "select / unselect the current email"),
     ("a", "select / unselect all visible emails"),
-    ("/", "filter by sender or subject"),
+    ("/", "filter by sender, subject, category or label (e.g. /promo, /draft, /sent, /factures)"),
+    ("Tab", "next view: All mail (everything but spam and trash), Inbox, Archived, Starred, Sent, Drafts, Spam, Trash"),
+    ("⇧Tab", "previous view (Shift+Tab)"),
     ("m", "load older emails"),
     ("r", "refresh: add new emails, drop the ones deleted or moved in Gmail meanwhile"),
     ("p", "preview as PDF, exactly as it would be saved (nothing written to the download folder)"),
+    ("o", "open the current email in Gmail, in your browser"),
+    ("*", "star / unstar in Gmail"),
+    ("e", "archive: remove from the Inbox, keep in All mail (recoverable: u, or R in Archived)"),
     ("enter", "save PDF + attachments, then move the email to the Gmail trash (recoverable: u)"),
     ("s", "save PDF + attachments, keep the email in Gmail (recoverable: u)"),
+    ("R", "Trash: restore (enter and d are off there) · Spam: not spam · Archived: back to the Inbox"),
     ("d", "move to the Gmail trash without saving (recoverable: u, or from Gmail for 30 days)"),
     ("D", "delete permanently, without going through the trash (cannot be undone)"),
     ("T", "empty the whole Gmail trash, not only the selection (cannot be undone)"),
-    ("u", "undo the last d, enter or s: restores emails from the trash, removes the files saved"),
+    ("u", "undo the last d, enter, s or e: restores emails from the trash or to the Inbox, removes the files saved"),
     ("?", "show this help"),
     ("q esc", "quit"),
 ]
 PREVIEW_CONFIRM_OVER = 5  # p asks before opening more PDF viewers than this
-FOOTER_LINES = 3  # browse / save / delete key groups
-KEY_HELP_NOTE = "Actions apply to the selected emails, or to the current one if none is selected."
+FOOTER_LINES = 3  # browse / email / delete key groups
+KEY_HELP_NOTE = (
+    "Actions apply to the selected emails, or to the current one if none is selected.\n"
+    "  Archived is not a Gmail folder or label: Gmail archives by removing an email from the Inbox.\n"
+    "  This view lists those emails (All mail minus Inbox, Sent and Drafts)."
+)
 # Actions confirmed by typing a word, because they cannot be undone.
 TYPED_CONFIRM = {"delete": "delete", "empty_trash": "empty"}
 
@@ -761,11 +841,16 @@ def new_picker_state():
             "cursor_id": None}
 
 
-def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None):
+def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
+                  views=("All mail",), view=0):
     """Interactive multi-select list over messages (extended in place when older emails load).
 
     Returns (action, chosen messages) where action is "download" (save + trash), "save",
-    "trash", "delete" (permanent), "empty_trash", "preview", "undo", "refresh" or "quit".
+    "trash", "delete" (permanent), "empty_trash", "restore", "not_spam", "archive", "unarchive", "preview", "star",
+    "open", "undo",
+    "refresh", "next_view", "prev_view" or "quit".
+    views are the tab names shown in the header, view the current one; the Trash view swaps
+    enter / d (meaningless there) for R restore.
     load_more() returns (older messages sorted newest first, whether even older ones remain).
     notice is a list of formatted-text lines shown under the header (last action result).
     undo_label describes what u would undo (e.g. "trash (3)"), None when there is nothing to undo.
@@ -780,6 +865,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     from prompt_toolkit.styles import Style
 
     rows = [message_row(message) for message in messages]
+    in_trash = views[view] == "Trash"
+    in_spam = views[view] == "Spam"
+    in_archived = views[view] == "Archived"
     state = new_picker_state() if state is None else state
     state.update(filtering=False, loading=False, confirm=None, help=False, exhausted=load_more is None)
     notice = list(notice)
@@ -793,7 +881,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     def list_height():
         # Leave room for the startup line above the picker, its own header/footer and the notice.
-        wanted = len(KEY_HELP) + 2 if state["help"] else len(rows)
+        wanted = len(KEY_HELP) + KEY_HELP_NOTE.count("\n") + 2 if state["help"] else len(rows)
         return max(1, min(wanted, size().rows - 6 - (FOOTER_LINES - 1) - len(notice)))
 
     def clamp():
@@ -826,10 +914,20 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         count = f"{len(rows)} emails"
         if total and not state["exhausted"] and total > len(rows):
             count = f"{len(rows)} of ~{total:,} emails"
-        parts = [("class:title", " Gmail"), ("class:dim", f" · {count} · newest first")]
+        parts = []
+        for position, name in enumerate(views):
+            parts.append(("class:tab.current" if position == view else "class:tab", f" {name} "))
+        parts.append(("class:dim", f" · {count} · newest first"))
         if state["query"]:
             parts.append(("class:dim", f" · {len(indexes)} match "))
             parts.append(("class:accent", state["query"]))
+        selected = len(state["selected"])
+        if selected:
+            status = f"{selected} selected "
+            if hidden(state["selected"]):
+                status = f"{selected} selected · {hidden(state['selected'])} hidden by the filter "
+            gap = max(2, size().columns - sum(cell_len(text) for _, text in parts) - cell_len(status) - 1)
+            parts += [("", " " * gap), ("class:checked", status)]
         return parts
 
     def render_notice():
@@ -846,12 +944,22 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             lines += [("", "\n"), ("class:key", f"  {key:<8}"), ("", description)]
         return lines
 
+    def render_columns():
+        """Column titles above the list, aligned with render_list."""
+        if state["help"] or not rows:
+            return []
+        sender_w, subject_w, snippet_w = column_widths(rows, size().columns)
+        text = " " * 9 + fit("Date", DATE_W) + "  " + fit("From / To", sender_w) + "  " + fit("Subject", subject_w)
+        if snippet_w:
+            text += "  " + fit("Preview", snippet_w)
+        return [("class:columns", text)]
+
     def render_list():
         if state["help"]:
             return render_help()
         indexes = clamp()
         if not indexes:
-            return [("class:dim", "   No email matches this filter." if rows else "   No emails left.")]
+            return [("class:dim", "   No email matches this filter." if rows else "   No emails here.")]
         sender_w, subject_w, snippet_w = column_widths(rows, size().columns)
         lines = []
         for position in range(state["top"], min(len(indexes), state["top"] + list_height())):
@@ -870,24 +978,46 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             lines += [
                 ("class:cursor", " ❯ " if current else "   "),
                 mark,
+                ("class:star", "★" if row["starred"] else " "),
                 ("", "📎 " if row["attachment"] else "   "),
                 ("class:dim", fit(row["date"], DATE_W) + "  "),
-                ("class:sender", fit(row["sender"], sender_w) + "  "),
-                ("class:subject.current" if current else "", fit(row["subject"], subject_w)),
+                *sender_fragments(row, sender_w),
+                ("class:subject.current" if current else "class:unread" if row["unread"] else "",
+                 fit(row["subject"], subject_w)),
             ]
             if snippet_w:
-                lines.append(("class:dim", "  " + fit(row["snippet"], snippet_w)))
+                # Size, category and label tags lead the snippet, colored, so they don't need columns.
+                lines += snippet_fragments(row, snippet_w)
         return lines
 
     def hidden_note():
         count = hidden(state["confirm"]["ids"])
         return f" ({count} hidden by the filter)" if count else ""
 
+    def snippet_fragments(row, width):
+        fragments, left = [("", "  ")], width
+        for kind, text in row["tags"]:
+            if left <= 1:
+                break
+            shown = fit(text, left).rstrip() if cell_len(text) > left else text
+            fragments.append((f"class:tag.{kind}", shown))
+            left -= cell_len(shown)
+            if left >= 3:
+                fragments.append(("class:dim", " · "))
+                left -= 3
+        if left > 0:
+            fragments.append(("class:dim", fit(row["snippet"], left)))
+        return fragments
+
+    def sender_fragments(row, width):
+        text = fit(row["sender"], width) + "  "
+        bold = " class:unread" if row["unread"] else ""
+        if row["kind"] == "sent":
+            # "Sent" colored like a label, the recipient dimmed.
+            return [("class:sent" + bold, text[:4]), ("class:dim" + bold, text[4:])]
+        return [(("class:draft" if row["kind"] == "draft" else "class:sender") + bold, text)]
+
     def render_footer():
-        count = len(state["selected"])
-        status = f"{count} selected " if count else ""
-        if count and hidden(state["selected"]):
-            status = f"{count} selected · {hidden(state['selected'])} hidden by the filter "
         rest = []  # footer lines below the first one (key groups only), as lists of fragments
         if state["help"]:
             hint = [("class:dim", " any key to close help")]
@@ -913,12 +1043,20 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             browse = [("↑↓", "move"), ("space", "select"), ("a", "all"), ("/", "filter")]
             if not state["exhausted"]:
                 browse.append(("m", "loading…" if state["loading"] else "more"))
-            browse += [("r", "refresh"), ("?", "help"), ("q", "quit")]
-            delete = [("d", "trash"), ("D", "delete permanently"), ("T", "empty trash")]
+            browse += [("r", "refresh"), ("Tab", "views"), ("?", "help"), ("q", "quit")]
+            delete = ([] if in_trash else [("d", "trash")]) + [("D", "delete permanently"), ("T", "empty trash")]
             if undo_label:
                 delete.append(("u", f"undo {undo_label}"))
-            groups = [("browse", browse), ("save", [("p", "preview"), ("enter", "save+trash"), ("s", "save+keep")]),
-                      ("delete", delete)]
+            email = [("p", "preview"), ("o", "open in Gmail"), ("*", "star")]
+            if in_trash:
+                email += [("s", "save+keep"), ("R", "restore")]
+            elif in_spam:
+                email += [("enter", "save+trash"), ("s", "save+keep"), ("R", "not spam")]
+            elif in_archived:
+                email += [("enter", "save+trash"), ("s", "save+keep"), ("R", "move to Inbox")]
+            else:
+                email += [("e", "archive"), ("enter", "save+trash"), ("s", "save+keep")]
+            groups = [("browse", browse), ("email", email), ("delete", delete)]
             lines = []
             for name, keys in groups:
                 line = [(f"class:group.{name}", f" {name:<7}")]
@@ -927,11 +1065,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                 lines.append(line)
             hint = lines[0]
             rest = lines[1:]
-        # The selection count sits right of the second line, the shortest in every mode.
-        second = rest[0] if rest else []
-        used = sum(cell_len(text) for _, text in second)
-        gap = max(2, size().columns - used - cell_len(status) - 1)
-        lines = [hint, second + [("", " " * gap), ("class:checked", status)]] + rest[1:]
+        lines = [hint] + rest
         return [part for position, line in enumerate(lines) for part in ([("", "\n")] if position else []) + line]
 
     filtering = Condition(lambda: state["filtering"])
@@ -978,7 +1112,15 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     def _(event):
         state["filtering"] = True
 
-    bindings.add("enter", filter=browsing)(lambda event: submit(event, "download", chosen()))
+    not_trash = Condition(lambda: not in_trash)
+    bindings.add("enter", filter=browsing & not_trash)(lambda event: submit(event, "download", chosen()))
+    bindings.add("R", filter=browsing & ~not_trash)(lambda event: submit(event, "restore", chosen()))
+    bindings.add("R", filter=browsing & Condition(lambda: in_spam))(lambda event: submit(event, "not_spam", chosen()))
+    bindings.add("R", filter=browsing & Condition(lambda: in_archived))(lambda event: submit(event, "unarchive", chosen()))
+    bindings.add("e", filter=browsing & Condition(lambda: not (in_trash or in_spam or in_archived)))(
+        lambda event: submit(event, "archive", chosen()))
+    bindings.add("tab", filter=browsing)(lambda event: event.app.exit(result=("next_view", [])))
+    bindings.add("s-tab", filter=browsing)(lambda event: event.app.exit(result=("prev_view", [])))
     bindings.add("s", filter=browsing)(lambda event: submit(event, "save", chosen()))
     @bindings.add("p", filter=browsing)
     def _(event):
@@ -992,7 +1134,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         ids = set() if action == "empty_trash" else chosen()
         state["confirm"] = {"action": action, "ids": ids, "typed": ""} if ids or action == "empty_trash" else None
 
-    bindings.add("d", filter=browsing)(lambda event: ask_confirm("trash"))
+    bindings.add("d", filter=browsing & not_trash)(lambda event: ask_confirm("trash"))
     bindings.add("D", filter=browsing)(lambda event: ask_confirm("delete"))
     bindings.add("T", filter=browsing)(lambda event: ask_confirm("empty_trash"))
 
@@ -1030,6 +1172,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     def _(event):
         if event.data.isprintable():
             state["confirm"]["typed"] += event.data
+
+    bindings.add("*", filter=browsing)(lambda event: submit(event, "star", chosen()))
+    bindings.add("o", filter=browsing)(lambda event: submit(event, "open", {current_id()} - {None}))
 
     @bindings.add("r", filter=browsing)
     def _(event):
@@ -1084,6 +1229,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     style = Style.from_dict({
         "title": "bold",
+        "columns": "fg:ansibrightblack underline",
+        "tab": "fg:ansibrightblack",
+        "tab.current": "reverse bold",
         "dim": "fg:ansibrightblack",
         "accent": "fg:ansicyan bold",
         "cursor": "fg:ansicyan bold",
@@ -1091,10 +1239,17 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         "saved": "fg:ansigreen",
         "error": "fg:ansired bold",
         "sender": "fg:ansicyan",
+        "draft": "fg:ansired",
+        "sent": "fg:ansimagenta",
+        "unread": "bold",
+        "star": "fg:ansiyellow",
+        "tag.size": "fg:ansiyellow",
+        "tag.category": "fg:ansiblue",
+        "tag.label": "fg:ansigreen",
         "subject.current": "bold",
         "key": "bold",
         "group.browse": "fg:ansicyan bold",
-        "group.save": "fg:ansigreen bold",
+        "group.email": "fg:ansigreen bold",
         "group.delete": "fg:ansired bold",
         "warn": "fg:ansiyellow bold",
     })
@@ -1102,7 +1257,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     if notice:
         windows.append(Window(FormattedTextControl(render_notice), height=len(notice)))
     windows += [
-        Window(height=1),
+        Window(FormattedTextControl(render_columns), height=1),
         Window(FormattedTextControl(render_list), height=lambda: Dimension.exact(list_height())),
         Window(height=1),
         Window(FormattedTextControl(render_footer), height=FOOTER_LINES),
@@ -1126,7 +1281,7 @@ def print_message_line(mark, message, detail="", sender_w=22):
     subject_w = max(10, width - 4 - (DATE_W + 2) - sender_w - 2 - detail_w - 3)
     console.print(
         f" {mark}  [dim]{escape(fit(row['date'], DATE_W))}[/]  "
-        f"[cyan]{escape(fit(row['sender'], sender_w))}[/]  "
+        f"[{ {'draft': 'red', 'sent': 'magenta'}.get(row['kind'], 'cyan') }]{escape(fit(row['sender'], sender_w))}[/]  "
         f"{escape(fit(row['subject'], subject_w))}  [dim]{escape(fit(detail, width - 4 - (DATE_W + 2) - sender_w - 2 - subject_w - 3))}[/]"
     )
 
@@ -1184,20 +1339,21 @@ def parse_command(answer):
     return "download", answer or ""
 
 
-def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None):
+def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
+                                views=("All mail",), view=0):
     """Pick emails interactively, or by typed numbers when not attached to a terminal.
 
     Returns (action, messages); see pick_messages for the actions.
     """
     if sys.stdin.isatty() and sys.stdout.isatty():
-        return pick_messages(messages, load_more, state, notice, undo_label, total)
+        return pick_messages(messages, load_more, state, notice, undo_label, total, views, view)
     if not messages:
         return "quit", []
 
     for line in notice:
         # Key hints only make sense in the interactive picker.
         console.print(escape("".join(text for style, text in line if "keyhint" not in style)))
-    sender_w = min(max(cell_len(sender_name(m.get("from"))) for m in messages), 22)
+    sender_w = min(max(cell_len(message_row(m)["sender"]) for m in messages), 22)
     num_w = len(str(len(messages)))
     for number, message in enumerate(messages, start=1):
         row = message_row(message)
@@ -1263,7 +1419,7 @@ def save_messages(service, user_id, messages, save_dir, browser, trash_after):
 
     Returns (saved messages, attachment count, {id: error text}, {id: written file paths}).
     """
-    sender_w = min(max(cell_len(sender_name(m.get("from"))) for m in messages), 22)
+    sender_w = min(max(cell_len(message_row(m)["sender"]) for m in messages), 22)
     results, failed = {}, {}
     progress = Progress(
         SpinnerColumn(),
@@ -1405,61 +1561,124 @@ def interactive_download_main():
             f"{escape(args.query) if args.query else '[dim](all)[/]'}  [dim]·  →[/] {escape(shown_dir)}\n"
         )
         console.print(banner)
-        with console.status("[dim]Fetching emails…[/]"):
-            messages, next_page = list_candidate_messages(service, user_id, query=args.query, max_results=args.max)
-            total = estimate_total(service, user_id, args.query) if next_page else None
+        global ACCOUNT, USER_LABELS
+        ACCOUNT = account
+        USER_LABELS = user_labels(service, user_id)
 
-        if not messages:
-            console.print("[dim]No emails found for this query.[/]")
-            return
+        def make_view(name, view_filter):
+            query = " ".join(part for part in [f"({args.query})" if args.query else "", view_filter] if part)
+            return {"name": name, "query": query, "in_trash": name in {"Trash", "Spam"}, "messages": [], "more": False,
+                    "floor": None, "total": None, "state": new_picker_state(), "loaded": False, "stale": False}
 
-        # m asks Gmail for emails older than the oldest one loaded so far: unlike page tokens, this
-        # stays right after refreshes and after emails were trashed during the session.
-        floor = min(message["internalDate"] for message in messages)
-        more = next_page is not None
+        views = [make_view(name, view_filter) for name, view_filter in VIEWS]
+        current = 0
 
-        def load_more():
-            nonlocal floor, more
-            before = f"before:{floor // 1000 + 1}"  # Gmail dates are in seconds; duplicates are dropped
-            older_query = f"({args.query}) {before}" if args.query else before
-            older, token = list_candidate_messages(service, user_id, query=older_query, max_results=args.max)
-            known = {message["id"] for message in messages}
-            older = [message for message in older if message["id"] not in known]
-            if older:
-                floor = min(floor, min(message["internalDate"] for message in older))
-            more = token is not None
-            return older, more
+        def load_view(view):
+            with console.status(f"[dim]Fetching {view['name']}…[/]"):
+                loaded, token = list_candidate_messages(
+                    service, user_id, query=view["query"], max_results=args.max, in_trash=view["in_trash"]
+                )
+                view["total"] = estimate_total(service, user_id, view["query"], view["in_trash"]) if token else None
+            view["messages"][:] = loaded
+            # m asks Gmail for emails older than the oldest one loaded so far: unlike page tokens, this
+            # stays right after refreshes and after emails were trashed during the session.
+            view["floor"] = min((message["internalDate"] for message in loaded), default=None)
+            view["more"] = token is not None
+            view["loaded"], view["stale"] = True, False
 
-        def drop(ids):
-            nonlocal total
+        def load_more_for(view):
+            def load_more():
+                before = f"before:{view['floor'] // 1000 + 1}"  # Gmail dates are in seconds; duplicates dropped
+                older, token = list_candidate_messages(
+                    service, user_id, query=f"{view['query']} {before}".strip(), max_results=args.max,
+                    in_trash=view["in_trash"],
+                )
+                known = {message["id"] for message in view["messages"]}
+                older = [message for message in older if message["id"] not in known]
+                if older:
+                    view["floor"] = min(view["floor"], min(message["internalDate"] for message in older))
+                view["more"] = token is not None
+                return older, view["more"]
+            return load_more
+
+        def drop(view, ids):
+            messages = view["messages"]
             before = len(messages)
             messages[:] = [message for message in messages if message["id"] not in ids]
-            state["selected"] -= ids
-            if total:
-                total = max(0, total - (before - len(messages)))
+            view["state"]["selected"] -= ids
+            if view["total"]:
+                view["total"] = max(0, view["total"] - (before - len(messages)))
 
-        state = new_picker_state()
+        def refresh_view(view, quiet=False):
+            """Re-sync a view with Gmail; returns its notice lines (none if quiet and nothing changed)."""
+            try:
+                with console.status("[dim]Checking Gmail…[/]"):
+                    new, removed = refresh_messages(
+                        service, user_id, view["query"], view["messages"],
+                        since=view["floor"] if view["more"] else None, in_trash=view["in_trash"],
+                    )
+                    if view["more"]:
+                        view["total"] = estimate_total(service, user_id, view["query"], view["in_trash"])
+            except HttpError as exc:
+                return [[("class:error", " ✗ "), ("", "Refresh failed"), ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
+            drop(view, removed)
+            known = {message["id"] for message in view["messages"]}
+            view["messages"].extend(message for message in new if message["id"] not in known)
+            view["messages"].sort(key=lambda message: message["internalDate"], reverse=True)
+            if view["floor"] is None and view["messages"]:
+                view["floor"] = min(message["internalDate"] for message in view["messages"])
+            view["stale"] = False
+            parts = []
+            if new:
+                parts.append(f"{len(new)} new")
+            if removed:
+                parts.append(f"{len(removed)} gone (deleted or moved in Gmail)")
+            if quiet and not parts:
+                return []
+            return [[("class:checked", " ↻ "), ("", " · ".join(parts) or "Up to date")]]
+
+        def moved_emails():
+            """Emails changed place (trash, restore, delete): other views refresh when next shown."""
+            for view in views:
+                if view is not views[current] and view["loaded"]:
+                    view["stale"] = True
+
+        load_view(views[current])
         notice = []
-        # Last reversible action (d, enter or s): its key-help name, emails to restore from the trash,
-        # files to remove.
+        # Last reversible action (d, enter, s or e): its key-help name, emails to restore from the trash,
+        # files to remove, emails to put back in the Inbox.
         undo = None
 
         def undo_text(undo):
             if not undo:
                 return None
-            count = len({message["id"] for message in undo["trashed"]} | set(undo["files"]))
+            count = len({message["id"] for message in undo["trashed"] + undo.get("archived", [])} | set(undo["files"]))
             return f"{undo['label']} ({count})"
         totals = {"saved": 0, "trashed": 0, "deleted": 0}
         # Back to the list after every action, until the user quits.
-        while messages or more or undo:
+        while True:
+            view = views[current]
+            messages, state = view["messages"], view["state"]
             action, chosen = ask_user_to_select_messages(
-                messages, load_more if more else None, state, notice, undo_text(undo), total
+                messages, load_more_for(view) if view["more"] else None, state, notice, undo_text(undo),
+                view["total"], [view["name"] for view in views], current,
             )
-            if action == "quit" or (action not in {"undo", "empty_trash", "refresh"} and not chosen):
+            if action == "quit" or (
+                action not in {"undo", "empty_trash", "refresh", "next_view", "prev_view"} and not chosen
+            ):
                 break
             ids = {message["id"] for message in chosen}
 
-            if action == "preview":
+            if action in {"next_view", "prev_view"}:
+                current = (current + (1 if action == "next_view" else -1)) % len(views)
+                view = views[current]
+                notice = []
+                if not view["loaded"]:
+                    load_view(view)
+                elif view["stale"]:
+                    notice = refresh_view(view, quiet=True)
+
+            elif action == "preview":
                 # Previews live in a session temp dir (never in the download folder), removed on quit.
                 preview_dir = preview_dir or tempfile.mkdtemp(prefix="savegmail-preview-")
                 failed = preview_messages(service, user_id, chosen, get_browser(), preview_dir)
@@ -1473,59 +1692,108 @@ def interactive_download_main():
                     with console.status("[dim]Restoring from trash…[/]"):
                         errors = untrash_messages(service, user_id, [message["id"] for message in undo["trashed"]])
                 restored = [message for message in undo["trashed"] if message["id"] not in errors]
-                messages.extend(restored)
-                messages.sort(key=lambda message: message["internalDate"], reverse=True)
                 totals["trashed"] -= len(restored)
-                if total:
-                    total += len(restored)
                 # Emails still stuck in the trash keep their files, so a retry of u stays consistent.
                 unsaved = {msg_id: files for msg_id, files in undo["files"].items() if msg_id not in errors}
                 removed = [path for files in unsaved.values() for path in files]
                 remove_files(removed)
                 totals["saved"] -= len(unsaved)
-                state["saved"] -= set(unsaved)
+                for each in views:
+                    each["state"]["saved"] -= set(unsaved)
+                unarchived = []
+                if undo.get("archived"):
+                    try:
+                        modify_labels(service, user_id, [message["id"] for message in undo["archived"]], add=["INBOX"])
+                    except HttpError as exc:
+                        errors.update({message["id"]: exc for message in undo["archived"]})
+                    else:
+                        unarchived = undo["archived"]
+                if restored or unarchived:
+                    # Emails go back to whichever views they belong to.
+                    moved_emails()
+                    refresh_view(view)
                 parts = []
                 if restored:
                     parts.append(f"{plural(len(restored), 'email')} restored from trash")
+                if unarchived:
+                    parts.append(f"{plural(len(unarchived), 'email')} back in the Inbox")
                 if removed:
                     parts.append(f"{plural(len(removed), 'file')} removed")
                 notice = [[("class:checked", " ↶ "), ("", " · ".join(parts) or "Nothing undone")]]
-                notice += failure_notice(undo["trashed"], {msg_id: str(exc) for msg_id, exc in errors.items()})
+                notice += failure_notice(undo["trashed"] + undo.get("archived", []),
+                                         {msg_id: str(exc) for msg_id, exc in errors.items()})
                 stuck = [message for message in undo["trashed"] if message["id"] in errors]
-                undo = {"label": undo["label"], "trashed": stuck, "files": {msg_id: undo["files"][msg_id] for msg_id in errors
-                                                    if msg_id in undo["files"]}} if stuck else None
+                stuck_archived = [message for message in undo.get("archived", []) if message["id"] in errors]
+                undo = {"label": undo["label"], "trashed": stuck, "archived": stuck_archived,
+                        "files": {msg_id: undo["files"][msg_id] for msg_id in errors if msg_id in undo["files"]}
+                        } if stuck or stuck_archived else None
+
+            elif action in {"archive", "not_spam", "unarchive"}:
+                # Archive leaves the Inbox; "not spam" and unarchive go back to it, like in Gmail.
+                add, remove = {"archive": ([], ["INBOX"]), "not_spam": (["INBOX"], ["SPAM"]),
+                               "unarchive": (["INBOX"], [])}[action]
+                try:
+                    modify_labels(service, user_id, list(ids), add=add, remove=remove)
+                except HttpError as exc:
+                    notice = [[("class:error", " ✗ "), ("", f"Could not {'archive' if action == 'archive' else 'move'} "
+                                                         f"{plural(len(ids), 'email')}"),
+                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
+                else:
+                    for message in chosen:
+                        message["labels"] = [label for label in message.get("labels", []) if label not in remove] + add
+                    if view["name"] in {"Inbox", "Spam", "Archived"}:
+                        drop(view, ids)
+                    moved_emails()
+                    if action == "archive":
+                        undo = {"label": "archive", "trashed": [], "files": {}, "archived": chosen}
+                        notice = [[("class:checked", " ✓ "), ("", f"{plural(len(chosen), 'email')} archived"),
+                                   ("class:dim class:keyhint", " · u undo")]]
+                    else:
+                        notice = [[("class:checked", " ✓ "), ("", f"{plural(len(chosen), 'email')} moved to the Inbox")]]
+
+            elif action == "restore":
+                with console.status("[dim]Restoring from trash…[/]"):
+                    errors = untrash_messages(service, user_id, list(ids))
+                restored = [message for message in chosen if message["id"] not in errors]
+                drop(view, {message["id"] for message in restored})
+                if restored:
+                    moved_emails()
+                notice = [[("class:checked", " ↶ "), ("", f"{plural(len(restored), 'email')} restored from trash")]]
+                notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
 
             elif action == "trash":
                 with console.status("[dim]Moving to trash…[/]"):
                     errors = trash_messages(service, user_id, list(ids))
                 trashed = [message for message in chosen if message["id"] not in errors]
-                drop({message["id"] for message in trashed})
+                drop(view, {message["id"] for message in trashed})
                 if trashed:
                     undo = {"label": "trash", "trashed": trashed, "files": {}}
+                    moved_emails()
                 totals["trashed"] += len(trashed)
                 notice = [[("class:checked", " ✓ "), ("", f"{plural(len(trashed), 'email')} moved to trash (not saved)"),
                            ("class:dim class:keyhint", " · u undo" if trashed else "")]]
                 notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
 
-            elif action == "refresh":
+            elif action == "open":
+                open_quietly(gmail_url(account, chosen[0]["id"]))
+
+            elif action == "star":
+                # Like Gmail: star them all, unless they all are already starred.
+                star = not all("STARRED" in message.get("labels", []) for message in chosen)
                 try:
-                    with console.status("[dim]Checking Gmail…[/]"):
-                        new, removed = refresh_messages(service, user_id, args.query, messages)
-                        total = estimate_total(service, user_id, args.query) if more else None
+                    modify_labels(service, user_id, list(ids), **{"add" if star else "remove": ["STARRED"]})
                 except HttpError as exc:
-                    notice = [[("class:error", " ✗ "), ("", "Refresh failed"),
+                    notice = [[("class:error", " ✗ "), ("", "Could not change the star"),
                                ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
                 else:
-                    drop(removed)
-                    known = {message["id"] for message in messages}
-                    messages.extend(message for message in new if message["id"] not in known)
-                    messages.sort(key=lambda message: message["internalDate"], reverse=True)
-                    parts = []
-                    if new:
-                        parts.append(f"{len(new)} new")
-                    if removed:
-                        parts.append(f"{len(removed)} gone (deleted or moved in Gmail)")
-                    notice = [[("class:checked", " ↻ "), ("", " · ".join(parts) or "Up to date")]]
+                    for message in chosen:
+                        labels = [label for label in message.get("labels", []) if label != "STARRED"]
+                        message["labels"] = labels + ["STARRED"] if star else labels
+                    notice = [[("class:star", " ★ " if star else " ☆ "),
+                               ("", f"{plural(len(chosen), 'email')} {'starred' if star else 'unstarred'}")]]
+
+            elif action == "refresh":
+                notice = refresh_view(view)
 
             elif action == "empty_trash":
                 try:
@@ -1536,6 +1804,9 @@ def interactive_download_main():
                     notice = [[("class:error", " ✗ "), ("", "Could not empty the trash"),
                                ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
                 else:
+                    moved_emails()
+                    if view["in_trash"]:
+                        drop(view, {message["id"] for message in messages})
                     # Trashed emails are gone for good: they can't be restored, and their saved files are
                     # now the only copy, so keep them. Only an undo of s (emails still in Gmail) remains.
                     if undo:
@@ -1555,7 +1826,8 @@ def interactive_download_main():
                     notice = [[("class:error", " ✗ "), ("", f"Could not delete {plural(len(ids), 'email')}"),
                                ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
                 else:
-                    drop(ids)
+                    drop(view, ids)
+                    moved_emails()
                     totals["deleted"] += len(ids)
                     # Saved files of deleted emails are now the only copy: an undo of s must not remove them.
                     if undo:
@@ -1571,7 +1843,8 @@ def interactive_download_main():
                 totals["saved"] += len(saved)
                 summary = f"{plural(len(saved), 'PDF')} · {plural(attachments, 'attachment')}"
                 if trash_after:
-                    drop(saved_ids)
+                    drop(view, saved_ids)
+                    moved_emails()
                     if saved:
                         undo = {"label": "save+trash", "trashed": saved, "files": files}
                     totals["trashed"] += len(saved)
@@ -1592,8 +1865,6 @@ def interactive_download_main():
 
         # The screen only holds our banner (cleared at launch): leave just the session result behind.
         console.clear()
-        if not (messages or more):
-            console.print("[dim]No emails left.[/]")
         if any(totals.values()):
             summary = f"{plural(totals['saved'], 'email')} saved · {totals['trashed']} moved to trash"
             if totals["deleted"]:
