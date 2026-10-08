@@ -98,7 +98,7 @@ Each view has its own color: its tab is filled with it and the header info (`· 
    ○      2025-08-31 18:02   48 KB  LinkedIn        Davy shared a post         Social · Last Tuesday was…
 
  browse  space select · a all · A sender · / filter · z by size · m more · r refresh · Tab views · ? help · q quit
- email   p preview · o open in Gmail · * star · ! unread · e archive · enter save+trash · s save+keep
+ email   p preview · o open in Gmail · * star · ! unread · f folder · e archive · enter save+trash · s save+keep
  delete  d trash · D delete permanently · T empty trash
 ```
 
@@ -118,6 +118,7 @@ Actions apply to the selected emails, or to the current one if none is selected.
 | `p` | Preview as the exact PDFs a download would produce, opened in your PDF viewer (temporary file, nothing saved to the download folder); marks them as read; asks `y` before opening more than 5 |
 | `o` | Open the current email in Gmail, in your browser; marks it as read |
 | `*` | Star / unstar in Gmail (stars all, unless all are already starred) |
+| `f` | Change the download folder for this session (prefilled with the current one; `ctrl+u` clears, `enter` applies, the folder is created if missing). `--download-path` sets it at launch |
 | `!` | Mark as unread / read in Gmail (unread all, unless all already are), e.g. to keep an email to do after `p` or `o` |
 | `e` | Archive: remove from the Inbox, keep in All mail (not in the Archived, Trash and Spam views) |
 | `enter` | Save PDFs + attachments, then move the emails to the Gmail trash |

@@ -214,9 +214,13 @@ def discard_pending_keys(app_input=None):
     if sys.stdin.isatty():
         try:
             import termios
-            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-        except (ImportError, OSError):
-            pass  # Windows: no termios, nothing more to drop than the typeahead below
+        except ImportError:
+            termios = None  # Windows: nothing more to drop than the typeahead below
+        if termios:
+            try:
+                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+            except (termios.error, OSError):
+                pass
     if app_input is not None:
         from prompt_toolkit.input.typeahead import clear_typeahead
         clear_typeahead(app_input)
@@ -930,6 +934,7 @@ KEY_HELP = [
     ("o", "open the current email in Gmail, in your browser; marks as read"),
     ("*", "star / unstar in Gmail"),
     ("!", "mark as unread / read in Gmail (e.g. to keep an email to do after p or o)"),
+    ("f", "change the download folder for this session (created if missing)"),
     ("e", "archive: remove from the Inbox, keep in All mail (recoverable: u, or R in Archived)"),
     ("enter", "save PDF + attachments, then move the email to the Gmail trash (recoverable: u)"),
     ("s", "save PDF + attachments, keep the email in Gmail (recoverable: u)"),
@@ -957,18 +962,21 @@ def new_picker_state():
     """Picker state kept across runs, so cursor, filter and selection survive each action."""
     return {"cursor": 0, "top": 0, "query": "", "filtering": False, "selected": set(), "saved": set(),
             "loading": False, "exhausted": True, "confirm": None, "help": False,
-            "cursor_id": None, "sort": "date"}
+            "cursor_id": None, "sort": "date",
+            "folder": None}
 
 
 def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
-                  views=("All mail",), view=0, badges=None):
+                  views=("All mail",), view=0, badges=None, folder=""):
     """Interactive multi-select list over messages (extended in place when older emails load).
 
     Returns (action, chosen messages) where action is "download" (save + trash), "save",
     "trash", "delete" (permanent), "empty_trash", "restore", "not_spam", "archive", "unarchive", "preview", "star", "unread",
     "open", "undo",
-    "refresh", "next_view", "prev_view" or "quit".
+    "refresh", "next_view", "prev_view", "folder" or "quit".
     badges maps view names to (count text, "unread" | "total") shown in their tab.
+    folder is the download folder f starts editing from; the "folder" action leaves the new one in
+    state["folder"].
     views are the tab names shown in the header, view the current one; the Trash view swaps
     enter / d (meaningless there) for R restore.
     load_more() returns (older messages sorted newest first, whether even older ones remain).
@@ -989,7 +997,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     in_spam = views[view] == "Spam"
     in_archived = views[view] == "Archived"
     state = new_picker_state() if state is None else state
-    state.update(filtering=False, loading=False, confirm=None, help=False, exhausted=load_more is None)
+    state.update(filtering=False, loading=False, confirm=None, help=False, folder=None, exhausted=load_more is None)
     notice = list(notice)
 
     def visible():
@@ -1176,6 +1184,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                         else f" Move {n} email{'s' * (n != 1)}{hidden_note()} to trash without saving?")
             hint = [("class:warn", question)]
             rest = [[("class:dim", " "), ("class:key", "y"), ("class:dim", " confirm · any other key cancel")]]
+        elif state["folder"] is not None:
+            hint = [("class:accent", " Download folder: "), ("", state["folder"]), ("class:accent", "▏")]
+            rest = [[("class:dim", " enter apply (created if missing) · ctrl+u clear · esc cancel · "
+                                   "for this session; --download-path sets it at launch")]]
         elif state["filtering"]:
             hint = [("class:accent", " / "), ("", state["query"]), ("class:accent", "▏"),
                     ("class:dim", "   enter apply · esc clear")]
@@ -1189,7 +1201,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             delete = ([] if in_trash else [("d", "trash")]) + [("D", "delete permanently"), ("T", "empty trash")]
             if undo_label:
                 delete.append(("u", f"undo {undo_label}"))
-            email = [("p", "preview"), ("o", "open in Gmail"), ("*", "star"), ("!", "unread")]
+            email = [("p", "preview"), ("o", "open in Gmail"), ("*", "star"), ("!", "unread"), ("f", "folder")]
             if in_trash:
                 email += [("s", "save+keep"), ("R", "restore")]
             elif in_spam:
@@ -1215,7 +1227,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     confirming_yes = Condition(lambda: bool(state["confirm"]) and state["confirm"]["action"] in {"trash", "preview"})
     confirming_typed = Condition(lambda: bool(state["confirm"]) and state["confirm"]["action"] in TYPED_CONFIRM)
     helping = Condition(lambda: state["help"])
-    browsing = ~filtering & ~confirming & ~helping
+    editing_folder = Condition(lambda: state["folder"] is not None)
+    browsing = ~filtering & ~confirming & ~helping & ~editing_folder
     bindings = KeyBindings()
 
     def move(delta):
@@ -1391,6 +1404,31 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             state["query"] += event.data
             state["cursor"] = 0
 
+    @bindings.add("f", filter=browsing)
+    def _(event):
+        state["folder"] = folder
+
+    @bindings.add("enter", filter=editing_folder)
+    def _(event):
+        event.app.exit(result=("folder", []))
+
+    @bindings.add("escape", filter=editing_folder)
+    def _(event):
+        state["folder"] = None
+
+    @bindings.add("backspace", filter=editing_folder)
+    def _(event):
+        state["folder"] = state["folder"][:-1]
+
+    @bindings.add("c-u", filter=editing_folder)
+    def _(event):
+        state["folder"] = ""
+
+    @bindings.add("<any>", filter=editing_folder)
+    def _(event):
+        if event.data.isprintable():
+            state["folder"] += event.data
+
     style = Style.from_dict({
         "title": "bold",
         "columns": "fg:ansibrightblack underline",
@@ -1510,13 +1548,13 @@ def parse_command(answer):
 
 
 def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
-                                views=("All mail",), view=0, badges=None):
+                                views=("All mail",), view=0, badges=None, folder=""):
     """Pick emails interactively, or by typed numbers when not attached to a terminal.
 
     Returns (action, messages); see pick_messages for the actions.
     """
     if sys.stdin.isatty() and sys.stdout.isatty():
-        return pick_messages(messages, load_more, state, notice, undo_label, total, views, view, badges)
+        return pick_messages(messages, load_more, state, notice, undo_label, total, views, view, badges, folder)
     if not messages:
         return "quit", []
 
@@ -1726,10 +1764,13 @@ def interactive_download_main():
         shown_dir = save_dir.replace(os.path.expanduser("~"), "~", 1)
 
         account = service.users().getProfile(userId=user_id).execute().get("emailAddress", user_id)
-        banner = (
-            f" [bold]savegmail[/]  [dim]·[/]  {escape(account)}  [dim]·  query:[/] "
-            f"{escape(args.query) if args.query else '[dim](all)[/]'}  [dim]·  →[/] {escape(shown_dir)}\n"
-        )
+        def make_banner():
+            return (
+                f" [bold]savegmail[/]  [dim]·[/]  {escape(account)}  [dim]·  query:[/] "
+                f"{escape(args.query) if args.query else '[dim](all)[/]'}  [dim]·  →[/] {escape(shown_dir)}\n"
+            )
+
+        banner = make_banner()
         console.print(banner)
         global ACCOUNT, USER_LABELS
         ACCOUNT = account
@@ -1850,13 +1891,31 @@ def interactive_download_main():
             messages, state = view["messages"], view["state"]
             action, chosen = ask_user_to_select_messages(
                 messages, load_more_for(view) if view["more"] else None, state, notice, undo_text(undo),
-                view["total"], [view["name"] for view in views], current, badges,
+                view["total"], [view["name"] for view in views], current, badges, shown_dir,
             )
             if action == "quit" or (
-                action not in {"undo", "empty_trash", "refresh", "next_view", "prev_view"} and not chosen
+                action not in {"undo", "empty_trash", "refresh", "next_view", "prev_view", "folder"} and not chosen
             ):
                 break
             ids = {message["id"] for message in chosen}
+
+            if action == "folder":
+                wanted = os.path.expanduser((state["folder"] or "").strip())
+                try:
+                    if not wanted:
+                        raise OSError("empty path")
+                    os.makedirs(wanted, exist_ok=True)
+                except OSError as exc:
+                    notice = [[("class:error", " ✗ "), ("", "Could not use that folder"),
+                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
+                else:
+                    save_dir = os.path.abspath(wanted)
+                    shown_dir = save_dir.replace(os.path.expanduser("~"), "~", 1)
+                    banner = make_banner()
+                    notice = [[("class:checked", " ✓ "), ("", "Download folder: "), ("class:dim", shown_dir)]]
+                console.clear()
+                console.print(banner)
+                continue
 
             if action in {"next_view", "prev_view"}:
                 current = (current + (1 if action == "next_view" else -1)) % len(views)

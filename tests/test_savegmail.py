@@ -428,6 +428,15 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick("A\r", messages), ("download", ["0", "2"]))
         self.assertEqual(pick("AA\r", messages), ("download", ["0"]))  # A again unselects them
 
+    def test_folder_key(self):
+        state = savegmail.new_picker_state()
+        # f starts from the current folder; backspace / typing edit it; enter applies.
+        self.assertEqual(pick("f\x7f2026\r", state=state, folder="~/GMail/"), ("folder", []))
+        self.assertEqual(state["folder"], "~/GMail2026")
+        self.assertEqual(pick("f\x1bq", folder="~/GMail/"), ("quit", []))  # esc cancels, q then quits
+        pick("f\x15~/Archive\r", state=state, folder="~/GMail/")  # ctrl+u clears
+        self.assertEqual(state["folder"], "~/Archive")
+
     def test_refresh_key(self):
         self.assertEqual(pick("r"), ("refresh", []))
 
