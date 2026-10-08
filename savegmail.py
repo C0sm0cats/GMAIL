@@ -598,7 +598,7 @@ def to_candidate(detail):
 
 
 def list_candidate_messages(service, user_id, query="", max_results=50, page_token=None):
-    """Return (messages sorted oldest first, token for the next older page or None).
+    """Return (messages sorted newest first, token for the next older page or None).
 
     Empty query means: list all visible Gmail messages, letting the user choose
     which ones to download afterwards.
@@ -618,8 +618,18 @@ def list_candidate_messages(service, user_id, query="", max_results=50, page_tok
 
     details, _ = run_batched(service, ids, lambda msg_id: metadata_request(service, user_id, msg_id))
     detailed_messages = [to_candidate(details[msg_id]) for msg_id in ids if msg_id in details]
-    detailed_messages.sort(key=lambda item: item["internalDate"])
+    detailed_messages.sort(key=lambda item: item["internalDate"], reverse=True)
     return detailed_messages, page_token
+
+
+def estimate_total(service, user_id, query=""):
+    """Gmail's (approximate) count of emails matching query; None if unavailable."""
+    try:
+        response = service.users().messages().list(userId=user_id, q=query, maxResults=1).execute()
+    except HttpError as exc:
+        debug(f"Could not estimate the number of emails: {exc}")
+        return None
+    return response.get("resultSizeEstimate")
 
 
 def fit(value, width):
@@ -644,6 +654,44 @@ def sender_name(sender):
     return name.strip().strip('"') or address or "—"
 
 
+def refresh_messages(service, user_id, query, loaded, page_size=100):
+    """Re-sync the loaded range (newest email down to the oldest loaded one) with Gmail.
+
+    Returns (new messages in that range, ids of loaded messages Gmail no longer lists).
+    """
+    known = {message["id"] for message in loaded}
+    oldest = min((message["internalDate"] for message in loaded), default=None)
+    seen, new, page_token = set(), [], None
+    while True:
+        response = service.users().messages().list(
+            userId=user_id, q=query, maxResults=page_size, pageToken=page_token
+        ).execute()
+        ids = [message["id"] for message in response.get("messages", [])]
+        seen.update(msg_id for msg_id in ids if msg_id in known)
+        if seen == known:
+            # Every loaded email is accounted for: unknown ids after the last loaded one are older.
+            last = max((position for position, msg_id in enumerate(ids) if msg_id in known), default=-1)
+            candidates = [msg_id for msg_id in ids[:last + 1] if msg_id not in known]
+        else:
+            candidates = [msg_id for msg_id in ids if msg_id not in known]
+        details, _ = run_batched(service, candidates, lambda msg_id: metadata_request(service, user_id, msg_id))
+        crossed = seen == known and bool(known)
+        for msg_id in candidates:
+            if msg_id not in details:
+                continue
+            message = to_candidate(details[msg_id])
+            if oldest is None or message["internalDate"] >= oldest:
+                new.append(message)
+            else:
+                crossed = True  # past the oldest loaded email: the rest comes with load_more
+        page_token = response.get("nextPageToken")
+        if crossed or not page_token or oldest is None:
+            return new, known - seen
+
+
+DATE_W = 16  # widest compact_date: "2025-08-31 14:05"
+
+
 def compact_date(internal_date_ms):
     """Mail-client style date: time today, day+month this year, ISO date otherwise."""
     if not internal_date_ms:
@@ -653,8 +701,8 @@ def compact_date(internal_date_ms):
     if local_date.date() == now.date():
         return local_date.strftime("%H:%M")
     if local_date.year == now.year:
-        return f"{local_date.day} {local_date.strftime('%b')}"
-    return local_date.strftime("%Y-%m-%d")
+        return f"{local_date.day} {local_date.strftime('%b %H:%M')}"
+    return local_date.strftime("%Y-%m-%d %H:%M")
 
 
 def message_row(message):
@@ -673,7 +721,7 @@ def message_row(message):
 
 def column_widths(rows, total_width):
     """Return (sender, subject, snippet) widths for the space left after fixed columns."""
-    fixed = 4 + 3 + 10 + 2  # cursor + checkbox, attachment, date, gap
+    fixed = 4 + 3 + DATE_W + 2  # cursor + checkbox, attachment, date, gap
     sender_w = min(max((cell_len(row["sender"]) for row in rows), default=6), 22)
     rest = max(0, total_width - fixed - sender_w - 2 - 1)
     longest_subject = max((cell_len(row["subject"]) for row in rows), default=7)
@@ -688,6 +736,7 @@ KEY_HELP = [
     ("a", "select / unselect all visible emails"),
     ("/", "filter by sender or subject"),
     ("m", "load older emails"),
+    ("r", "refresh: add new emails, drop the ones deleted or moved in Gmail meanwhile"),
     ("p", "preview as PDF, exactly as it would be saved (nothing written to the download folder)"),
     ("enter", "save PDF + attachments, then move the email to the Gmail trash (recoverable: u)"),
     ("s", "save PDF + attachments, keep the email in Gmail (recoverable: u)"),
@@ -696,8 +745,9 @@ KEY_HELP = [
     ("T", "empty the whole Gmail trash, not only the selection (cannot be undone)"),
     ("u", "undo the last d, enter or s: restores emails from the trash, removes the files saved"),
     ("?", "show this help"),
-    ("q", "quit"),
+    ("q esc", "quit"),
 ]
+PREVIEW_CONFIRM_OVER = 5  # p asks before opening more PDF viewers than this
 FOOTER_LINES = 3  # browse / save / delete key groups
 KEY_HELP_NOTE = "Actions apply to the selected emails, or to the current one if none is selected."
 # Actions confirmed by typing a word, because they cannot be undone.
@@ -707,17 +757,19 @@ TYPED_CONFIRM = {"delete": "delete", "empty_trash": "empty"}
 def new_picker_state():
     """Picker state kept across runs, so cursor, filter and selection survive each action."""
     return {"cursor": 0, "top": 0, "query": "", "filtering": False, "selected": set(), "saved": set(),
-            "loading": False, "exhausted": True, "confirm": None, "help": False}
+            "loading": False, "exhausted": True, "confirm": None, "help": False,
+            "cursor_id": None}
 
 
-def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=None):
+def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None):
     """Interactive multi-select list over messages (extended in place when older emails load).
 
     Returns (action, chosen messages) where action is "download" (save + trash), "save",
-    "trash", "delete" (permanent), "empty_trash", "preview", "undo" or "quit".
-    load_more() returns (older messages sorted oldest first, whether even older ones remain).
+    "trash", "delete" (permanent), "empty_trash", "preview", "undo", "refresh" or "quit".
+    load_more() returns (older messages sorted newest first, whether even older ones remain).
     notice is a list of formatted-text lines shown under the header (last action result).
     undo_label describes what u would undo (e.g. "trash (3)"), None when there is nothing to undo.
+    total is Gmail's estimate of how many emails match the query (shown while more can be loaded).
     """
     from prompt_toolkit.application import Application, get_app
     from prompt_toolkit.filters import Condition
@@ -759,6 +811,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         indexes = visible()
         return messages[indexes[state["cursor"]]]["id"] if indexes else None
 
+    def hidden(ids):
+        """How many of ids the current filter hides."""
+        return len(ids - {messages[index]["id"] for index in visible()})
+
     def chosen():
         """Selected ids, or the email under the cursor when nothing is selected."""
         if state["selected"]:
@@ -767,7 +823,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     def render_header():
         indexes = visible()
-        parts = [("class:title", " Gmail"), ("class:dim", f" · {len(rows)} emails · oldest → newest")]
+        count = f"{len(rows)} emails"
+        if total and not state["exhausted"] and total > len(rows):
+            count = f"{len(rows)} of ~{total:,} emails"
+        parts = [("class:title", " Gmail"), ("class:dim", f" · {count} · newest first")]
         if state["query"]:
             parts.append(("class:dim", f" · {len(indexes)} match "))
             parts.append(("class:accent", state["query"]))
@@ -812,7 +871,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                 ("class:cursor", " ❯ " if current else "   "),
                 mark,
                 ("", "📎 " if row["attachment"] else "   "),
-                ("class:dim", fit(row["date"], 10) + "  "),
+                ("class:dim", fit(row["date"], DATE_W) + "  "),
                 ("class:sender", fit(row["sender"], sender_w) + "  "),
                 ("class:subject.current" if current else "", fit(row["subject"], subject_w)),
             ]
@@ -820,25 +879,33 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                 lines.append(("class:dim", "  " + fit(row["snippet"], snippet_w)))
         return lines
 
+    def hidden_note():
+        count = hidden(state["confirm"]["ids"])
+        return f" ({count} hidden by the filter)" if count else ""
+
     def render_footer():
         count = len(state["selected"])
         status = f"{count} selected " if count else ""
-        rest = []  # footer lines below the first one (key groups only)
+        if count and hidden(state["selected"]):
+            status = f"{count} selected · {hidden(state['selected'])} hidden by the filter "
+        rest = []  # footer lines below the first one (key groups only), as lists of fragments
         if state["help"]:
             hint = [("class:dim", " any key to close help")]
         elif state["confirm"] and state["confirm"]["action"] in TYPED_CONFIRM:
             action = state["confirm"]["action"]
             n = len(state["confirm"]["ids"])
-            question = (f" Permanently delete {n} email{'s' * (n != 1)}?" if action == "delete"
+            question = (f" Permanently delete {n} email{'s' * (n != 1)}{hidden_note()}?" if action == "delete"
                         else " Permanently delete everything in the Gmail trash?")
             hint = [("class:error", question + " Cannot be undone."),
                     ("class:dim", " Type "), ("class:key", TYPED_CONFIRM[action]), ("class:dim", ": "),
-                    ("", state["confirm"]["typed"]), ("class:accent", "▏"),
-                    ("class:dim", "  enter confirm · esc cancel")]
+                    ("", state["confirm"]["typed"]), ("class:accent", "▏")]
+            rest = [[("class:dim", " enter confirm · esc cancel")]]
         elif state["confirm"]:
             n = len(state["confirm"]["ids"])
-            hint = [("class:warn", f" Move {n} email{'s' * (n != 1)} to trash without saving?"),
-                    ("class:dim", "   "), ("class:key", "y"), ("class:dim", " confirm · any other key cancel")]
+            question = (f" Open {n} PDF previews?" if state["confirm"]["action"] == "preview"
+                        else f" Move {n} email{'s' * (n != 1)}{hidden_note()} to trash without saving?")
+            hint = [("class:warn", question)]
+            rest = [[("class:dim", " "), ("class:key", "y"), ("class:dim", " confirm · any other key cancel")]]
         elif state["filtering"]:
             hint = [("class:accent", " / "), ("", state["query"]), ("class:accent", "▏"),
                     ("class:dim", "   enter apply · esc clear")]
@@ -846,7 +913,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             browse = [("↑↓", "move"), ("space", "select"), ("a", "all"), ("/", "filter")]
             if not state["exhausted"]:
                 browse.append(("m", "loading…" if state["loading"] else "more"))
-            browse += [("?", "help"), ("q", "quit")]
+            browse += [("r", "refresh"), ("?", "help"), ("q", "quit")]
             delete = [("d", "trash"), ("D", "delete permanently"), ("T", "empty trash")]
             if undo_label:
                 delete.append(("u", f"undo {undo_label}"))
@@ -859,14 +926,17 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                     line += [("class:dim", " · " if position else " "), ("class:key", key), ("class:dim", f" {label}")]
                 lines.append(line)
             hint = lines[0]
-            rest = [part for line in lines[1:] for part in [("", "\n")] + line]
-        used = sum(cell_len(text) for _, text in hint)
+            rest = lines[1:]
+        # The selection count sits right of the second line, the shortest in every mode.
+        second = rest[0] if rest else []
+        used = sum(cell_len(text) for _, text in second)
         gap = max(2, size().columns - used - cell_len(status) - 1)
-        return hint + [("", " " * gap), ("class:checked", status)] + rest
+        lines = [hint, second + [("", " " * gap), ("class:checked", status)]] + rest[1:]
+        return [part for position, line in enumerate(lines) for part in ([("", "\n")] if position else []) + line]
 
     filtering = Condition(lambda: state["filtering"])
     confirming = Condition(lambda: bool(state["confirm"]))
-    confirming_trash = Condition(lambda: bool(state["confirm"]) and state["confirm"]["action"] == "trash")
+    confirming_yes = Condition(lambda: bool(state["confirm"]) and state["confirm"]["action"] in {"trash", "preview"})
     confirming_typed = Condition(lambda: bool(state["confirm"]) and state["confirm"]["action"] in TYPED_CONFIRM)
     helping = Condition(lambda: state["help"])
     browsing = ~filtering & ~confirming & ~helping
@@ -910,7 +980,13 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     bindings.add("enter", filter=browsing)(lambda event: submit(event, "download", chosen()))
     bindings.add("s", filter=browsing)(lambda event: submit(event, "save", chosen()))
-    bindings.add("p", filter=browsing)(lambda event: submit(event, "preview", chosen()))
+    @bindings.add("p", filter=browsing)
+    def _(event):
+        # Each preview opens a PDF viewer window: ask before opening many at once.
+        if len(chosen()) > PREVIEW_CONFIRM_OVER:
+            ask_confirm("preview")
+        else:
+            submit(event, "preview", chosen())
 
     def ask_confirm(action):
         ids = set() if action == "empty_trash" else chosen()
@@ -928,9 +1004,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     def _(event):
         state["help"] = False
 
-    bindings.add("y", filter=confirming_trash)(lambda event: submit(event, "trash", state["confirm"]["ids"]))
+    bindings.add("y", filter=confirming_yes)(
+        lambda event: submit(event, state["confirm"]["action"], state["confirm"]["ids"]))
 
-    @bindings.add("<any>", filter=confirming_trash)
+    @bindings.add("<any>", filter=confirming_yes)
     @bindings.add("escape", filter=confirming_typed)
     def _(event):
         state["confirm"] = None
@@ -954,6 +1031,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         if event.data.isprintable():
             state["confirm"]["typed"] += event.data
 
+    @bindings.add("r", filter=browsing)
+    def _(event):
+        event.app.exit(result=("refresh", []))
+
     @bindings.add("u", filter=browsing & Condition(lambda: bool(undo_label)))
     def _(event):
         event.app.exit(result=("undo", []))
@@ -967,14 +1048,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         async def load():
             older, more = await asyncio.to_thread(load_more)
             state["exhausted"] = not more
-            # Older emails go on top; keep the cursor on the same email.
-            current = current_id()
-            messages[:0] = older
-            rows[:0] = [message_row(message) for message in older]
-            if current:
-                state["cursor"] = next(
-                    position for position, index in enumerate(visible()) if messages[index]["id"] == current
-                )
+            # Older emails go at the bottom, so the cursor stays where it is.
+            messages.extend(older)
+            rows.extend(message_row(message) for message in older)
             state["loading"] = False
             event.app.invalidate()
 
@@ -1033,19 +1109,25 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     ]
     app = Application(layout=Layout(HSplit(windows)), key_bindings=bindings, style=style, erase_when_done=True)
     app.ttimeoutlen = 0.05
+    # Emails may be added above the cursor between runs (refresh): put it back on the same email.
+    positions = [position for position, index in enumerate(visible()) if messages[index]["id"] == state["cursor_id"]]
+    if positions:
+        state["cursor"] = positions[0]
     # Own thread: Playwright's sync API keeps an event loop running in the main one between actions.
-    return app.run(in_thread=True) or ("quit", [])
+    result = app.run(in_thread=True) or ("quit", [])
+    state["cursor_id"] = current_id()
+    return result
 
 
 def print_message_line(mark, message, detail="", sender_w=22):
     row = message_row(message)
     width = console.width
     detail_w = max(20, cell_len(detail))
-    subject_w = max(10, width - 4 - 12 - sender_w - 2 - detail_w - 3)
+    subject_w = max(10, width - 4 - (DATE_W + 2) - sender_w - 2 - detail_w - 3)
     console.print(
-        f" {mark}  [dim]{escape(fit(row['date'], 10))}[/]  "
+        f" {mark}  [dim]{escape(fit(row['date'], DATE_W))}[/]  "
         f"[cyan]{escape(fit(row['sender'], sender_w))}[/]  "
-        f"{escape(fit(row['subject'], subject_w))}  [dim]{escape(fit(detail, width - 4 - 12 - sender_w - 2 - subject_w - 3))}[/]"
+        f"{escape(fit(row['subject'], subject_w))}  [dim]{escape(fit(detail, width - 4 - (DATE_W + 2) - sender_w - 2 - subject_w - 3))}[/]"
     )
 
 
@@ -1102,13 +1184,13 @@ def parse_command(answer):
     return "download", answer or ""
 
 
-def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), undo_label=None):
+def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None):
     """Pick emails interactively, or by typed numbers when not attached to a terminal.
 
     Returns (action, messages); see pick_messages for the actions.
     """
     if sys.stdin.isatty() and sys.stdout.isatty():
-        return pick_messages(messages, load_more, state, notice, undo_label)
+        return pick_messages(messages, load_more, state, notice, undo_label, total)
     if not messages:
         return "quit", []
 
@@ -1119,8 +1201,8 @@ def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(),
     num_w = len(str(len(messages)))
     for number, message in enumerate(messages, start=1):
         row = message_row(message)
-        subject_w = max(10, console.width - num_w - 18 - sender_w)
-        console.print(escape(f" {number:>{num_w}}  {fit(row['date'], 10)}  {fit(row['sender'], sender_w)}  {fit(row['subject'], subject_w)}"))
+        subject_w = max(10, console.width - num_w - DATE_W - 8 - sender_w)
+        console.print(escape(f" {number:>{num_w}}  {fit(row['date'], DATE_W)}  {fit(row['sender'], sender_w)}  {fit(row['subject'], subject_w)}"))
     while True:
         try:
             answer = input("\nSelect (e.g. 1,3 · 2-6 · all · s 1,3 save only · d 1,3 trash · D 1,3 delete · q) > ")
@@ -1325,21 +1407,36 @@ def interactive_download_main():
         console.print(banner)
         with console.status("[dim]Fetching emails…[/]"):
             messages, next_page = list_candidate_messages(service, user_id, query=args.query, max_results=args.max)
+            total = estimate_total(service, user_id, args.query) if next_page else None
 
         if not messages:
             console.print("[dim]No emails found for this query.[/]")
             return
 
+        # m asks Gmail for emails older than the oldest one loaded so far: unlike page tokens, this
+        # stays right after refreshes and after emails were trashed during the session.
+        floor = min(message["internalDate"] for message in messages)
+        more = next_page is not None
+
         def load_more():
-            nonlocal next_page
-            older, next_page = list_candidate_messages(
-                service, user_id, query=args.query, max_results=args.max, page_token=next_page
-            )
-            return older, next_page is not None
+            nonlocal floor, more
+            before = f"before:{floor // 1000 + 1}"  # Gmail dates are in seconds; duplicates are dropped
+            older_query = f"({args.query}) {before}" if args.query else before
+            older, token = list_candidate_messages(service, user_id, query=older_query, max_results=args.max)
+            known = {message["id"] for message in messages}
+            older = [message for message in older if message["id"] not in known]
+            if older:
+                floor = min(floor, min(message["internalDate"] for message in older))
+            more = token is not None
+            return older, more
 
         def drop(ids):
+            nonlocal total
+            before = len(messages)
             messages[:] = [message for message in messages if message["id"] not in ids]
             state["selected"] -= ids
+            if total:
+                total = max(0, total - (before - len(messages)))
 
         state = new_picker_state()
         notice = []
@@ -1354,11 +1451,11 @@ def interactive_download_main():
             return f"{undo['label']} ({count})"
         totals = {"saved": 0, "trashed": 0, "deleted": 0}
         # Back to the list after every action, until the user quits.
-        while messages or next_page or undo:
+        while messages or more or undo:
             action, chosen = ask_user_to_select_messages(
-                messages, load_more if next_page else None, state, notice, undo_text(undo)
+                messages, load_more if more else None, state, notice, undo_text(undo), total
             )
-            if action == "quit" or (action not in {"undo", "empty_trash"} and not chosen):
+            if action == "quit" or (action not in {"undo", "empty_trash", "refresh"} and not chosen):
                 break
             ids = {message["id"] for message in chosen}
 
@@ -1377,8 +1474,10 @@ def interactive_download_main():
                         errors = untrash_messages(service, user_id, [message["id"] for message in undo["trashed"]])
                 restored = [message for message in undo["trashed"] if message["id"] not in errors]
                 messages.extend(restored)
-                messages.sort(key=lambda message: message["internalDate"])
+                messages.sort(key=lambda message: message["internalDate"], reverse=True)
                 totals["trashed"] -= len(restored)
+                if total:
+                    total += len(restored)
                 # Emails still stuck in the trash keep their files, so a retry of u stays consistent.
                 unsaved = {msg_id: files for msg_id, files in undo["files"].items() if msg_id not in errors}
                 removed = [path for files in unsaved.values() for path in files]
@@ -1407,6 +1506,26 @@ def interactive_download_main():
                 notice = [[("class:checked", " ✓ "), ("", f"{plural(len(trashed), 'email')} moved to trash (not saved)"),
                            ("class:dim class:keyhint", " · u undo" if trashed else "")]]
                 notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
+
+            elif action == "refresh":
+                try:
+                    with console.status("[dim]Checking Gmail…[/]"):
+                        new, removed = refresh_messages(service, user_id, args.query, messages)
+                        total = estimate_total(service, user_id, args.query) if more else None
+                except HttpError as exc:
+                    notice = [[("class:error", " ✗ "), ("", "Refresh failed"),
+                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
+                else:
+                    drop(removed)
+                    known = {message["id"] for message in messages}
+                    messages.extend(message for message in new if message["id"] not in known)
+                    messages.sort(key=lambda message: message["internalDate"], reverse=True)
+                    parts = []
+                    if new:
+                        parts.append(f"{len(new)} new")
+                    if removed:
+                        parts.append(f"{len(removed)} gone (deleted or moved in Gmail)")
+                    notice = [[("class:checked", " ↻ "), ("", " · ".join(parts) or "Up to date")]]
 
             elif action == "empty_trash":
                 try:
@@ -1471,7 +1590,9 @@ def interactive_download_main():
             console.clear()
             console.print(banner)
 
-        if not (messages or next_page):
+        # The screen only holds our banner (cleared at launch): leave just the session result behind.
+        console.clear()
+        if not (messages or more):
             console.print("[dim]No emails left.[/]")
         if any(totals.values()):
             summary = f"{plural(totals['saved'], 'email')} saved · {totals['trashed']} moved to trash"

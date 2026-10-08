@@ -106,6 +106,77 @@ class RunBatchedTest(unittest.TestCase):
         self.assertEqual(len(responses), 119)
 
 
+class FakeListService(FakeService):
+    """Gmail list (newest first, paged) + metadata, for refresh_messages."""
+
+    def __init__(self, mailbox):
+        super().__init__()
+        self.mailbox = mailbox  # [(id, internalDate)] newest first
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def list(self, userId, q, maxResults, pageToken=None):
+        start = int(pageToken or 0)
+        page = self.mailbox[start:start + maxResults]
+        response = {"messages": [{"id": msg_id} for msg_id, _ in page]}
+        if start + maxResults < len(self.mailbox):
+            response["nextPageToken"] = str(start + maxResults)
+        return FakeResult(response)
+
+    def get(self, userId, id, format, metadataHeaders, fields):
+        return FakeResult({"id": id, "internalDate": dict(self.mailbox)[id], "payload": {"headers": []}})
+
+
+class FakeResult:
+    def __init__(self, value):
+        self.value = value
+
+    def execute(self):
+        return self.value
+
+
+class RefreshTest(unittest.TestCase):
+    def loaded(self, *pairs):
+        return [{"id": msg_id, "internalDate": date} for msg_id, date in pairs]
+
+    def test_new_and_gone(self):
+        # Loaded: c(30) b(20) a(10). Since: n(40) arrived, b was deleted; z(5) is older, not loaded yet.
+        service = FakeListService([("n", 40), ("c", 30), ("a", 10), ("z", 5)])
+        new, gone = savegmail.refresh_messages(service, "me", "", self.loaded(("c", 30), ("b", 20), ("a", 10)),
+                                               page_size=2)
+        self.assertEqual([message["id"] for message in new], ["n"])
+        self.assertEqual(gone, {"b"})
+
+    def test_oldest_loaded_deleted(self):
+        service = FakeListService([("n", 40), ("c", 30), ("z", 5), ("y", 4)])
+        new, gone = savegmail.refresh_messages(service, "me", "", self.loaded(("c", 30), ("b", 20), ("a", 10)),
+                                               page_size=2)
+        self.assertEqual(([message["id"] for message in new], gone), (["n"], {"b", "a"}))
+
+    def test_up_to_date_skips_older_metadata(self):
+        service = FakeListService([("c", 30), ("a", 10), ("z", 5), ("y", 4)])
+        new, gone = savegmail.refresh_messages(service, "me", "", self.loaded(("c", 30), ("a", 10)), page_size=10)
+        self.assertEqual((new, gone), ([], set()))
+        self.assertEqual(service.sizes, [])  # z and y are older than the loaded range: no metadata fetched
+
+
+class CompactDateTest(unittest.TestCase):
+    def test_formats(self):
+        from datetime import datetime, timedelta
+        now = datetime.now(savegmail.get_localzone())
+        ms = lambda moment: int(moment.timestamp() * 1000)
+        self.assertRegex(savegmail.compact_date(ms(now)), r"^\d\d:\d\d$")
+        self.assertEqual(savegmail.compact_date(ms(now.replace(year=now.year - 1))),
+                         now.replace(year=now.year - 1).strftime("%Y-%m-%d %H:%M"))
+        if now.timetuple().tm_yday > 1:
+            earlier = now - timedelta(days=1)
+            self.assertEqual(savegmail.compact_date(ms(earlier)), f"{earlier.day} {earlier.strftime('%b %H:%M')}")
+
+
 class PickerTest(unittest.TestCase):
     def test_enter_downloads_current(self):
         self.assertEqual(pick("\r"), ("download", ["0"]))
@@ -139,6 +210,18 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick("p"), ("preview", ["0"]))
         self.assertEqual(pick(" j p"), ("preview", ["0", "2"]))
 
+    def test_big_preview_needs_confirmation(self):
+        many = make_messages(savegmail.PREVIEW_CONFIRM_OVER + 1)
+        all_ids = [message["id"] for message in many]
+        self.assertEqual(pick("apy", many), ("preview", all_ids))
+        self.assertEqual(pick("apnq", many), ("quit", []))
+        few = make_messages(savegmail.PREVIEW_CONFIRM_OVER)
+        self.assertEqual(pick("ap", few), ("preview", [message["id"] for message in few]))
+
+    def test_hidden_selection_still_applies(self):
+        # Selected emails hidden by a filter stay selected (the footer and confirmations say so).
+        self.assertEqual(pick("a/Subject 1\rdy"), ("trash", ["0", "1", "2"]))
+
     def test_undo_only_when_available(self):
         self.assertEqual(pick("uq"), ("quit", []))
         self.assertEqual(pick("u", undo_label="trash (1)"), ("undo", []))
@@ -152,11 +235,22 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(state["selected"], {"0"})
         self.assertEqual(pick("s", state=state), ("save", ["0"]))
 
-    def test_load_more_prepends_older(self):
+    def test_load_more_appends_older(self):
         messages = make_messages(2)
         older = [{**make_messages(1)[0], "id": "old", "internalDate": 1}]
         action, ids = pick("m\r", messages, load_more=lambda: (older, False))
-        self.assertEqual([message["id"] for message in messages], ["old", "0", "1"])
+        self.assertEqual([message["id"] for message in messages], ["0", "1", "old"])
+        self.assertEqual(ids, ["0"])
+
+    def test_refresh_key(self):
+        self.assertEqual(pick("r"), ("refresh", []))
+
+    def test_cursor_follows_email_across_runs(self):
+        messages = make_messages(3)
+        state = savegmail.new_picker_state()
+        pick("jq", messages, state=state)
+        messages.insert(0, {**messages[0], "id": "new"})
+        self.assertEqual(pick("\r", messages, state=state), ("download", ["1"]))
 
 
 if __name__ == "__main__":

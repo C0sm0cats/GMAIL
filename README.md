@@ -5,7 +5,9 @@ SaveGmail is a Python script for archiving Gmail messages as PDFs and saving the
 ## Key Features
 
 - Interactive terminal picker: arrow keys, space to select, `/` to filter, `m` to load older emails, `?` for help
-- Compact, borderless list with sender, subject, preview snippet, mail-client style dates and 📎 for attachments
+- Compact, borderless list, newest first, with date and time (time only for today), sender, subject, preview snippet and 📎 for attachments
+- Header shows how many emails are loaded out of Gmail's estimate for the query
+- `r` refreshes the list with emails received during the session
 - Session workflow: the list comes back after each action, with its result on top
 - PDF preview of any email, rendered exactly as it would be saved, without saving anything
 - Saves selected emails as PDFs with complete metadata, plus their attachments; inline images are embedded
@@ -76,21 +78,21 @@ Run:
 ./run-savegmail.sh
 ```
 
-The script lists your Gmail messages (oldest to newest) in an interactive picker:
+The script lists your Gmail messages (newest first) in an interactive picker:
 
 ```text
- Gmail · 50 emails · oldest → newest
+ Gmail · 50 of ~1,240 emails · newest first
 
-   ○ 📎 2025-08-31  Amazon        Your order has shipped        Hello, your parcel arrives…
- ❯ ●    5 Sep       Jean Dupont   Re: roofing quote             OK for Thursday, I'll come…
-   ○    12:31       GitHub        [repo] PR #42 merged          Merged #42 into main.
+   ○    12:31             GitHub        [repo] PR #42 merged          Merged #42 into main.
+ ❯ ●    5 Sep 09:14       Jean Dupont   Re: roofing quote             OK for Thursday, I'll come…
+   ○ 📎 2025-08-31 18:02  Amazon        Your order has shipped        Hello, your parcel arrives…
 
- browse  ↑↓ move · space select · a all · / filter · m more · ? help · q quit     1 selected
- save    p preview · enter save+trash · s save+keep
+ browse  ↑↓ move · space select · a all · / filter · m more · r refresh · ? help · q quit
+ save    p preview · enter save+trash · s save+keep                    1 selected
  delete  d trash · D delete permanently · T empty trash
 ```
 
-Actions apply to the selected emails, or to the current one if none is selected. Press `?` in the list for the same key help.
+Actions apply to the selected emails, or to the current one if none is selected. Selected emails hidden by a `/` filter still count: the footer and the `d` / `D` confirmations show how many are hidden. Press `?` in the list for the same key help.
 
 | Key | Action |
 | --- | --- |
@@ -98,8 +100,9 @@ Actions apply to the selected emails, or to the current one if none is selected.
 | `space` | Select / unselect the current email |
 | `a` | Select / unselect all visible emails |
 | `/` | Filter by sender or subject (`enter` to apply, `esc` to clear) |
-| `m` | Load older emails |
-| `p` | Preview as the exact PDFs a download would produce, opened in your PDF viewer (temporary file, nothing saved to the download folder) |
+| `m` | Load older emails (added at the bottom) |
+| `r` | Refresh: add emails received since, drop the ones deleted or moved in Gmail meanwhile |
+| `p` | Preview as the exact PDFs a download would produce, opened in your PDF viewer (temporary file, nothing saved to the download folder); asks `y` before opening more than 5 |
 | `enter` | Save PDFs + attachments, then move the emails to the Gmail trash |
 | `s` | Save PDFs + attachments and keep the emails in Gmail (marked `✓` in the list) |
 | `d` | Move the selection to the Gmail trash without saving, after a `y` confirmation (recoverable with `u`, or from Gmail for 30 days) |
