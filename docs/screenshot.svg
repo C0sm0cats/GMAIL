@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1171" height="370" viewBox="0 0 1171 370" font-family="'JetBrains Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="14.2">
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="370" viewBox="0 0 1240 370" font-family="'JetBrains Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="14.2">
 <rect width="100%" height="100%" rx="10" fill="#1e2127"/>
 <rect width="100%" height="34" rx="10" fill="#2c313a"/>
 <rect y="24" width="100%" height="10" fill="#2c313a"/>
 <circle cx="20" cy="17.0" r="6" fill="#ff5f57"/>
 <circle cx="40" cy="17.0" r="6" fill="#febc2e"/>
 <circle cx="60" cy="17.0" r="6" fill="#28c840"/>
-<text x="586" y="22.0" fill="#9da5b4" text-anchor="middle" font-size="13">savegmail</text>
+<text x="620" y="22.0" fill="#9da5b4" text-anchor="middle" font-size="13">savegmail</text>
 <text x="30.9" y="64.2" fill="#d7dae0" font-weight="bold" text-anchor="middle">s</text>
 <text x="39.5" y="64.2" fill="#d7dae0" font-weight="bold" text-anchor="middle">a</text>
 <text x="48.1" y="64.2" fill="#d7dae0" font-weight="bold" text-anchor="middle">v</text>
@@ -154,18 +154,15 @@
 <text x="1002.7" y="102.2" fill="#56b6c2" text-anchor="middle">e</text>
 <text x="1011.3" y="102.2" fill="#56b6c2" text-anchor="middle">a</text>
 <text x="1019.9" y="102.2" fill="#56b6c2" text-anchor="middle">d</text>
-<text x="1037.1" y="102.2" fill="#56b6c2" text-anchor="middle">·</text>
-<text x="1054.3" y="102.2" fill="#56b6c2" text-anchor="middle">n</text>
-<text x="1062.9" y="102.2" fill="#56b6c2" text-anchor="middle">e</text>
-<text x="1071.5" y="102.2" fill="#56b6c2" text-anchor="middle">w</text>
-<text x="1080.1" y="102.2" fill="#56b6c2" text-anchor="middle">e</text>
-<text x="1088.7" y="102.2" fill="#56b6c2" text-anchor="middle">s</text>
-<text x="1097.3" y="102.2" fill="#56b6c2" text-anchor="middle">t</text>
-<text x="1114.5" y="102.2" fill="#56b6c2" text-anchor="middle">f</text>
-<text x="1123.1" y="102.2" fill="#56b6c2" text-anchor="middle">i</text>
-<text x="1131.7" y="102.2" fill="#56b6c2" text-anchor="middle">r</text>
-<text x="1140.3" y="102.2" fill="#56b6c2" text-anchor="middle">s</text>
-<text x="1148.9" y="102.2" fill="#56b6c2" text-anchor="middle">t</text>
+<text x="1123.1" y="102.2" fill="#98c379" font-weight="bold" text-anchor="middle">2</text>
+<text x="1140.3" y="102.2" fill="#98c379" font-weight="bold" text-anchor="middle">s</text>
+<text x="1148.9" y="102.2" fill="#98c379" font-weight="bold" text-anchor="middle">e</text>
+<text x="1157.5" y="102.2" fill="#98c379" font-weight="bold" text-anchor="middle">l</text>
+<text x="1166.1" y="102.2" fill="#98c379" font-weight="bold" text-anchor="middle">e</text>
+<text x="1174.7" y="102.2" fill="#98c379" font-weight="bold" text-anchor="middle">c</text>
+<text x="1183.3" y="102.2" fill="#98c379" font-weight="bold" text-anchor="middle">t</text>
+<text x="1191.9" y="102.2" fill="#98c379" font-weight="bold" text-anchor="middle">e</text>
+<text x="1200.5" y="102.2" fill="#98c379" font-weight="bold" text-anchor="middle">d</text>
 <text x="108.3" y="140.2" fill="#7f848e" text-anchor="middle">D</text>
 <text x="116.9" y="140.2" fill="#7f848e" text-anchor="middle">a</text>
 <text x="125.5" y="140.2" fill="#7f848e" text-anchor="middle">t</text>
@@ -202,8 +199,8 @@
 <text x="108.3" y="159.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="116.9" y="159.2" fill="#7f848e" text-anchor="middle">0</text>
 <text x="125.5" y="159.2" fill="#7f848e" text-anchor="middle">:</text>
-<text x="134.1" y="159.2" fill="#7f848e" text-anchor="middle">1</text>
-<text x="142.7" y="159.2" fill="#7f848e" text-anchor="middle">7</text>
+<text x="134.1" y="159.2" fill="#7f848e" text-anchor="middle">2</text>
+<text x="142.7" y="159.2" fill="#7f848e" text-anchor="middle">2</text>
 <text x="263.1" y="159.2" fill="#e5c07b" text-anchor="middle">2</text>
 <text x="271.7" y="159.2" fill="#e5c07b" text-anchor="middle">.</text>
 <text x="280.3" y="159.2" fill="#e5c07b" text-anchor="middle">4</text>
@@ -272,7 +269,13 @@
 <text x="1123.1" y="159.2" fill="#7f848e" text-anchor="middle">a</text>
 <text x="1131.7" y="159.2" fill="#7f848e" text-anchor="middle">d</text>
 <text x="1140.3" y="159.2" fill="#7f848e" text-anchor="middle">y</text>
-<text x="1148.9" y="159.2" fill="#7f848e" text-anchor="middle">…</text>
+<text x="1148.9" y="159.2" fill="#7f848e" text-anchor="middle">:</text>
+<text x="1166.1" y="159.2" fill="#7f848e" text-anchor="middle">v</text>
+<text x="1174.7" y="159.2" fill="#7f848e" text-anchor="middle">i</text>
+<text x="1183.3" y="159.2" fill="#7f848e" text-anchor="middle">e</text>
+<text x="1191.9" y="159.2" fill="#7f848e" text-anchor="middle">w</text>
+<text x="1209.1" y="159.2" fill="#7f848e" text-anchor="middle">o</text>
+<text x="1217.7" y="159.2" fill="#7f848e" text-anchor="middle">…</text>
 <rect x="18.0" y="164.0" width="8.6" height="19" fill="#303030"/>
 <rect x="26.6" y="164.0" width="8.6" height="19" fill="#303030"/>
 <text x="30.9" y="178.2" fill="#56b6c2" font-weight="bold" text-anchor="middle">❯</text>
@@ -292,9 +295,9 @@
 <rect x="121.2" y="164.0" width="8.6" height="19" fill="#303030"/>
 <text x="125.5" y="178.2" fill="#7f848e" text-anchor="middle">:</text>
 <rect x="129.8" y="164.0" width="8.6" height="19" fill="#303030"/>
-<text x="134.1" y="178.2" fill="#7f848e" text-anchor="middle">1</text>
+<text x="134.1" y="178.2" fill="#7f848e" text-anchor="middle">2</text>
 <rect x="138.4" y="164.0" width="8.6" height="19" fill="#303030"/>
-<text x="142.7" y="178.2" fill="#7f848e" text-anchor="middle">7</text>
+<text x="142.7" y="178.2" fill="#7f848e" text-anchor="middle">2</text>
 <rect x="147.0" y="164.0" width="8.6" height="19" fill="#303030"/>
 <rect x="155.6" y="164.0" width="8.6" height="19" fill="#303030"/>
 <rect x="164.2" y="164.0" width="8.6" height="19" fill="#303030"/>
@@ -472,12 +475,20 @@
 <rect x="1127.4" y="164.0" width="8.6" height="19" fill="#303030"/>
 <rect x="1136.0" y="164.0" width="8.6" height="19" fill="#303030"/>
 <rect x="1144.6" y="164.0" width="8.6" height="19" fill="#303030"/>
+<rect x="1153.2" y="164.0" width="8.6" height="19" fill="#303030"/>
+<rect x="1161.8" y="164.0" width="8.6" height="19" fill="#303030"/>
+<rect x="1170.4" y="164.0" width="8.6" height="19" fill="#303030"/>
+<rect x="1179.0" y="164.0" width="8.6" height="19" fill="#303030"/>
+<rect x="1187.6" y="164.0" width="8.6" height="19" fill="#303030"/>
+<rect x="1196.2" y="164.0" width="8.6" height="19" fill="#303030"/>
+<rect x="1204.8" y="164.0" width="8.6" height="19" fill="#303030"/>
+<rect x="1213.4" y="164.0" width="8.6" height="19" fill="#303030"/>
 <text x="48.1" y="197.2" fill="#7f848e" text-anchor="middle">○</text>
 <text x="108.3" y="197.2" fill="#7f848e" text-anchor="middle">0</text>
 <text x="116.9" y="197.2" fill="#7f848e" text-anchor="middle">6</text>
 <text x="125.5" y="197.2" fill="#7f848e" text-anchor="middle">:</text>
-<text x="134.1" y="197.2" fill="#7f848e" text-anchor="middle">1</text>
-<text x="142.7" y="197.2" fill="#7f848e" text-anchor="middle">7</text>
+<text x="134.1" y="197.2" fill="#7f848e" text-anchor="middle">2</text>
+<text x="142.7" y="197.2" fill="#7f848e" text-anchor="middle">2</text>
 <text x="271.7" y="197.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="280.3" y="197.2" fill="#7f848e" text-anchor="middle">8</text>
 <text x="297.5" y="197.2" fill="#7f848e" text-anchor="middle">K</text>
@@ -543,8 +554,8 @@
 <text x="159.9" y="216.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="168.5" y="216.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="177.1" y="216.2" fill="#7f848e" text-anchor="middle">:</text>
-<text x="185.7" y="216.2" fill="#7f848e" text-anchor="middle">1</text>
-<text x="194.3" y="216.2" fill="#7f848e" text-anchor="middle">7</text>
+<text x="185.7" y="216.2" fill="#7f848e" text-anchor="middle">2</text>
+<text x="194.3" y="216.2" fill="#7f848e" text-anchor="middle">2</text>
 <text x="271.7" y="216.2" fill="#7f848e" text-anchor="middle">4</text>
 <text x="280.3" y="216.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="297.5" y="216.2" fill="#7f848e" text-anchor="middle">K</text>
@@ -607,8 +618,8 @@
 <text x="168.5" y="235.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="177.1" y="235.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="185.7" y="235.2" fill="#7f848e" text-anchor="middle">:</text>
-<text x="194.3" y="235.2" fill="#7f848e" text-anchor="middle">1</text>
-<text x="202.9" y="235.2" fill="#7f848e" text-anchor="middle">7</text>
+<text x="194.3" y="235.2" fill="#7f848e" text-anchor="middle">2</text>
+<text x="202.9" y="235.2" fill="#7f848e" text-anchor="middle">2</text>
 <text x="263.1" y="235.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="271.7" y="235.2" fill="#7f848e" text-anchor="middle">5</text>
 <text x="280.3" y="235.2" fill="#7f848e" text-anchor="middle">4</text>
@@ -673,7 +684,13 @@
 <text x="1114.5" y="235.2" fill="#7f848e" text-anchor="middle">y</text>
 <text x="1131.7" y="235.2" fill="#7f848e" text-anchor="middle">w</text>
 <text x="1140.3" y="235.2" fill="#7f848e" text-anchor="middle">a</text>
-<text x="1148.9" y="235.2" fill="#7f848e" text-anchor="middle">…</text>
+<text x="1148.9" y="235.2" fill="#7f848e" text-anchor="middle">s</text>
+<text x="1166.1" y="235.2" fill="#7f848e" text-anchor="middle">m</text>
+<text x="1174.7" y="235.2" fill="#7f848e" text-anchor="middle">y</text>
+<text x="1191.9" y="235.2" fill="#7f848e" text-anchor="middle">f</text>
+<text x="1200.5" y="235.2" fill="#7f848e" text-anchor="middle">i</text>
+<text x="1209.1" y="235.2" fill="#7f848e" text-anchor="middle">r</text>
+<text x="1217.7" y="235.2" fill="#7f848e" text-anchor="middle">…</text>
 <text x="48.1" y="254.2" fill="#7f848e" text-anchor="middle">○</text>
 <text x="78.2" y="254.2" fill="#d7dae0" font-family="'Noto Color Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif" text-anchor="middle">📎</text>
 <text x="108.3" y="254.2" fill="#7f848e" text-anchor="middle">1</text>
@@ -684,8 +701,8 @@
 <text x="168.5" y="254.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="177.1" y="254.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="185.7" y="254.2" fill="#7f848e" text-anchor="middle">:</text>
-<text x="194.3" y="254.2" fill="#7f848e" text-anchor="middle">1</text>
-<text x="202.9" y="254.2" fill="#7f848e" text-anchor="middle">7</text>
+<text x="194.3" y="254.2" fill="#7f848e" text-anchor="middle">2</text>
+<text x="202.9" y="254.2" fill="#7f848e" text-anchor="middle">2</text>
 <text x="263.1" y="254.2" fill="#7f848e" text-anchor="middle">8</text>
 <text x="271.7" y="254.2" fill="#7f848e" text-anchor="middle">2</text>
 <text x="280.3" y="254.2" fill="#7f848e" text-anchor="middle">0</text>
@@ -757,8 +774,8 @@
 <text x="202.9" y="273.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="211.5" y="273.2" fill="#7f848e" text-anchor="middle">1</text>
 <text x="220.1" y="273.2" fill="#7f848e" text-anchor="middle">:</text>
-<text x="228.7" y="273.2" fill="#7f848e" text-anchor="middle">1</text>
-<text x="237.3" y="273.2" fill="#7f848e" text-anchor="middle">7</text>
+<text x="228.7" y="273.2" fill="#7f848e" text-anchor="middle">2</text>
+<text x="237.3" y="273.2" fill="#7f848e" text-anchor="middle">2</text>
 <text x="271.7" y="273.2" fill="#7f848e" text-anchor="middle">6</text>
 <text x="280.3" y="273.2" fill="#7f848e" text-anchor="middle">4</text>
 <text x="297.5" y="273.2" fill="#7f848e" text-anchor="middle">K</text>

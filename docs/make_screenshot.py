@@ -20,7 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import savegmail  # noqa: E402
 
-COLUMNS, ROWS = 132, 17
+COLUMNS, ROWS = 140, 17
 OUT = os.path.join(ROOT, "docs", "screenshot.svg")
 
 # One Dark-like palette for pyte's color names.

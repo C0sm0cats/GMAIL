@@ -1049,23 +1049,35 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         # Unread for the whole view: the tab's counter when it counts unread, else the loaded emails.
         text, kind = (badges or {}).get(views[view], (None, None))
         unread = text if kind == "unread" else sum(row["unread"] for row in rows)
-        if unread:
-            count += f", {unread} unread"
+        full_count = f"{count}, {unread} unread" if unread else count
         parts = []
         for position, name in enumerate(views):
             text, kind = (badges or {}).get(name, (None, None))
             label = f" {name} ({text}) " if text else f" {name} "
             style = "class:tab.current" if position == view else "class:tab.badge" if kind == "unread" else "class:tab"
             parts.append((style, label))
-        parts.append(("class:view", f" · {count} · " + ("largest first" if state["sort"] == "size" else "newest first")))
+        order = "largest first" if state["sort"] == "size" else "newest first"
+        filter_parts = []
         if state["query"]:
-            parts.append(("class:dim", f" · {len(indexes)} match "))
-            parts.append(("class:accent", state["query"]))
+            filter_parts = [("class:dim", f" · {len(indexes)} match "), ("class:accent", state["query"])]
         selected = len(state["selected"])
+        status = ""
         if selected:
             status = f"{selected} selected "
             if hidden(state["selected"]):
                 status = f"{selected} selected · {hidden(state['selected'])} hidden by the filter "
+        # The selection count and the filter matter more than the view info: when the line is full,
+        # the info gets shorter (sort order first, then the unread part), then cut.
+        room = (size().columns - 1 - sum(cell_len(text) for _, text in parts + filter_parts)
+                - (cell_len(status) + 2 if status else 0))
+        for info in (f" · {full_count} · {order}", f" · {full_count}", f" · {count}"):
+            if cell_len(info) <= room:
+                break
+        else:
+            info = fit(info, max(0, room)).rstrip()
+        parts.append(("class:view", info))
+        parts += filter_parts
+        if status:
             gap = max(2, size().columns - sum(cell_len(text) for _, text in parts) - cell_len(status) - 1)
             parts += [("", " " * gap), ("class:checked", status)]
         return parts
