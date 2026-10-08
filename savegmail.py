@@ -145,7 +145,8 @@ def open_quietly(url):
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     if sys.platform != "win32" and not os.environ.get("BROWSER") and shutil.which(opener):
         try:
-            subprocess.Popen([opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            subprocess.Popen([opener, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
             return True
         except OSError:
             pass
@@ -202,6 +203,23 @@ def authenticate():
 def truncate_bytes(text, limit):
     """Cut text to at most limit UTF-8 bytes without splitting a character."""
     return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def discard_pending_keys(app_input=None):
+    """Drop keys typed while an action ran, so they never trigger actions blindly.
+
+    Key auto-repeat while a PDF viewer grabbed the focus once queued p presses that kept relaunching
+    previews, one per run of the list.
+    """
+    if sys.stdin.isatty():
+        try:
+            import termios
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        except (ImportError, OSError):
+            pass  # Windows: no termios, nothing more to drop than the typeahead below
+    if app_input is not None:
+        from prompt_toolkit.input.typeahead import clear_typeahead
+        clear_typeahead(app_input)
 
 
 def remove_files(paths):
@@ -545,6 +563,37 @@ def user_labels(service, user_id):
     return {label["id"]: label["name"] for label in labels if label.get("type") == "user"}
 
 
+def refresh_labels(service, user_id, messages):
+    """Re-read the labels (read / unread, star, Inbox…) of loaded emails, changed in Gmail meanwhile.
+
+    Updates messages in place; returns how many changed.
+    """
+    details, _ = run_batched(service, [message["id"] for message in messages], lambda msg_id:
+                             service.users().messages().get(userId=user_id, id=msg_id, format="minimal",
+                                                            fields="id,labelIds"))
+    changed = 0
+    for message in messages:
+        labels = details.get(message["id"], {}).get("labelIds")
+        if labels is not None and set(labels) != set(message.get("labels", [])):
+            message["labels"] = labels
+            changed += 1
+    return changed
+
+
+def mark_read(service, user_id, messages):
+    """Mark emails as read in Gmail and locally (preview and open count as reading them)."""
+    unread = [message for message in messages if "UNREAD" in message.get("labels", [])]
+    if not unread:
+        return
+    try:
+        modify_labels(service, user_id, [message["id"] for message in unread], remove=["UNREAD"])
+    except HttpError as exc:
+        debug(f"Could not mark as read: {exc}")
+        return
+    for message in unread:
+        message["labels"] = [label for label in message["labels"] if label != "UNREAD"]
+
+
 def modify_labels(service, user_id, ids, add=(), remove=()):
     """Add / remove Gmail labels (STARRED, INBOX, SPAM…) on messages, in one call per 1000."""
     for start in range(0, len(ids), 1000):
@@ -599,10 +648,14 @@ METADATA_FIELDS = "id,threadId,internalDate,labelIds,sizeEstimate,payload(mimeTy
 VIEWS = [("All mail", ""), ("Inbox", "in:inbox"), ("Archived", "-in:inbox -in:sent -in:drafts -in:chats"),
          ("Starred", "is:starred"), ("Sent", "in:sent"),
          ("Drafts", "in:drafts"), ("Spam", "in:spam"), ("Trash", "in:trash")]
+# Each view's color, for its tab and the header info, so you see at a glance where you are.
+# Sent and Drafts match their sender colors in the list.
+VIEW_COLORS = {"All mail": "ansicyan", "Inbox": "ansiblue", "Archived": "ansigreen", "Starred": "ansiyellow",
+               "Sent": "ansimagenta", "Drafts": "ansired", "Spam": "#ff8700", "Trash": "ansibrightblack"}
 # Gmail category labels, shown as a short tag (Primary has no tag, like in Gmail).
 CATEGORIES = {"CATEGORY_PROMOTIONS": "Promotions", "CATEGORY_SOCIAL": "Social",
               "CATEGORY_UPDATES": "Updates", "CATEGORY_FORUMS": "Forums"}
-BIG_EMAIL_BYTES = 1_000_000  # size shown from this size on
+BIG_EMAIL_BYTES = 1_000_000  # sizes from here on are highlighted
 
 
 def metadata_request(service, user_id, msg_id):
@@ -663,6 +716,54 @@ def list_candidate_messages(service, user_id, query="", max_results=50, page_tok
     detailed_messages = [to_candidate(details[msg_id]) for msg_id in ids if msg_id in details]
     detailed_messages.sort(key=lambda item: item["internalDate"], reverse=True)
     return detailed_messages, page_token
+
+
+# Tab badges: unread emails (bold) in every view, except Drafts: all drafts (dimmed), as a draft is
+# never unread. Without --query, Gmail's exact label counters are used; All mail and Archived (not
+# labels) and filtered views are counted from a search.
+BADGE_LABELS = {"Inbox": ("INBOX", "unread"), "Starred": ("STARRED", "unread"), "Sent": ("SENT", "unread"),
+                "Drafts": ("DRAFT", "total"), "Spam": ("SPAM", "unread"), "Trash": ("TRASH", "unread")}
+BADGE_SEARCHED = ["All mail", "Archived"]
+BADGE_COUNT_CAP = 1000  # searched counts stop here ("1,000+") to stay quick
+
+
+def count_messages(service, user_id, query, in_trash=False, cap=BADGE_COUNT_CAP):
+    """Exact number of emails matching query, up to cap (Gmail's resultSizeEstimate is too rough)."""
+    count, page_token = 0, None
+    while count < cap:
+        response = service.users().messages().list(
+            userId=user_id, q=query, maxResults=500, pageToken=page_token,
+            fields="messages/id,nextPageToken", **list_options(in_trash),
+        ).execute()
+        count += len(response.get("messages", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            return count
+    return cap
+
+
+def badge_text(count):
+    return f"{count:,}+" if count >= BADGE_COUNT_CAP else f"{count:,}"
+
+
+def view_badges(service, user_id, view_queries, filtered):
+    """{view name: (text, "unread" | "total")} for the tabs; view_queries maps names to their Gmail search."""
+    kinds = {name: kind for name, (_, kind) in BADGE_LABELS.items()}
+    kinds.update({name: "unread" for name in BADGE_SEARCHED})
+    counts, searched = {}, list(kinds)
+    if not filtered:
+        labels, _ = run_batched(service, [label for label, _ in BADGE_LABELS.values()],
+                                lambda label: service.users().labels().get(userId=user_id, id=label))
+        for name, (label, kind) in BADGE_LABELS.items():
+            counts[name] = labels.get(label, {}).get("messagesUnread" if kind == "unread" else "messagesTotal")
+        searched = BADGE_SEARCHED
+    for name in searched:
+        query = f"{view_queries[name]} is:unread" if kinds[name] == "unread" else view_queries[name]
+        try:
+            counts[name] = count_messages(service, user_id, query.strip(), in_trash=name in {"Spam", "Trash"})
+        except HttpError as exc:
+            debug(f"Could not count {name}: {exc}")
+    return {name: (badge_text(count), kinds[name]) for name, count in counts.items() if count}
 
 
 def estimate_total(service, user_id, query="", in_trash=False):
@@ -751,8 +852,18 @@ def compact_date(internal_date_ms):
     return local_date.strftime("%Y-%m-%d %H:%M")
 
 
+SIZE_W = 6  # widest human_size: "999 KB", "9.9 MB", "123 MB", "1.2 GB"
+
+
 def human_size(size):
-    return f"{size / 1_000_000:.0f} MB" if size >= 10_000_000 else f"{size / 1_000_000:.1f} MB"
+    # Thresholds sit where rounding would add a digit ("10.0 MB"), to stay within SIZE_W.
+    if size < 999_500:
+        return f"{max(1, size // 1000)} KB"
+    if size < 9_950_000:
+        return f"{size / 1_000_000:.1f} MB"
+    if size < 999_500_000:
+        return f"{size / 1_000_000:.0f} MB"
+    return f"{size / 1_000_000_000:.1f} GB"
 
 
 def message_row(message):
@@ -772,8 +883,7 @@ def message_row(message):
     user_labels = sorted(USER_LABELS[label] for label in labels if label in USER_LABELS)
     size = message.get("size", 0)
     # (style, text): each kind of tag gets its own color in the list.
-    tags = [("size", human_size(size))] if size >= BIG_EMAIL_BYTES else []
-    tags += ([("category", category)] if category else []) + [("label", label) for label in user_labels]
+    tags = ([("category", category)] if category else []) + [("label", label) for label in user_labels]
     snippet = html.unescape(message.get("snippet") or "")
     return {
         "date": compact_date(message.get("internalDate")),
@@ -785,13 +895,18 @@ def message_row(message):
         "unread": "UNREAD" in labels,
         "starred": "STARRED" in labels,
         "tags": tags,
+        "size": human_size(size) if size else "",
+        "big": size >= BIG_EMAIL_BYTES,
+        # Who the email is from (or to, for sent ones), for "select all from this sender".
+        "party": parseaddr(((message.get("to") or "").split(",")[0]) if kind == "sent"
+                           else message.get("from") or "")[1].lower(),
         "haystack": " ".join([sender, message.get("from", ""), subject, category, *user_labels]).lower(),
     }
 
 
 def column_widths(rows, total_width):
     """Return (sender, subject, snippet) widths for the space left after fixed columns."""
-    fixed = 4 + 4 + DATE_W + 2  # cursor + checkbox, star + attachment, date, gap
+    fixed = 4 + 5 + DATE_W + 2 + SIZE_W + 2  # cursor + checkbox, star + attachment + unread dot, date, size, gaps
     sender_w = min(max((cell_len(row["sender"]) for row in rows), default=6), 22)
     rest = max(0, total_width - fixed - sender_w - 2 - 1)
     longest_subject = max((cell_len(row["subject"]) for row in rows), default=7)
@@ -804,14 +919,17 @@ KEY_HELP = [
     ("↑↓ j k", "move (PgUp PgDn Home End too)"),
     ("space", "select / unselect the current email"),
     ("a", "select / unselect all visible emails"),
-    ("/", "filter by sender, subject, category or label (e.g. /promo, /draft, /sent, /factures)"),
+    ("A", "select / unselect all visible emails from the current email's sender (recipient, for sent ones)"),
+    ("z", "sort by size, largest first / back to newest first"),
+    ("/", "filter by sender, subject, category or label (e.g. /promo, /draft, /sent, /invoices)"),
     ("Tab", "next view: All mail (everything but spam and trash), Inbox, Archived, Starred, Sent, Drafts, Spam, Trash"),
     ("⇧Tab", "previous view (Shift+Tab)"),
     ("m", "load older emails"),
-    ("r", "refresh: add new emails, drop the ones deleted or moved in Gmail meanwhile"),
-    ("p", "preview as PDF, exactly as it would be saved (nothing written to the download folder)"),
-    ("o", "open the current email in Gmail, in your browser"),
+    ("r", "refresh from Gmail: new emails, deleted or moved ones, read / unread, stars and labels"),
+    ("p", "preview as PDF, exactly as it would be saved (nothing written to the download folder); marks as read"),
+    ("o", "open the current email in Gmail, in your browser; marks as read"),
     ("*", "star / unstar in Gmail"),
+    ("!", "mark as unread / read in Gmail (e.g. to keep an email to do after p or o)"),
     ("e", "archive: remove from the Inbox, keep in All mail (recoverable: u, or R in Archived)"),
     ("enter", "save PDF + attachments, then move the email to the Gmail trash (recoverable: u)"),
     ("s", "save PDF + attachments, keep the email in Gmail (recoverable: u)"),
@@ -828,7 +946,8 @@ FOOTER_LINES = 3  # browse / email / delete key groups
 KEY_HELP_NOTE = (
     "Actions apply to the selected emails, or to the current one if none is selected.\n"
     "  Archived is not a Gmail folder or label: Gmail archives by removing an email from the Inbox.\n"
-    "  This view lists those emails (All mail minus Inbox, Sent and Drafts)."
+    "  This view lists those emails (All mail minus Inbox, Sent and Drafts).\n"
+    "  Tab counts: unread emails (white) in every view, except Drafts: all drafts (grey)."
 )
 # Actions confirmed by typing a word, because they cannot be undone.
 TYPED_CONFIRM = {"delete": "delete", "empty_trash": "empty"}
@@ -838,17 +957,18 @@ def new_picker_state():
     """Picker state kept across runs, so cursor, filter and selection survive each action."""
     return {"cursor": 0, "top": 0, "query": "", "filtering": False, "selected": set(), "saved": set(),
             "loading": False, "exhausted": True, "confirm": None, "help": False,
-            "cursor_id": None}
+            "cursor_id": None, "sort": "date"}
 
 
 def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
-                  views=("All mail",), view=0):
+                  views=("All mail",), view=0, badges=None):
     """Interactive multi-select list over messages (extended in place when older emails load).
 
     Returns (action, chosen messages) where action is "download" (save + trash), "save",
-    "trash", "delete" (permanent), "empty_trash", "restore", "not_spam", "archive", "unarchive", "preview", "star",
+    "trash", "delete" (permanent), "empty_trash", "restore", "not_spam", "archive", "unarchive", "preview", "star", "unread",
     "open", "undo",
     "refresh", "next_view", "prev_view" or "quit".
+    badges maps view names to (count text, "unread" | "total") shown in their tab.
     views are the tab names shown in the header, view the current one; the Trash view swaps
     enter / d (meaningless there) for R restore.
     load_more() returns (older messages sorted newest first, whether even older ones remain).
@@ -874,7 +994,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     def visible():
         terms = state["query"].lower().split()
-        return [i for i, row in enumerate(rows) if all(term in row["haystack"] for term in terms)]
+        indexes = [i for i, row in enumerate(rows) if all(term in row["haystack"] for term in terms)]
+        if state["sort"] == "size":
+            indexes.sort(key=lambda index: -messages[index].get("size", 0))
+        return indexes
 
     def size():
         return get_app().output.get_size()
@@ -882,7 +1005,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     def list_height():
         # Leave room for the startup line above the picker, its own header/footer and the notice.
         wanted = len(KEY_HELP) + KEY_HELP_NOTE.count("\n") + 2 if state["help"] else len(rows)
-        return max(1, min(wanted, size().rows - 6 - (FOOTER_LINES - 1) - len(notice)))
+        # (header, blank, column titles, list, blank, footer)
+        return max(1, min(wanted, size().rows - 7 - (FOOTER_LINES - 1) - len(notice)))
 
     def clamp():
         indexes = visible()
@@ -914,10 +1038,18 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         count = f"{len(rows)} emails"
         if total and not state["exhausted"] and total > len(rows):
             count = f"{len(rows)} of ~{total:,} emails"
+        # Unread for the whole view: the tab's counter when it counts unread, else the loaded emails.
+        text, kind = (badges or {}).get(views[view], (None, None))
+        unread = text if kind == "unread" else sum(row["unread"] for row in rows)
+        if unread:
+            count += f", {unread} unread"
         parts = []
         for position, name in enumerate(views):
-            parts.append(("class:tab.current" if position == view else "class:tab", f" {name} "))
-        parts.append(("class:dim", f" · {count} · newest first"))
+            text, kind = (badges or {}).get(name, (None, None))
+            label = f" {name} ({text}) " if text else f" {name} "
+            style = "class:tab.current" if position == view else "class:tab.badge" if kind == "unread" else "class:tab"
+            parts.append((style, label))
+        parts.append(("class:view", f" · {count} · " + ("largest first" if state["sort"] == "size" else "newest first")))
         if state["query"]:
             parts.append(("class:dim", f" · {len(indexes)} match "))
             parts.append(("class:accent", state["query"]))
@@ -949,7 +1081,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         if state["help"] or not rows:
             return []
         sender_w, subject_w, snippet_w = column_widths(rows, size().columns)
-        text = " " * 9 + fit("Date", DATE_W) + "  " + fit("From / To", sender_w) + "  " + fit("Subject", subject_w)
+        size_title = ("Size ↓" if state["sort"] == "size" else "Size").rjust(SIZE_W)
+        text = (" " * 10 + fit("Date", DATE_W) + "  " + size_title + "  " + fit("From / To", sender_w) + "  "
+                + fit("Subject", subject_w))
         if snippet_w:
             text += "  " + fit("Preview", snippet_w)
         return [("class:columns", text)]
@@ -973,21 +1107,27 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                 mark = ("class:saved", "✓ ")
             else:
                 mark = ("class:dim", "○ ")
-            if lines:
-                lines.append(("", "\n"))
-            lines += [
+            row_parts = [
                 ("class:cursor", " ❯ " if current else "   "),
                 mark,
                 ("class:star", "★" if row["starred"] else " "),
-                ("", "📎 " if row["attachment"] else "   "),
+                ("", "📎" if row["attachment"] else "  "),
+                # Unread: a blue dot plus bold sender and subject, like mail clients.
+                ("class:unread.dot", "• " if row["unread"] else "  "),
                 ("class:dim", fit(row["date"], DATE_W) + "  "),
+                ("class:tag.size" if row["big"] else "class:dim", row["size"].rjust(SIZE_W) + "  "),
                 *sender_fragments(row, sender_w),
-                ("class:subject.current" if current else "class:unread" if row["unread"] else "",
-                 fit(row["subject"], subject_w)),
+                ("class:unread" if row["unread"] else "", fit(row["subject"], subject_w)),
             ]
             if snippet_w:
                 # Size, category and label tags lead the snippet, colored, so they don't need columns.
-                lines += snippet_fragments(row, snippet_w)
+                row_parts += snippet_fragments(row, snippet_w)
+            if current:
+                # The cursor row gets a background (not bold, which means unread).
+                row_parts = [(f"{style} class:row.current", text) for style, text in row_parts]
+            if lines:
+                lines.append(("", "\n"))
+            lines += row_parts
         return lines
 
     def hidden_note():
@@ -1040,14 +1180,16 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             hint = [("class:accent", " / "), ("", state["query"]), ("class:accent", "▏"),
                     ("class:dim", "   enter apply · esc clear")]
         else:
-            browse = [("↑↓", "move"), ("space", "select"), ("a", "all"), ("/", "filter")]
+            # ↑↓ left out: obvious, and the line is full.
+            browse = [("space", "select"), ("a", "all"), ("A", "sender"), ("/", "filter"),
+                      ("z", "by date" if state["sort"] == "size" else "by size")]
             if not state["exhausted"]:
                 browse.append(("m", "loading…" if state["loading"] else "more"))
             browse += [("r", "refresh"), ("Tab", "views"), ("?", "help"), ("q", "quit")]
             delete = ([] if in_trash else [("d", "trash")]) + [("D", "delete permanently"), ("T", "empty trash")]
             if undo_label:
                 delete.append(("u", f"undo {undo_label}"))
-            email = [("p", "preview"), ("o", "open in Gmail"), ("*", "star")]
+            email = [("p", "preview"), ("o", "open in Gmail"), ("*", "star"), ("!", "unread")]
             if in_trash:
                 email += [("s", "save+keep"), ("R", "restore")]
             elif in_spam:
@@ -1099,6 +1241,27 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         if msg_id:
             state["selected"] ^= {msg_id}
             move(1)
+
+    @bindings.add("z", filter=browsing)
+    def _(event):
+        current = current_id()
+        state["sort"] = "date" if state["sort"] == "size" else "size"
+        # Keep the cursor on the same email in the new order.
+        state["cursor"] = next((position for position, index in enumerate(visible())
+                                if messages[index]["id"] == current), 0)
+        clamp()
+
+    @bindings.add("A", filter=browsing)
+    def _(event):
+        indexes = visible()
+        if not indexes:
+            return
+        party = rows[indexes[state["cursor"]]]["party"]
+        ids = {messages[index]["id"] for index in indexes if party and rows[index]["party"] == party}
+        if ids <= state["selected"]:
+            state["selected"] -= ids
+        else:
+            state["selected"] |= ids
 
     @bindings.add("a", filter=browsing)
     def _(event):
@@ -1174,6 +1337,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             state["confirm"]["typed"] += event.data
 
     bindings.add("*", filter=browsing)(lambda event: submit(event, "star", chosen()))
+    bindings.add("!", filter=browsing)(lambda event: submit(event, "unread", chosen()))
     bindings.add("o", filter=browsing)(lambda event: submit(event, "open", {current_id()} - {None}))
 
     @bindings.add("r", filter=browsing)
@@ -1231,7 +1395,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         "title": "bold",
         "columns": "fg:ansibrightblack underline",
         "tab": "fg:ansibrightblack",
-        "tab.current": "reverse bold",
+        # Current view: its tab filled with the view color, the header info written in it.
+        "tab.current": f"reverse bold fg:{VIEW_COLORS.get(views[view], 'ansicyan')}",
+        "view": f"fg:{VIEW_COLORS.get(views[view], 'ansicyan')}",
+        "tab.badge": "fg:default bold",
         "dim": "fg:ansibrightblack",
         "accent": "fg:ansicyan bold",
         "cursor": "fg:ansicyan bold",
@@ -1246,7 +1413,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         "tag.size": "fg:ansiyellow",
         "tag.category": "fg:ansiblue",
         "tag.label": "fg:ansigreen",
-        "subject.current": "bold",
+        "row.current": "bg:#303030",
+        "unread.dot": "fg:ansiblue bold",
         "key": "bold",
         "group.browse": "fg:ansicyan bold",
         "group.email": "fg:ansigreen bold",
@@ -1257,6 +1425,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     if notice:
         windows.append(Window(FormattedTextControl(render_notice), height=len(notice)))
     windows += [
+        Window(height=1),
         Window(FormattedTextControl(render_columns), height=1),
         Window(FormattedTextControl(render_list), height=lambda: Dimension.exact(list_height())),
         Window(height=1),
@@ -1268,6 +1437,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     positions = [position for position, index in enumerate(visible()) if messages[index]["id"] == state["cursor_id"]]
     if positions:
         state["cursor"] = positions[0]
+    discard_pending_keys(app.input)
     # Own thread: Playwright's sync API keeps an event loop running in the main one between actions.
     result = app.run(in_thread=True) or ("quit", [])
     state["cursor_id"] = current_id()
@@ -1340,13 +1510,13 @@ def parse_command(answer):
 
 
 def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
-                                views=("All mail",), view=0):
+                                views=("All mail",), view=0, badges=None):
     """Pick emails interactively, or by typed numbers when not attached to a terminal.
 
     Returns (action, messages); see pick_messages for the actions.
     """
     if sys.stdin.isatty() and sys.stdout.isatty():
-        return pick_messages(messages, load_more, state, notice, undo_label, total, views, view)
+        return pick_messages(messages, load_more, state, notice, undo_label, total, views, view, badges)
     if not messages:
         return "quit", []
 
@@ -1622,6 +1792,12 @@ def interactive_download_main():
             except HttpError as exc:
                 return [[("class:error", " ✗ "), ("", "Refresh failed"), ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
             drop(view, removed)
+            try:
+                # Read / unread, stars… changed in Gmail meanwhile (web, phone, o).
+                updated = refresh_labels(service, user_id, view["messages"])
+            except HttpError as exc:
+                debug(f"Could not refresh labels: {exc}")
+                updated = 0
             known = {message["id"] for message in view["messages"]}
             view["messages"].extend(message for message in new if message["id"] not in known)
             view["messages"].sort(key=lambda message: message["internalDate"], reverse=True)
@@ -1633,16 +1809,25 @@ def interactive_download_main():
                 parts.append(f"{len(new)} new")
             if removed:
                 parts.append(f"{len(removed)} gone (deleted or moved in Gmail)")
+            if updated:
+                parts.append(f"{updated} updated (read, starred or labeled in Gmail)")
             if quiet and not parts:
                 return []
             return [[("class:checked", " ↻ "), ("", " · ".join(parts) or "Up to date")]]
 
         def moved_emails():
             """Emails changed place (trash, restore, delete): other views refresh when next shown."""
+            nonlocal badges_stale
+            badges_stale = True
             for view in views:
                 if view is not views[current] and view["loaded"]:
                     view["stale"] = True
 
+        def update_badges():
+            nonlocal badges
+            badges = view_badges(service, user_id, {view["name"]: view["query"] for view in views}, bool(args.query))
+
+        badges, badges_stale = {}, True
         load_view(views[current])
         notice = []
         # Last reversible action (d, enter, s or e): its key-help name, emails to restore from the trash,
@@ -1657,11 +1842,15 @@ def interactive_download_main():
         totals = {"saved": 0, "trashed": 0, "deleted": 0}
         # Back to the list after every action, until the user quits.
         while True:
+            if badges_stale:
+                # Tab counters change when emails move, get starred or arrive (r).
+                update_badges()
+                badges_stale = False
             view = views[current]
             messages, state = view["messages"], view["state"]
             action, chosen = ask_user_to_select_messages(
                 messages, load_more_for(view) if view["more"] else None, state, notice, undo_text(undo),
-                view["total"], [view["name"] for view in views], current,
+                view["total"], [view["name"] for view in views], current, badges,
             )
             if action == "quit" or (
                 action not in {"undo", "empty_trash", "refresh", "next_view", "prev_view"} and not chosen
@@ -1682,6 +1871,8 @@ def interactive_download_main():
                 # Previews live in a session temp dir (never in the download folder), removed on quit.
                 preview_dir = preview_dir or tempfile.mkdtemp(prefix="savegmail-preview-")
                 failed = preview_messages(service, user_id, chosen, get_browser(), preview_dir)
+                mark_read(service, user_id, [message for message in chosen if message["id"] not in failed])
+                badges_stale = True
                 if failed:
                     notice = [[("class:error", " ✗ "), ("", f"Preview failed for {plural(len(failed), 'email')}")]]
                     notice += failure_notice(chosen, failed)
@@ -1776,8 +1967,28 @@ def interactive_download_main():
 
             elif action == "open":
                 open_quietly(gmail_url(account, chosen[0]["id"]))
+                # Gmail marks it read once shown; do it now so the list and counters agree right away.
+                mark_read(service, user_id, chosen)
+                badges_stale = True
+
+            elif action == "unread":
+                # Like star: mark them all unread, unless they all already are, then mark them read.
+                unread = not all("UNREAD" in message.get("labels", []) for message in chosen)
+                try:
+                    modify_labels(service, user_id, list(ids), **{"add" if unread else "remove": ["UNREAD"]})
+                except HttpError as exc:
+                    notice = [[("class:error", " ✗ "), ("", "Could not change the read state"),
+                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
+                else:
+                    for message in chosen:
+                        labels = [label for label in message.get("labels", []) if label != "UNREAD"]
+                        message["labels"] = labels + ["UNREAD"] if unread else labels
+                    badges_stale = True
+                    notice = [[("class:checked", " ● " if unread else " ○ "),
+                               ("", f"{plural(len(chosen), 'email')} marked as {'unread' if unread else 'read'}")]]
 
             elif action == "star":
+                badges_stale = True
                 # Like Gmail: star them all, unless they all are already starred.
                 star = not all("STARRED" in message.get("labels", []) for message in chosen)
                 try:
@@ -1794,6 +2005,7 @@ def interactive_download_main():
 
             elif action == "refresh":
                 notice = refresh_view(view)
+                badges_stale = True
 
             elif action == "empty_trash":
                 try:

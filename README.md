@@ -5,11 +5,12 @@ SaveGmail is a Python script for archiving Gmail messages as PDFs and saving the
 ## Key Features
 
 - Interactive terminal picker: arrow keys, space to select, `/` to filter, `m` to load older emails, `?` for help
-- Views switched with `Tab`: All mail, Inbox, Archived, Starred, Sent, Drafts, Spam, Trash (`R` restores from the trash, marks as not spam, or moves back to the Inbox)
+- Views switched with `Tab`, with unread counts in their tabs: All mail, Inbox, Archived, Starred, Sent, Drafts, Spam, Trash (`R` restores from the trash, marks as not spam, or moves back to the Inbox)
 - Archive (`e`), like Gmail, undoable
-- Compact, borderless list, newest first, Gmail-style: date and time (time only for today), unread in bold, ★ starred, 📎 attachments, `Draft` / `Sent · <recipient>` instead of yourself as sender, size of big emails, Gmail category and your own labels before the snippet
-- Star / unstar (`*`) and open in Gmail (`o`) from the list
-- Header shows how many emails are loaded out of Gmail's estimate for the query
+- Compact, borderless list, newest first, Gmail-style: date and time (time only for today), unread with a blue • and in bold, ★ starred, 📎 attachments, `Draft` / `Sent · <recipient>` instead of yourself as sender, size column (big emails highlighted, `z` sorts by size), Gmail category and your own labels before the snippet
+- Star / unstar (`*`), mark unread / read (`!`), open in Gmail (`o`), select all emails from a sender (`A`)
+- Read state stays in sync with Gmail: `p` and `o` mark as read, `r` picks up what changed in Gmail web or on your phone
+- Each view has its own color; the header shows how many emails are loaded out of Gmail's estimate, and how many are unread
 - `r` refreshes the list with emails received during the session
 - Session workflow: the list comes back after each action, with its result on top
 - PDF preview of any email, rendered exactly as it would be saved, without saving anything
@@ -83,18 +84,21 @@ Run:
 
 The script lists your Gmail messages (newest first) in an interactive picker, starting with the **All mail** view: every email except spam and trash (received, sent, archived, drafts), like Gmail's "All mail". `Tab` / `Shift+Tab` switch between the views shown in the header; each keeps its own list, selection and cursor, and with `--query` every view is filtered by it.
 
+Each view has its own color: its tab is filled with it and the header info (`· 50 emails · newest first`) is written in it, so you always see where you are; it reads like `· 50 emails, 12 unread`. Tabs show the number of unread emails, in white, in every view, except Drafts which shows all drafts in grey (a draft is never unread). Without `--query` they are Gmail's exact counters; All mail and Archived (not labels) and, with `--query`, the filtered views are counted from a search, shown as `1,000+` beyond 1,000.
+
 **Archived** is not a Gmail folder or label: Gmail archives an email by removing it from the Inbox, and it stays in All mail. This view lists those emails (All mail minus Inbox, Sent and Drafts).
 
 ```text
- All mail  Inbox  Archived  Starred  Sent  Drafts  Spam  Trash  · 50 of ~1,240 emails · newest first   1 selected
-         Date              From / To       Subject                    Preview
-   ○ ★📎 12:31             Free            Votre facture Freebox      12 MB · Factures · Consultez…
- ❯ ●     09:14             Sent · Paul     Photos du week-end         Voici les photos…
-   ○     5 Sep 08:02       Draft           Re: roofing quote          OK for Thursday, I'll come…
-   ○     2025-08-31 18:02  LinkedIn        Davy shared a post         Social · Last Tuesday was…
+ All mail (15)  Inbox (12)  Archived (3)  Starred (2)  Sent  Drafts (1)  Spam  Trash  · 50 of ~1,240 emails, 15 unread · newest first
 
- browse  ↑↓ move · space select · a all · / filter · m more · r refresh · Tab views · ? help · q quit
- email   p preview · o open in Gmail · * star · e archive · enter save+trash · s save+keep
+          Date                Size  From / To       Subject                    Preview
+   ○ ★📎• 12:31              12 MB  Acme Energy     Your October invoice       Invoices · View or downlo…
+ ❯ ●      09:14             820 KB  Sent · Paul     Weekend photos             Here are the photos…
+   ○      5 Sep 08:02        20 KB  Draft           Re: roofing quote          OK for Thursday, I'll come…
+   ○      2025-08-31 18:02   48 KB  LinkedIn        Davy shared a post         Social · Last Tuesday was…
+
+ browse  space select · a all · A sender · / filter · z by size · m more · r refresh · Tab views · ? help · q quit
+ email   p preview · o open in Gmail · * star · ! unread · e archive · enter save+trash · s save+keep
  delete  d trash · D delete permanently · T empty trash
 ```
 
@@ -105,13 +109,16 @@ Actions apply to the selected emails, or to the current one if none is selected.
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `Home` `End` | Move |
 | `space` | Select / unselect the current email |
 | `a` | Select / unselect all visible emails |
+| `A` | Select / unselect all visible emails from the current email's sender (its recipient, for sent emails) |
+| `z` | Sort by size, largest first; again to go back to newest first |
 | `Tab` / `Shift+Tab` | Next / previous view: All mail, Inbox, Archived, Starred, Sent, Drafts, Spam, Trash |
-| `/` | Filter by sender, subject, category or label, e.g. `/promo`, `/draft`, `/sent`, `/factures` (`enter` to apply, `esc` to clear) |
+| `/` | Filter by sender, subject, category or label, e.g. `/promo`, `/draft`, `/sent`, `/invoices` (`enter` to apply, `esc` to clear) |
 | `m` | Load older emails (added at the bottom) |
-| `r` | Refresh: add emails received since, drop the ones deleted or moved in Gmail meanwhile |
-| `p` | Preview as the exact PDFs a download would produce, opened in your PDF viewer (temporary file, nothing saved to the download folder); asks `y` before opening more than 5 |
-| `o` | Open the current email in Gmail, in your browser |
+| `r` | Refresh from Gmail: emails received since, the ones deleted or moved, and read / unread, stars and labels changed elsewhere (Gmail web, phone) |
+| `p` | Preview as the exact PDFs a download would produce, opened in your PDF viewer (temporary file, nothing saved to the download folder); marks them as read; asks `y` before opening more than 5 |
+| `o` | Open the current email in Gmail, in your browser; marks it as read |
 | `*` | Star / unstar in Gmail (stars all, unless all are already starred) |
+| `!` | Mark as unread / read in Gmail (unread all, unless all already are), e.g. to keep an email to do after `p` or `o` |
 | `e` | Archive: remove from the Inbox, keep in All mail (not in the Archived, Trash and Spam views) |
 | `enter` | Save PDFs + attachments, then move the emails to the Gmail trash |
 | `s` | Save PDFs + attachments and keep the emails in Gmail (marked `✓` in the list) |
@@ -123,7 +130,7 @@ Actions apply to the selected emails, or to the current one if none is selected.
 | `?` | Show the key help in the list |
 | `q` / `esc` | Quit |
 
-Unread emails are in bold, `★` marks starred emails and `📎` emails with attachments. Drafts show `Draft` in red and sent emails `Sent · <recipient>` (`Sent · me` when sent to yourself) instead of yourself. Emails over 1 MB show their size, and Gmail categories (Promotions, Social, Updates, Forums) and your own labels appear before the snippet, colored: size in yellow, category in blue, labels in green. After each action the list comes back with the result on top, so several batches can be handled in one session.
+Unread emails have a blue `•` and a bold sender and subject; the row under the cursor has a grey background, `★` marks starred emails and `📎` emails with attachments. Drafts show `Draft` in red and sent emails `Sent · <recipient>` (`Sent · me` when sent to yourself) instead of yourself. The Size column highlights emails over 1 MB in yellow. Gmail categories (Promotions, Social, Updates, Forums) and your own labels appear before the snippet, colored: category in blue, labels in green. After each action the list comes back with the result on top, so several batches can be handled in one session.
 
 When the output is not a terminal (pipe, CI), the script falls back to typed selections such as `1,3`, `2-6`, `2-6,8-10`, `all` or `q`. Prefix with `s` to save and keep in Gmail (`s 1,3`), `d` to trash without saving (`d 2-6`, confirmed with `y`), or `D` to delete permanently (`D 2-6`, confirmed by typing `delete`).
 

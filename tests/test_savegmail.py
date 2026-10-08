@@ -67,7 +67,8 @@ class TextHelpersTest(unittest.TestCase):
         row = savegmail.message_row(savegmail.to_candidate(detail))
         self.assertEqual((row["sender"], row["kind"]), ("Sent · Paul Martin", "sent"))
         self.assertTrue(row["unread"] and row["starred"])
-        self.assertEqual(row["tags"], [("size", "12 MB"), ("category", "Promotions")])
+        self.assertEqual(row["tags"], [("category", "Promotions")])
+        self.assertEqual((row["size"], row["big"], row["party"]), ("12 MB", True, "p@x"))
         self.assertIn("promotions", row["haystack"])
         savegmail.ACCOUNT = "me@x"
         detail["payload"]["headers"] = [{"name": "To", "value": "Me <ME@x>"}]
@@ -86,6 +87,12 @@ class TextHelpersTest(unittest.TestCase):
             self.assertIn("factures", row["haystack"])
         finally:
             savegmail.USER_LABELS = {}
+
+    def test_human_size(self):
+        self.assertEqual([savegmail.human_size(size) for size in (300, 820_400, 1_240_000, 123_000_000)],
+                         ["1 KB", "820 KB", "1.2 MB", "123 MB"])
+        self.assertTrue(all(len(savegmail.human_size(size)) <= savegmail.SIZE_W
+                            for size in (999_499, 999_999, 9_949_999, 9_999_999, 999_499_999, 999_999_999, 9_940_000_000)))
 
     def test_attachment_flag(self):
         detail = {"id": "1", "payload": {"mimeType": "multipart/mixed", "headers": []}}
@@ -205,6 +212,100 @@ class RefreshTest(unittest.TestCase):
         self.assertEqual(service.sizes, [])  # z and y are older than the loaded range: no metadata fetched
 
 
+class FakeBadgeService(FakeService):
+    def __init__(self, matches=1):
+        super().__init__()
+        self.searches, self.matches = [], matches
+
+    def users(self):
+        return self
+
+    def labels(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def get(self, userId, id):
+        counters = {"INBOX": (12, 500), "STARRED": (2, 9), "SPAM": (0, 3), "DRAFT": (0, 1), "SENT": (0, 340),
+                    "TRASH": (5, 0)}
+        unread, total = counters[id]
+        return FakeResult({"id": id, "messagesUnread": unread, "messagesTotal": total})
+
+    def list(self, userId, q, maxResults, pageToken=None, fields=None, includeSpamTrash=False):
+        self.searches.append((q, includeSpamTrash))
+        start = int(pageToken or 0)
+        page = min(maxResults, self.matches - start)
+        response = {"messages": [{"id": str(i)} for i in range(start, start + page)]}
+        if start + page < self.matches:
+            response["nextPageToken"] = str(start + page)
+        return FakeResult(response)
+
+
+class BadgeTest(unittest.TestCase):
+    QUERIES = {name: query for name, query in savegmail.VIEWS}
+
+    def test_label_counters(self):
+        service = FakeBadgeService(matches=1)
+        badges = savegmail.view_badges(service, "me", self.QUERIES, filtered=False)
+        # Unread everywhere (Trash too), a total for Drafts only; zero counts (Sent, Spam) hidden.
+        self.assertEqual(badges, {"Inbox": ("12", "unread"), "Starred": ("2", "unread"), "Drafts": ("1", "total"),
+                                  "Trash": ("5", "unread"), "All mail": ("1", "unread"), "Archived": ("1", "unread")})
+        self.assertEqual(service.searches, [("is:unread", False), (self.QUERIES["Archived"] + " is:unread", False)])
+
+    def test_exact_count_capped(self):
+        service = FakeBadgeService(matches=1500)
+        self.assertEqual(savegmail.count_messages(service, "me", "x"), savegmail.BADGE_COUNT_CAP)
+        self.assertEqual(savegmail.badge_text(savegmail.BADGE_COUNT_CAP), "1,000+")
+        self.assertEqual(savegmail.count_messages(FakeBadgeService(matches=201), "me", "x"), 201)
+
+    def test_filtered_views_use_searches(self):
+        service = FakeBadgeService()
+        queries = {name: f"(from:x) {query}".strip() for name, query in savegmail.VIEWS}
+        savegmail.view_badges(service, "me", queries, filtered=True)
+        self.assertIn(("(from:x) in:spam is:unread", True), service.searches)
+        self.assertIn(("(from:x) in:trash is:unread", True), service.searches)
+        self.assertIn(("(from:x) in:sent is:unread", False), service.searches)
+        self.assertIn(("(from:x) in:drafts", False), service.searches)
+        self.assertEqual(service.sizes, [])  # no label counters: they ignore --query
+
+
+class FakeLabelService(FakeService):
+    def __init__(self, labels):
+        super().__init__()
+        self.labels, self.modified = labels, []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def get(self, userId, id, format, fields):
+        return FakeResult({"id": id, "labelIds": list(self.labels[id])})
+
+    def batchModify(self, userId, body):
+        self.modified.append(body)
+        return FakeResult({})
+
+
+class ReadStateTest(unittest.TestCase):
+    def test_refresh_labels(self):
+        service = FakeLabelService({"1": ["INBOX"], "2": ["INBOX", "UNREAD"]})
+        loaded = [{"id": "1", "labels": ["INBOX", "UNREAD"]}, {"id": "2", "labels": ["INBOX", "UNREAD"]}]
+        self.assertEqual(savegmail.refresh_labels(service, "me", loaded), 1)  # 1 was read elsewhere
+        self.assertEqual(loaded[0]["labels"], ["INBOX"])
+
+    def test_mark_read(self):
+        service = FakeLabelService({})
+        emails = [{"id": "1", "labels": ["INBOX", "UNREAD"]}, {"id": "2", "labels": ["INBOX"]}]
+        savegmail.mark_read(service, "me", emails)
+        self.assertEqual(service.modified, [{"ids": ["1"], "addLabelIds": [], "removeLabelIds": ["UNREAD"]}])
+        self.assertEqual(emails[0]["labels"], ["INBOX"])
+        savegmail.mark_read(service, "me", emails)
+        self.assertEqual(len(service.modified), 1)  # nothing unread left: no call
+
+
 class CompactDateTest(unittest.TestCase):
     def test_formats(self):
         from datetime import datetime, timedelta
@@ -286,6 +387,7 @@ class PickerTest(unittest.TestCase):
     def test_star_and_open_keys(self):
         self.assertEqual(pick(" j *"), ("star", ["0", "2"]))
         self.assertEqual(pick(" o"), ("open", ["1"]))  # o: the email under the cursor
+        self.assertEqual(pick(" j !"), ("unread", ["0", "2"]))
 
     def test_archive_and_spam_keys(self):
         self.assertEqual(pick(" j e"), ("archive", ["0", "2"]))
@@ -307,6 +409,24 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick("\rdyq", **trash), ("quit", []))  # enter and d are off in Trash
         self.assertEqual(pick("s", **trash), ("save", ["0"]))
         self.assertEqual(pick("Rq"), ("quit", []))  # R only in Trash
+
+    def test_sort_by_size(self):
+        messages = make_messages(3)
+        for message, size in zip(messages, (10, 30, 20)):
+            message["size"] = size
+        # Largest first; the cursor follows its email ("0", now last), Home goes back to the top.
+        self.assertEqual(pick("z\r", messages), ("download", ["0"]))
+        self.assertEqual(pick("z\x1b[H\r", messages), ("download", ["1"]))
+        self.assertEqual(pick("z\x1b[Hj\r", messages), ("download", ["2"]))
+        state = savegmail.new_picker_state()
+        pick("jzq", messages, state=state)  # cursor on "1" (2nd by date), now first by size
+        self.assertEqual((state["sort"], state["cursor"]), ("size", 0))
+
+    def test_select_same_sender(self):
+        messages = make_messages(4)
+        messages[2]["from"] = messages[0]["from"]
+        self.assertEqual(pick("A\r", messages), ("download", ["0", "2"]))
+        self.assertEqual(pick("AA\r", messages), ("download", ["0"]))  # A again unselects them
 
     def test_refresh_key(self):
         self.assertEqual(pick("r"), ("refresh", []))
