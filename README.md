@@ -4,16 +4,18 @@ SaveGmail is a Python script for archiving Gmail messages as PDFs and saving the
 
 ## Key Features
 
-- Interactive terminal picker: arrow keys, space to select, `/` to filter, `m` to load older emails
-- Compact, borderless list with sender, subject, preview snippet and mail-client style dates
-- Downloads selected emails as PDFs with complete metadata
-- Extracts and saves email attachments, embeds inline images
+- Interactive terminal picker: arrow keys, space to select, `/` to filter, `m` to load older emails, `?` for help
+- Compact, borderless list with sender, subject, preview snippet, mail-client style dates and 📎 for attachments
+- Session workflow: the list comes back after each action, with its result on top
+- PDF preview of any email, rendered exactly as it would be saved, without saving anything
+- Saves selected emails as PDFs with complete metadata, plus their attachments; inline images are embedded
+- Then moves them to the Gmail trash, or keeps them in Gmail
+- Trash without saving, delete permanently, or empty the whole trash, with confirmations
+- Undo of the last trash or save (restores emails, removes the saved files)
 - Renders in headless Chromium, waiting for lazy-loaded images and web fonts
-- Live progress with a per-email ✓/✗ line and a final summary
+- Live progress with a per-email ✓/✗ line and a session summary
 - Failed emails stay in Gmail and leave no partial files behind
-- Moves successfully processed Gmail messages to the Gmail trash
-- Provides a manual, confirmed option to empty the Gmail trash
-- Secure OAuth 2.0 authentication
+- Secure OAuth 2.0 authentication, with a browser sign-in when the session expires
 - Local Playwright/Chromium setup through the launcher
 
 ## Prerequisites
@@ -83,8 +85,12 @@ The script lists your Gmail messages (oldest to newest) in an interactive picker
  ❯ ●    5 Sep       Jean Dupont   Re: roofing quote             OK for Thursday, I'll come…
    ○    12:31       GitHub        [repo] PR #42 merged          Merged #42 into main.
 
- ↑↓ move · a all · space select · / filter · m more · p preview · enter save+trash · s save · d trash · D delete · q quit   1 selected
+ browse  ↑↓ move · space select · a all · / filter · m more · ? help · q quit     1 selected
+ save    p preview · enter save+trash · s save+keep
+ delete  d trash · D delete permanently · T empty trash
 ```
+
+Actions apply to the selected emails, or to the current one if none is selected. Press `?` in the list for the same key help.
 
 | Key | Action |
 | --- | --- |
@@ -93,19 +99,19 @@ The script lists your Gmail messages (oldest to newest) in an interactive picker
 | `a` | Select / unselect all visible emails |
 | `/` | Filter by sender or subject (`enter` to apply, `esc` to clear) |
 | `m` | Load older emails |
-| `p` | Preview the current email (full text, in a pager) |
-| `enter` | Save the selection as PDFs, then move it to the Gmail trash (the current email if none is selected) |
-| `s` | Save the selection as PDFs and keep it in Gmail (marked `✓` in the list) |
-| `d` | Move the selection to the Gmail trash without saving, after a `y` confirmation |
-| `D` | Permanently delete the selection, bypassing the trash, after typing `delete` (cannot be undone) |
-| `u` | Undo the last move to trash |
+| `p` | Preview as the exact PDFs a download would produce, opened in your PDF viewer (temporary file, nothing saved to the download folder) |
+| `enter` | Save PDFs + attachments, then move the emails to the Gmail trash |
+| `s` | Save PDFs + attachments and keep the emails in Gmail (marked `✓` in the list) |
+| `d` | Move the selection to the Gmail trash without saving, after a `y` confirmation (recoverable with `u`, or from Gmail for 30 days) |
+| `D` | Permanently delete the selection, without going through the trash, after typing `delete` (cannot be undone) |
+| `T` | Empty the whole Gmail trash (not only the selection), after typing `empty` (cannot be undone) — same as `--trash` |
+| `u` | Undo the last `d`, `enter` or `s`: restores the emails from the trash and removes the files that action saved (`D` and `T` cannot be undone) |
+| `?` | Show the key help in the list |
 | `q` / `esc` | Quit |
 
 `📎` marks emails with attachments. After each action the list comes back with the result on top, so several batches can be handled in one session.
 
-When the output is not a terminal (pipe, CI), the script falls back to typed selections such as `1,3`, `2-6`, `2-6,8-10`, `all` or `q`. Prefix with `s` to save only (`s 1,3`) `d` to trash without saving (`d 2-6`, confirmed with `y`), or `D` to delete permanently (`D 2-6`, confirmed by typing `delete`).
-
-After a selected email is successfully saved locally, the script moves the corresponding Gmail message to the Gmail trash (except with `s`).
+When the output is not a terminal (pipe, CI), the script falls back to typed selections such as `1,3`, `2-6`, `2-6,8-10`, `all` or `q`. Prefix with `s` to save and keep in Gmail (`s 1,3`), `d` to trash without saving (`d 2-6`, confirmed with `y`), or `D` to delete permanently (`D 2-6`, confirmed by typing `delete`).
 
 ### Filter the listed emails
 
@@ -117,11 +123,13 @@ Use Gmail search syntax with `--query`:
 ./run-savegmail.sh --query "from:example@example.com"
 ```
 
-### Limit the number of listed emails
+### Emails loaded per page
 
 ```bash
 ./run-savegmail.sh --max 100
 ```
+
+Press `m` in the list to load older emails, one page at a time.
 
 ### Empty Gmail trash manually
 
@@ -129,7 +137,7 @@ Use Gmail search syntax with `--query`:
 ./run-savegmail.sh --trash
 ```
 
-This option only empties the Gmail trash, after showing the number of messages and asking for confirmation. It is not run automatically after downloads.
+Permanently deletes everything in the Gmail trash, after showing the number of messages and asking for confirmation, then exits. It is never run automatically; `T` does the same from the list.
 
 ### Render in a visible browser window
 
@@ -145,7 +153,7 @@ PDFs are rendered in headless Chromium by default. Use `--headed` as a fallback 
 ./run-savegmail.sh --verbose
 ```
 
-Shows token, Chromium, MIME parts and PDF rendering details.
+Shows sign-in (full sign-in URL, token refresh errors), token, Chromium, MIME parts and PDF rendering details.
 
 ### Show help
 
@@ -161,7 +169,7 @@ For each selected message, SaveGmail:
 2. extracts metadata such as subject, sender, recipients, and date
 3. saves attachments in the configured download directory
 4. renders the message body to PDF using headless Chromium, named `<timestamp>_<subject>.pdf`
-5. moves the processed Gmail messages to the Gmail trash, in one batch (unless saved with `s`)
+5. moves the processed Gmail messages to the Gmail trash, in one batch (`enter` only; `s` keeps them in Gmail)
 
 If any step fails, the files written for that email are removed and the email stays in Gmail, so a later retry starts clean.
 
@@ -171,7 +179,7 @@ If any step fails, the files written for that email are removed and the email st
 
 - Verify `credentials.json` exists next to `savegmail.py`
 - Check that Gmail API is enabled in Google Cloud Console
-- If the OAuth token is invalid, remove `token.json` and run the script again
+- An expired or revoked session opens a browser sign-in automatically; if sign-in keeps failing, remove `token.json` and run the script again
 
 ### Download issues
 
@@ -197,6 +205,12 @@ The older `HasAttachment` / `HasAttachment/SavedAsPDF` Gmail label workflow is n
 ./run-savegmail.sh --query "has:attachment"
 ```
 
+## Tests
+
+```bash
+.venv/bin/python -m unittest discover -s tests
+```
+
 ## Contributing
 
 Contributions are welcome! Feel free to open an issue or submit a pull request.
@@ -212,9 +226,3 @@ This project is licensed under the MIT License. See the `LICENSE` file for detai
 ---
 
 Built with ❤️ by C0sm0cats
-
-## Tests
-
-```bash
-.venv/bin/python -m unittest discover -s tests
-```

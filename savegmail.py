@@ -1,4 +1,5 @@
 import os
+import pathlib
 import base64
 from playwright.sync_api import sync_playwright
 import asyncio
@@ -16,6 +17,9 @@ import logging
 import re
 import io
 import contextlib
+import shutil
+import tempfile
+import webbrowser
 import html
 from email.parser import BytesParser
 from email.policy import default as policy_default
@@ -127,6 +131,49 @@ def oauth_flow():
     return InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
 
 
+SIGN_IN_SUCCESS_PAGE = "savegmail: signed in. You can close this tab."
+
+
+def open_quietly(url):
+    """Open url in the default browser without letting the browser write to our terminal.
+
+    Falls back to Python's webbrowser (which honors $BROWSER) when no system opener is usable.
+    """
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    if sys.platform != "win32" and not os.environ.get("BROWSER") and shutil.which(opener):
+        try:
+            subprocess.Popen([opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            return True
+        except OSError:
+            pass
+    return webbrowser.open(url)
+
+
+def sign_in(reason):
+    """Browser OAuth sign-in with compact output, erased once signed in (kept with --verbose)."""
+    flow = oauth_flow()
+
+    class QuietBrowser(webbrowser.BaseBrowser):
+        # run_local_server hands us the sign-in URL here, so the prompt and opening are ours.
+        def open(self, url, new=0, autoraise=True):
+            console.print(f"[yellow]![/] {reason}")
+            console.print(f"  [dim]Didn't open?[/] [link={url}]Open the sign-in page[/link]")
+            if VERBOSE:
+                # Soft wrap keeps the URL one logical line, so terminals still detect it as a link.
+                console.print(f"  {url}", style="dim", markup=False, soft_wrap=True)
+            return open_quietly(url)
+
+    webbrowser.register("savegmail", None, QuietBrowser("savegmail"))
+    with console.status("[dim]Waiting for sign-in…[/]"):
+        creds = flow.run_local_server(
+            port=0, browser="savegmail", authorization_prompt_message="", success_message=SIGN_IN_SUCCESS_PAGE
+        )
+    if not VERBOSE and console.is_terminal:
+        console.file.write("\x1b[2F\x1b[J")  # erase the two prompt lines
+    debug(f"Token expires {convert_expiry_to_local_time(creds.expiry)}")
+    return creds
+
+
 def authenticate():
     creds = None
     if os.path.exists(TOKEN_PATH):
@@ -137,14 +184,14 @@ def authenticate():
                 creds.refresh(Request())
                 debug(f"Token refreshed, expires {convert_expiry_to_local_time(creds.expiry)}")
             except Exception as e:
-                warn(f"Could not refresh token: {e}")
-                flow = oauth_flow()
-                creds = flow.run_local_server(port=0)
-                debug(f"Token expires {convert_expiry_to_local_time(creds.expiry)}")
+                debug(f"Could not refresh token: {e}")
+                if "invalid_grant" in str(e):
+                    reason = "Gmail session expired, sign in again in your browser."
+                else:
+                    reason = "Could not refresh the Gmail session, sign in again in your browser."
+                creds = sign_in(reason)
         else:
-            flow = oauth_flow()
-            creds = flow.run_local_server(port=0)
-            debug(f"Token expires {convert_expiry_to_local_time(creds.expiry)}")
+            creds = sign_in("Sign in to Gmail in your browser.")
         with open(TOKEN_PATH, "w") as token:
             token.write(creds.to_json())
     return creds
@@ -160,17 +207,21 @@ def remove_files(paths):
             os.remove(path)
 
 
-def save_email_and_attachments(service, user_id, msg_id, save_dir, browser, on_step=lambda step: None):
-    """Save one email as PDF + attachments; on failure, remove what was written so a retry starts clean."""
+def save_email_and_attachments(service, user_id, msg_id, save_dir, browser, on_step=lambda step: None,
+                               save_attachments=True):
+    """Save one email as PDF + attachments; on failure, remove what was written so a retry starts clean.
+
+    save_attachments=False renders the PDF only (attachments are listed, not written), for previews.
+    """
     written = []
     try:
-        return write_email_files(service, user_id, msg_id, save_dir, browser, on_step, written)
+        return write_email_files(service, user_id, msg_id, save_dir, browser, on_step, written, save_attachments)
     except Exception:
         remove_files(written)
         raise
 
 
-def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, written):
+def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, written, save_attachments=True):
     def sanitize_subject_for_filename(subject):
         safe = (subject or "")
         safe = (safe
@@ -181,6 +232,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
             .replace("+", "-")
             .replace("é", "e")
             .replace("à", "a"))
+        safe = re.sub(r'[<>"|?\x00-\x1f]', "-", safe)  # forbidden on Windows, plus control chars
         # Linux caps file names at 255 bytes; leave room for the timestamp prefix and ".pdf".
         safe = truncate_bytes(safe.strip(), 150).rstrip(". ")
         return safe or "No_Subject"
@@ -280,7 +332,9 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         filename = re.sub(r'[<>:\"/\\|?*]', '_', filename).strip()
         base, ext = os.path.splitext(filename)
         base, ext = truncate_bytes(base, 180), truncate_bytes(ext, 20)
-        filename = base + ext
+        # Windows silently drops trailing dots/spaces, so the saved name would differ from ours.
+        filename = (base + ext).rstrip(". ") or "attachment"
+        base, ext = os.path.splitext(filename)
         counter = 1
         candidate = filename
 
@@ -304,13 +358,14 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
 
         # Handle true attachments: Save if filename and disposition is 'attachment' (or no CID for safety)
         if filename and (content_disposition == 'attachment' or not content_id):
-            payload = part.get_payload(decode=True)
-            path = os.path.join(save_dir, filename)
-            written.append(path)
-            with open(path, 'wb') as f:
-                f.write(payload)
             attachments_files.append(filename)
-            debug(f"Attachment saved: {filename}")
+            if save_attachments:
+                payload = part.get_payload(decode=True)
+                path = os.path.join(save_dir, filename)
+                written.append(path)
+                with open(path, 'wb') as f:
+                    f.write(payload)
+                debug(f"Attachment saved: {filename}")
 
         # Handle images (inline or otherwise): Always embed if image and has CID
         if content_type.startswith('image/'):
@@ -346,8 +401,10 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         attachments_html_footer = "<div>Attachments:</div>\n<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
         for attachment in attachments_files:
             attachment_path = os.path.join(save_dir, attachment)
-            attachment_url = f"file://{os.path.abspath(attachment_path)}"
-            attachments_html_footer += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'><a href='{attachment_url}'>{attachment}</a></h6></li>\n"
+            attachment_url = pathlib.Path(os.path.abspath(attachment_path)).as_uri()  # file:///C:/… on Windows
+            # Previews don't write attachments, so there is no file to link to.
+            label = f"<a href='{attachment_url}'>{attachment}</a>" if save_attachments else attachment
+            attachments_html_footer += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'>{label}</h6></li>\n"
         attachments_html_footer += "</ul>\n"
     else:
         attachments_html_footer = "<div>No attachments for this mail</div>"
@@ -421,13 +478,8 @@ def empty_trash(service):
     Permanently deletes all messages from the trash, after confirmation.
     """
     try:
-        ids = []
         with console.status("[dim]Listing trash…[/]"):
-            request = service.users().messages().list(userId='me', labelIds=['TRASH'], maxResults=500)
-            while request is not None:
-                results = request.execute()
-                ids.extend(message['id'] for message in results.get('messages', []))
-                request = service.users().messages().list_next(request, results)
+            ids = list_trash_ids(service, 'me')
 
         if not ids:
             console.print("[dim]The trash is already empty.[/]")
@@ -478,6 +530,16 @@ def run_batched(service, ids, make_request):
             errors[msg_id] = exc
             debug(f"Gmail request failed for message {msg_id}: {exc}")
     return responses, errors
+
+
+def list_trash_ids(service, user_id):
+    ids = []
+    request = service.users().messages().list(userId=user_id, labelIds=['TRASH'], maxResults=500)
+    while request is not None:
+        results = request.execute()
+        ids.extend(message['id'] for message in results.get('messages', []))
+        request = service.users().messages().list_next(request, results)
+    return ids
 
 
 def delete_messages(service, user_id, ids):
@@ -620,19 +682,42 @@ def column_widths(rows, total_width):
     return sender_w, subject_w, snippet_w if snippet_w >= 10 else 0
 
 
+KEY_HELP = [
+    ("↑↓ j k", "move (PgUp PgDn Home End too)"),
+    ("space", "select / unselect the current email"),
+    ("a", "select / unselect all visible emails"),
+    ("/", "filter by sender or subject"),
+    ("m", "load older emails"),
+    ("p", "preview as PDF, exactly as it would be saved (nothing written to the download folder)"),
+    ("enter", "save PDF + attachments, then move the email to the Gmail trash (recoverable: u)"),
+    ("s", "save PDF + attachments, keep the email in Gmail (recoverable: u)"),
+    ("d", "move to the Gmail trash without saving (recoverable: u, or from Gmail for 30 days)"),
+    ("D", "delete permanently, without going through the trash (cannot be undone)"),
+    ("T", "empty the whole Gmail trash, not only the selection (cannot be undone)"),
+    ("u", "undo the last d, enter or s: restores emails from the trash, removes the files saved"),
+    ("?", "show this help"),
+    ("q", "quit"),
+]
+FOOTER_LINES = 3  # browse / save / delete key groups
+KEY_HELP_NOTE = "Actions apply to the selected emails, or to the current one if none is selected."
+# Actions confirmed by typing a word, because they cannot be undone.
+TYPED_CONFIRM = {"delete": "delete", "empty_trash": "empty"}
+
+
 def new_picker_state():
     """Picker state kept across runs, so cursor, filter and selection survive each action."""
     return {"cursor": 0, "top": 0, "query": "", "filtering": False, "selected": set(), "saved": set(),
-            "loading": False, "exhausted": True, "confirm": None}
+            "loading": False, "exhausted": True, "confirm": None, "help": False}
 
 
-def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=False):
+def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=None):
     """Interactive multi-select list over messages (extended in place when older emails load).
 
     Returns (action, chosen messages) where action is "download" (save + trash), "save",
-    "trash", "delete" (permanent), "preview", "undo" or "quit".
+    "trash", "delete" (permanent), "empty_trash", "preview", "undo" or "quit".
     load_more() returns (older messages sorted oldest first, whether even older ones remain).
     notice is a list of formatted-text lines shown under the header (last action result).
+    undo_label describes what u would undo (e.g. "trash (3)"), None when there is nothing to undo.
     """
     from prompt_toolkit.application import Application, get_app
     from prompt_toolkit.filters import Condition
@@ -644,7 +729,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
 
     rows = [message_row(message) for message in messages]
     state = new_picker_state() if state is None else state
-    state.update(filtering=False, loading=False, confirm=None, exhausted=load_more is None)
+    state.update(filtering=False, loading=False, confirm=None, help=False, exhausted=load_more is None)
     notice = list(notice)
 
     def visible():
@@ -656,7 +741,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
 
     def list_height():
         # Leave room for the startup line above the picker, its own header/footer and the notice.
-        return max(1, min(len(rows), size().rows - 6 - len(notice)))
+        wanted = len(KEY_HELP) + 2 if state["help"] else len(rows)
+        return max(1, min(wanted, size().rows - 6 - (FOOTER_LINES - 1) - len(notice)))
 
     def clamp():
         indexes = visible()
@@ -695,7 +781,15 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
             parts += line
         return parts
 
+    def render_help():
+        lines = [("class:dim", "  " + KEY_HELP_NOTE), ("", "\n")]
+        for key, description in KEY_HELP:
+            lines += [("", "\n"), ("class:key", f"  {key:<8}"), ("", description)]
+        return lines
+
     def render_list():
+        if state["help"]:
+            return render_help()
         indexes = clamp()
         if not indexes:
             return [("class:dim", "   No email matches this filter." if rows else "   No emails left.")]
@@ -729,10 +823,16 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
     def render_footer():
         count = len(state["selected"])
         status = f"{count} selected " if count else ""
-        if state["confirm"] and state["confirm"]["action"] == "delete":
+        rest = []  # footer lines below the first one (key groups only)
+        if state["help"]:
+            hint = [("class:dim", " any key to close help")]
+        elif state["confirm"] and state["confirm"]["action"] in TYPED_CONFIRM:
+            action = state["confirm"]["action"]
             n = len(state["confirm"]["ids"])
-            hint = [("class:error", f" Permanently delete {n} email{'s' * (n != 1)}? Cannot be undone."),
-                    ("class:dim", " Type "), ("class:key", "delete"), ("class:dim", ": "),
+            question = (f" Permanently delete {n} email{'s' * (n != 1)}?" if action == "delete"
+                        else " Permanently delete everything in the Gmail trash?")
+            hint = [("class:error", question + " Cannot be undone."),
+                    ("class:dim", " Type "), ("class:key", TYPED_CONFIRM[action]), ("class:dim", ": "),
                     ("", state["confirm"]["typed"]), ("class:accent", "▏"),
                     ("class:dim", "  enter confirm · esc cancel")]
         elif state["confirm"]:
@@ -743,28 +843,33 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
             hint = [("class:accent", " / "), ("", state["query"]), ("class:accent", "▏"),
                     ("class:dim", "   enter apply · esc clear")]
         else:
-            keys = [("↑↓", "move"), ("a", "all"), ("space", "select"), ("/", "filter")]
+            browse = [("↑↓", "move"), ("space", "select"), ("a", "all"), ("/", "filter")]
             if not state["exhausted"]:
-                keys.append(("m", "loading…" if state["loading"] else "more"))
-            keys += [("p", "preview"), ("enter", "save+trash"), ("s", "save"), ("d", "trash"), ("D", "delete")]
-            if can_undo:
-                keys.append(("u", "undo"))
-            keys.append(("q", "quit"))
-            # Drop the most obvious hints first when the terminal is too narrow.
-            while len(keys) > 6 and sum(cell_len(f" · {key} {label}") for key, label in keys) + cell_len(status) + 2 > size().columns:
-                keys.pop(0)
-            hint = []
-            for key, label in keys:
-                hint += [("class:dim", " · " if hint else " "), ("class:key", key), ("class:dim", f" {label}")]
+                browse.append(("m", "loading…" if state["loading"] else "more"))
+            browse += [("?", "help"), ("q", "quit")]
+            delete = [("d", "trash"), ("D", "delete permanently"), ("T", "empty trash")]
+            if undo_label:
+                delete.append(("u", f"undo {undo_label}"))
+            groups = [("browse", browse), ("save", [("p", "preview"), ("enter", "save+trash"), ("s", "save+keep")]),
+                      ("delete", delete)]
+            lines = []
+            for name, keys in groups:
+                line = [(f"class:group.{name}", f" {name:<7}")]
+                for position, (key, label) in enumerate(keys):
+                    line += [("class:dim", " · " if position else " "), ("class:key", key), ("class:dim", f" {label}")]
+                lines.append(line)
+            hint = lines[0]
+            rest = [part for line in lines[1:] for part in [("", "\n")] + line]
         used = sum(cell_len(text) for _, text in hint)
         gap = max(2, size().columns - used - cell_len(status) - 1)
-        return hint + [("", " " * gap), ("class:checked", status)]
+        return hint + [("", " " * gap), ("class:checked", status)] + rest
 
     filtering = Condition(lambda: state["filtering"])
     confirming = Condition(lambda: bool(state["confirm"]))
     confirming_trash = Condition(lambda: bool(state["confirm"]) and state["confirm"]["action"] == "trash")
-    confirming_delete = Condition(lambda: bool(state["confirm"]) and state["confirm"]["action"] == "delete")
-    browsing = ~filtering & ~confirming
+    confirming_typed = Condition(lambda: bool(state["confirm"]) and state["confirm"]["action"] in TYPED_CONFIRM)
+    helping = Condition(lambda: state["help"])
+    browsing = ~filtering & ~confirming & ~helping
     bindings = KeyBindings()
 
     def move(delta):
@@ -775,10 +880,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
         if ids:
             event.app.exit(result=(action, [message for message in messages if message["id"] in ids]))
 
-    bindings.add("up", filter=~confirming)(lambda event: move(-1))
-    bindings.add("down", filter=~confirming)(lambda event: move(1))
-    bindings.add("pageup", filter=~confirming)(lambda event: move(-list_height()))
-    bindings.add("pagedown", filter=~confirming)(lambda event: move(list_height()))
+    bindings.add("up", filter=~confirming & ~helping)(lambda event: move(-1))
+    bindings.add("down", filter=~confirming & ~helping)(lambda event: move(1))
+    bindings.add("pageup", filter=~confirming & ~helping)(lambda event: move(-list_height()))
+    bindings.add("pagedown", filter=~confirming & ~helping)(lambda event: move(list_height()))
     bindings.add("k", filter=browsing)(lambda event: move(-1))
     bindings.add("j", filter=browsing)(lambda event: move(1))
     bindings.add("home", filter=browsing)(lambda event: move(-len(rows)))
@@ -805,39 +910,51 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
 
     bindings.add("enter", filter=browsing)(lambda event: submit(event, "download", chosen()))
     bindings.add("s", filter=browsing)(lambda event: submit(event, "save", chosen()))
-    bindings.add("p", filter=browsing)(lambda event: submit(event, "preview", {current_id()} - {None}))
+    bindings.add("p", filter=browsing)(lambda event: submit(event, "preview", chosen()))
 
     def ask_confirm(action):
-        ids = chosen()
-        state["confirm"] = {"action": action, "ids": ids, "typed": ""} if ids else None
+        ids = set() if action == "empty_trash" else chosen()
+        state["confirm"] = {"action": action, "ids": ids, "typed": ""} if ids or action == "empty_trash" else None
 
     bindings.add("d", filter=browsing)(lambda event: ask_confirm("trash"))
     bindings.add("D", filter=browsing)(lambda event: ask_confirm("delete"))
+    bindings.add("T", filter=browsing)(lambda event: ask_confirm("empty_trash"))
+
+    @bindings.add("?", filter=browsing)
+    def _(event):
+        state["help"] = True
+
+    @bindings.add("<any>", filter=helping)
+    def _(event):
+        state["help"] = False
 
     bindings.add("y", filter=confirming_trash)(lambda event: submit(event, "trash", state["confirm"]["ids"]))
 
     @bindings.add("<any>", filter=confirming_trash)
-    @bindings.add("escape", filter=confirming_delete)
+    @bindings.add("escape", filter=confirming_typed)
     def _(event):
         state["confirm"] = None
 
-    @bindings.add("enter", filter=confirming_delete)
+    @bindings.add("enter", filter=confirming_typed)
     def _(event):
-        if state["confirm"]["typed"] == "delete":
-            submit(event, "delete", state["confirm"]["ids"])
-        else:
+        action = state["confirm"]["action"]
+        if state["confirm"]["typed"] != TYPED_CONFIRM[action]:
             state["confirm"] = None
+        elif action == "empty_trash":
+            event.app.exit(result=("empty_trash", []))
+        else:
+            submit(event, action, state["confirm"]["ids"])
 
-    @bindings.add("backspace", filter=confirming_delete)
+    @bindings.add("backspace", filter=confirming_typed)
     def _(event):
         state["confirm"]["typed"] = state["confirm"]["typed"][:-1]
 
-    @bindings.add("<any>", filter=confirming_delete)
+    @bindings.add("<any>", filter=confirming_typed)
     def _(event):
         if event.data.isprintable():
             state["confirm"]["typed"] += event.data
 
-    @bindings.add("u", filter=browsing & Condition(lambda: can_undo))
+    @bindings.add("u", filter=browsing & Condition(lambda: bool(undo_label)))
     def _(event):
         event.app.exit(result=("undo", []))
 
@@ -900,6 +1017,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
         "sender": "fg:ansicyan",
         "subject.current": "bold",
         "key": "bold",
+        "group.browse": "fg:ansicyan bold",
+        "group.save": "fg:ansigreen bold",
+        "group.delete": "fg:ansired bold",
         "warn": "fg:ansiyellow bold",
     })
     windows = [Window(FormattedTextControl(render_header), height=1)]
@@ -909,7 +1029,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), can_undo=Fals
         Window(height=1),
         Window(FormattedTextControl(render_list), height=lambda: Dimension.exact(list_height())),
         Window(height=1),
-        Window(FormattedTextControl(render_footer), height=1),
+        Window(FormattedTextControl(render_footer), height=FOOTER_LINES),
     ]
     app = Application(layout=Layout(HSplit(windows)), key_bindings=bindings, style=style, erase_when_done=True)
     app.ttimeoutlen = 0.05
@@ -982,13 +1102,13 @@ def parse_command(answer):
     return "download", answer or ""
 
 
-def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), can_undo=False):
+def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), undo_label=None):
     """Pick emails interactively, or by typed numbers when not attached to a terminal.
 
     Returns (action, messages); see pick_messages for the actions.
     """
     if sys.stdin.isatty() and sys.stdout.isatty():
-        return pick_messages(messages, load_more, state, notice, can_undo)
+        return pick_messages(messages, load_more, state, notice, undo_label)
     if not messages:
         return "quit", []
 
@@ -1031,50 +1151,35 @@ def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(),
         return action, chosen
 
 
-def html_to_text(content):
-    """Rough HTML → readable text, good enough for a terminal preview."""
-    content = re.sub(r"(?is)<(script|style|head)\b.*?</\1\s*>", "", content)
-    content = re.sub(r"(?i)<br\s*/?>|</(p|div|tr|li|h\d|table)\s*>", "\n", content)
-    content = html.unescape(re.sub(r"<[^>]+>", "", content))
-    content = re.sub(r"[ \t\xa0]+", " ", content)
-    return re.sub(r"\n\s*\n+", "\n\n", content).strip()
+def preview_messages(service, user_id, messages, browser, preview_dir):
+    """Render emails exactly as a download would (attachments not written) and open each in the PDF viewer.
 
+    Returns {id: error text} for the ones that failed.
+    """
+    failed = {}
+    with console.status("[dim]Rendering preview…[/]") as status:
+        for number, message in enumerate(messages, start=1):
+            counter = f" {number}/{len(messages)}" if len(messages) > 1 else ""
 
-def message_text(msg):
-    """Body of a parsed email as text: the plain part, else the HTML part converted."""
-    part = msg.get_body(preferencelist=("plain", "html"))
-    if part is None:
-        return "No content found in email."
-    try:
-        content = part.get_content()
-    except Exception:
-        content = (part.get_payload(decode=True) or b"").decode("utf-8", "replace")
-    return html_to_text(content) if part.get_content_type() == "text/html" else content.strip()
+            def on_step(step):
+                status.update(f"[dim]Preview{counter} · {escape(step)}…[/]")
 
-
-def preview_message(service, user_id, message):
-    with console.status("[dim]Loading email…[/]"):
-        raw = service.users().messages().get(userId=user_id, id=message["id"], format="raw").execute()["raw"]
-    msg = BytesParser(policy=policy_default).parse(io.BytesIO(base64.urlsafe_b64decode(raw)))
-    attachments = [
-        part.get_filename() for part in msg.walk()
-        if part.get_filename() and part.get_content_disposition() == "attachment"
-    ]
-    with console.pager():
-        console.print(escape(msg["Subject"] or "No Subject"))
-        for name in ("From", "To", "Cc", "Date"):
-            if msg[name]:
-                console.print(f"{name}: {escape(str(msg[name]))}")
-        if attachments:
-            console.print(f"Attachments: {escape(', '.join(attachments))}")
-        console.print()
-        console.print(escape(message_text(msg)))
+            try:
+                result = save_email_and_attachments(
+                    service, user_id, message["id"], preview_dir, browser, on_step, save_attachments=False
+                )
+            except Exception as exc:
+                failed[message["id"]] = str(exc)
+            else:
+                # Open each one as soon as it is ready instead of waiting for the whole selection.
+                open_quietly(os.path.join(preview_dir, result["pdf"]))
+    return failed
 
 
 def save_messages(service, user_id, messages, save_dir, browser, trash_after):
     """Save emails as PDFs + attachments, then (optionally) trash the saved ones in one batch.
 
-    Returns (saved messages, attachment count, {id: error text}).
+    Returns (saved messages, attachment count, {id: error text}, {id: written file paths}).
     """
     sender_w = min(max(cell_len(sender_name(m.get("from"))) for m in messages), 22)
     results, failed = {}, {}
@@ -1115,7 +1220,8 @@ def save_messages(service, user_id, messages, save_dir, browser, trash_after):
                 failed[msg_id] = f"could not move to trash: {exc}"
 
     saved = [message for message in messages if message["id"] in results]
-    return saved, sum(result["attachments"] for result in results.values()), failed
+    files = {msg_id: result["files"] for msg_id, result in results.items()}
+    return saved, sum(result["attachments"] for result in results.values()), failed, files
 
 
 def plural(count, word):
@@ -1138,21 +1244,27 @@ def interactive_download_main():
     import argparse
 
     parser = argparse.ArgumentParser(
+        prog="savegmail",
         description=(
-            "List available Gmail messages, let the user choose which ones to download as PDFs "
-            "(and move to the Gmail trash), keep as is, or trash without saving."
-        )
+            "Browse Gmail in the terminal: save emails as PDFs (with attachments), move them\n"
+            "to the trash, or delete them permanently. The list comes back after each action."
+        ),
+        epilog="keys (in the list):\n" + "\n".join(
+            [f"  {key:<8}{description}" for key, description in KEY_HELP] + ["", "  " + KEY_HELP_NOTE]
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--query",
         default="",
-        help="Optional Gmail search query used to filter the list (default: none, so all emails). Examples: 'newer_than:30d', 'from:foo', or 'has:attachment'.",
+        help="Gmail search query (default: all emails), e.g. 'newer_than:30d', 'from:foo', 'has:attachment'.",
     )
     parser.add_argument(
         "--max",
         type=int,
         default=50,
-        help="Maximum number of emails to list (default: 50).",
+        metavar="N",
+        help="Emails loaded per page (default: 50); press m in the list for older ones.",
     )
     parser.add_argument(
         "--download-path",
@@ -1163,7 +1275,7 @@ def interactive_download_main():
     parser.add_argument(
         "--trash",
         action="store_true",
-        help="Empty the Gmail trash only. Manual option, not run automatically after downloads.",
+        help="Permanently delete everything in the Gmail trash, after confirmation, then exit.",
     )
     parser.add_argument(
         "--headed",
@@ -1173,7 +1285,7 @@ def interactive_download_main():
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Show token, Chromium, MIME and PDF rendering details.",
+        help="Show sign-in, token, Chromium, MIME and PDF rendering details.",
     )
     args = parser.parse_args()
     global VERBOSE
@@ -1187,7 +1299,17 @@ def interactive_download_main():
 
     console.clear()
     creds = authenticate()
-    playwright = browser = None
+    playwright = browser = preview_dir = None
+
+    def get_browser():
+        """Start Chromium on first use and keep it for the rest of the session."""
+        nonlocal playwright, browser
+        if browser is None:
+            playwright = sync_playwright().start()
+            with console.status("[dim]Preparing Chromium…[/]"):
+                browser = launch_browser(playwright, headed=args.headed)
+        return browser
+
     try:
         service = build("gmail", "v1", credentials=creds)
         user_id = "me"
@@ -1220,30 +1342,59 @@ def interactive_download_main():
             state["selected"] -= ids
 
         state = new_picker_state()
-        notice, last_trashed = [], []
+        notice = []
+        # Last reversible action (d, enter or s): its key-help name, emails to restore from the trash,
+        # files to remove.
+        undo = None
+
+        def undo_text(undo):
+            if not undo:
+                return None
+            count = len({message["id"] for message in undo["trashed"]} | set(undo["files"]))
+            return f"{undo['label']} ({count})"
         totals = {"saved": 0, "trashed": 0, "deleted": 0}
         # Back to the list after every action, until the user quits.
-        while messages or next_page or last_trashed:
+        while messages or next_page or undo:
             action, chosen = ask_user_to_select_messages(
-                messages, load_more if next_page else None, state, notice, bool(last_trashed)
+                messages, load_more if next_page else None, state, notice, undo_text(undo)
             )
-            if action == "quit" or (action != "undo" and not chosen):
+            if action == "quit" or (action not in {"undo", "empty_trash"} and not chosen):
                 break
             ids = {message["id"] for message in chosen}
 
             if action == "preview":
-                preview_message(service, user_id, chosen[0])
+                # Previews live in a session temp dir (never in the download folder), removed on quit.
+                preview_dir = preview_dir or tempfile.mkdtemp(prefix="savegmail-preview-")
+                failed = preview_messages(service, user_id, chosen, get_browser(), preview_dir)
+                if failed:
+                    notice = [[("class:error", " ✗ "), ("", f"Preview failed for {plural(len(failed), 'email')}")]]
+                    notice += failure_notice(chosen, failed)
 
             elif action == "undo":
-                with console.status("[dim]Restoring from trash…[/]"):
-                    errors = untrash_messages(service, user_id, [message["id"] for message in last_trashed])
-                restored = [message for message in last_trashed if message["id"] not in errors]
+                errors = {}
+                if undo["trashed"]:
+                    with console.status("[dim]Restoring from trash…[/]"):
+                        errors = untrash_messages(service, user_id, [message["id"] for message in undo["trashed"]])
+                restored = [message for message in undo["trashed"] if message["id"] not in errors]
                 messages.extend(restored)
                 messages.sort(key=lambda message: message["internalDate"])
-                notice = [[("class:checked", " ↶ "), ("", f"{plural(len(restored), 'email')} restored from trash")]]
-                notice += failure_notice(last_trashed, {msg_id: str(exc) for msg_id, exc in errors.items()})
                 totals["trashed"] -= len(restored)
-                last_trashed = [message for message in last_trashed if message["id"] in errors]
+                # Emails still stuck in the trash keep their files, so a retry of u stays consistent.
+                unsaved = {msg_id: files for msg_id, files in undo["files"].items() if msg_id not in errors}
+                removed = [path for files in unsaved.values() for path in files]
+                remove_files(removed)
+                totals["saved"] -= len(unsaved)
+                state["saved"] -= set(unsaved)
+                parts = []
+                if restored:
+                    parts.append(f"{plural(len(restored), 'email')} restored from trash")
+                if removed:
+                    parts.append(f"{plural(len(removed), 'file')} removed")
+                notice = [[("class:checked", " ↶ "), ("", " · ".join(parts) or "Nothing undone")]]
+                notice += failure_notice(undo["trashed"], {msg_id: str(exc) for msg_id, exc in errors.items()})
+                stuck = [message for message in undo["trashed"] if message["id"] in errors]
+                undo = {"label": undo["label"], "trashed": stuck, "files": {msg_id: undo["files"][msg_id] for msg_id in errors
+                                                    if msg_id in undo["files"]}} if stuck else None
 
             elif action == "trash":
                 with console.status("[dim]Moving to trash…[/]"):
@@ -1251,11 +1402,30 @@ def interactive_download_main():
                 trashed = [message for message in chosen if message["id"] not in errors]
                 drop({message["id"] for message in trashed})
                 if trashed:
-                    last_trashed = trashed
+                    undo = {"label": "trash", "trashed": trashed, "files": {}}
                 totals["trashed"] += len(trashed)
                 notice = [[("class:checked", " ✓ "), ("", f"{plural(len(trashed), 'email')} moved to trash (not saved)"),
                            ("class:dim class:keyhint", " · u undo" if trashed else "")]]
                 notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
+
+            elif action == "empty_trash":
+                try:
+                    with console.status("[dim]Emptying trash…[/]"):
+                        trash_ids = list_trash_ids(service, user_id)
+                        delete_messages(service, user_id, trash_ids)
+                except Exception as exc:
+                    notice = [[("class:error", " ✗ "), ("", "Could not empty the trash"),
+                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
+                else:
+                    # Trashed emails are gone for good: they can't be restored, and their saved files are
+                    # now the only copy, so keep them. Only an undo of s (emails still in Gmail) remains.
+                    if undo:
+                        trashed_ids = {message["id"] for message in undo["trashed"]}
+                        kept = {msg_id: files for msg_id, files in undo["files"].items() if msg_id not in trashed_ids}
+                        undo = {"label": undo["label"], "trashed": [], "files": kept} if kept else None
+                    totals["deleted"] += len(trash_ids)
+                    notice = [[("class:checked", " ✓ "),
+                               ("", f"Trash emptied · {plural(len(trash_ids), 'email')} permanently deleted")]]
 
             elif action == "delete":
                 try:
@@ -1268,30 +1438,33 @@ def interactive_download_main():
                 else:
                     drop(ids)
                     totals["deleted"] += len(ids)
+                    # Saved files of deleted emails are now the only copy: an undo of s must not remove them.
+                    if undo:
+                        kept = {msg_id: files for msg_id, files in undo["files"].items() if msg_id not in ids}
+                        undo = ({"label": undo["label"], "trashed": undo["trashed"], "files": kept}
+                                if kept or undo["trashed"] else None)
                     notice = [[("class:checked", " ✓ "), ("", f"{plural(len(ids), 'email')} permanently deleted")]]
 
             else:
-                if browser is None:
-                    playwright = sync_playwright().start()
-                    with console.status("[dim]Preparing Chromium…[/]"):
-                        browser = launch_browser(playwright, headed=args.headed)
                 trash_after = action == "download"
-                saved, attachments, failed = save_messages(service, user_id, chosen, save_dir, browser, trash_after)
+                saved, attachments, failed, files = save_messages(service, user_id, chosen, save_dir, get_browser(), trash_after)
                 saved_ids = {message["id"] for message in saved}
                 totals["saved"] += len(saved)
                 summary = f"{plural(len(saved), 'PDF')} · {plural(attachments, 'attachment')}"
                 if trash_after:
                     drop(saved_ids)
                     if saved:
-                        last_trashed = saved
+                        undo = {"label": "save+trash", "trashed": saved, "files": files}
                     totals["trashed"] += len(saved)
                     summary += " · moved to trash"
                 else:
                     state["selected"] -= saved_ids
                     state["saved"] |= saved_ids
+                    if saved:
+                        undo = {"label": "save+keep", "trashed": [], "files": files}
                     summary += " · kept in Gmail"
                 notice = [[("class:checked", " ✓ "), ("", summary), ("class:dim", f" → {shown_dir}")]]
-                if trash_after and saved:
+                if saved:
                     notice[0].append(("class:dim class:keyhint", " · u undo"))
                 notice += failure_notice(chosen, failed)
 
@@ -1313,6 +1486,8 @@ def interactive_download_main():
             browser.close()
         if playwright is not None:
             playwright.stop()
+        if preview_dir is not None:
+            shutil.rmtree(preview_dir, ignore_errors=True)
 
 if __name__ == "__main__":
     interactive_download_main()

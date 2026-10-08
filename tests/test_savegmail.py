@@ -1,8 +1,6 @@
-import email
 import os
 import sys
 import unittest
-from email.policy import default as policy_default
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -54,16 +52,6 @@ class TextHelpersTest(unittest.TestCase):
         self.assertEqual(savegmail.fit("ab", 4), "ab  ")
         self.assertEqual(savegmail.fit("abcdef", 4), "abc…")
         self.assertEqual(savegmail.fit("a\n  b", 3), "a b")
-
-    def test_html_to_text(self):
-        text = savegmail.html_to_text("<html><style>p{}</style><p>Hello&nbsp;<b>you</b></p><br>Bye</html>")
-        self.assertEqual(text, "Hello you\n\nBye")
-
-    def test_message_text_prefers_plain(self):
-        msg = email.message.EmailMessage(policy=policy_default)
-        msg.set_content("plain body")
-        msg.add_alternative("<p>html body</p>", subtype="html")
-        self.assertEqual(savegmail.message_text(msg), "plain body")
 
     def test_attachment_flag(self):
         detail = {"id": "1", "payload": {"mimeType": "multipart/mixed", "headers": []}}
@@ -136,15 +124,24 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick("Ddel\x1bq"), ("quit", []))
         self.assertEqual(pick("Ddelx\x7f\x7f\x7f\x7f\x7f\x7fdelete\r"), ("delete", ["0"]))
 
+    def test_empty_trash_needs_typed_confirmation(self):
+        self.assertEqual(pick("Tempty\r"), ("empty_trash", []))
+        self.assertEqual(pick("Tdelete\rq"), ("quit", []))
+
+    def test_help_closes_on_any_key(self):
+        self.assertEqual(pick("?q\r"), ("download", ["0"]))
+        self.assertEqual(pick("?\x1bq"), ("quit", []))
+
     def test_trash_selection(self):
         self.assertEqual(pick("ady"), ("trash", ["0", "1", "2"]))
 
-    def test_preview_uses_cursor_not_selection(self):
-        self.assertEqual(pick(" p"), ("preview", ["1"]))
+    def test_preview_follows_selection(self):
+        self.assertEqual(pick("p"), ("preview", ["0"]))
+        self.assertEqual(pick(" j p"), ("preview", ["0", "2"]))
 
     def test_undo_only_when_available(self):
         self.assertEqual(pick("uq"), ("quit", []))
-        self.assertEqual(pick("u", can_undo=True), ("undo", []))
+        self.assertEqual(pick("u", undo_label="trash (1)"), ("undo", []))
 
     def test_filter(self):
         self.assertEqual(pick("/Subject 2\r\r"), ("download", ["2"]))
