@@ -2,6 +2,8 @@
 
 SaveGmail is a Python script for archiving Gmail messages as PDFs and saving their attachments locally. It uses the Gmail API for email access and Playwright/Chromium for PDF generation.
 
+![SaveGmail in the terminal: Gmail views as tabs, unread counts, a list of emails with sizes, labels and previews, and the key groups](docs/screenshot.svg)
+
 ## Key Features
 
 - Interactive terminal picker: arrow keys, space to select, `/` to filter, `m` to load older emails, `?` for help
@@ -87,20 +89,6 @@ The script lists your Gmail messages (newest first) in an interactive picker, st
 Each view has its own color: its tab is filled with it and the header info (`· 50 emails · newest first`) is written in it, so you always see where you are; it reads like `· 50 emails, 12 unread`. Tabs show the number of unread emails, in white, in every view, except Drafts which shows all drafts in grey (a draft is never unread). Without `--query` they are Gmail's exact counters; All mail and Archived (not labels) and, with `--query`, the filtered views are counted from a search, shown as `1,000+` beyond 1,000.
 
 **Archived** is not a Gmail folder or label: Gmail archives an email by removing it from the Inbox, and it stays in All mail. This view lists those emails (All mail minus Inbox, Sent and Drafts).
-
-```text
- All mail (15)  Inbox (12)  Archived (3)  Starred (2)  Sent  Drafts (1)  Spam  Trash  · 50 of ~1,240 emails, 15 unread · newest first
-
-          Date                Size  From / To       Subject                    Preview
-   ○ ★📎• 12:31              12 MB  Acme Energy     Your October invoice       Invoices · View or downlo…
- ❯ ●      09:14             820 KB  Sent · Paul     Weekend photos             Here are the photos…
-   ○      5 Sep 08:02        20 KB  Draft           Re: roofing quote          OK for Thursday, I'll come…
-   ○      2025-08-31 18:02   48 KB  LinkedIn        Davy shared a post         Social · Last Tuesday was…
-
- browse  space select · a all · A sender · / filter · z by size · m more · r refresh · Tab views · ? help · q quit
- email   p preview · o open in Gmail · * star · ! unread · f folder · e archive · enter save+trash · s save+keep
- delete  d trash · D delete permanently · T empty trash
-```
 
 Actions apply to the selected emails, or to the current one if none is selected. Selected emails hidden by a `/` filter still count: the header and the `d` / `D` confirmations show how many are hidden. Press `?` in the list for the same key help.
 
@@ -231,6 +219,13 @@ The older `HasAttachment` / `HasAttachment/SavedAsPDF` Gmail label workflow is n
 
 ```bash
 .venv/bin/python -m unittest discover -s tests
+```
+
+The README screenshot is generated from the real list with demo emails:
+
+```bash
+.venv/bin/python -m pip install pyte
+.venv/bin/python docs/make_screenshot.py
 ```
 
 ## Contributing
