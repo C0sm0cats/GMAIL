@@ -18,6 +18,7 @@ import re
 import io
 import contextlib
 import shutil
+import time
 import tempfile
 import webbrowser
 from urllib.parse import quote
@@ -567,17 +568,23 @@ def user_labels(service, user_id):
     return {label["id"]: label["name"] for label in labels if label.get("type") == "user"}
 
 
+def current_labels(service, user_id, ids):
+    """{id: labels} as Gmail has them now (read / unread, star, Inbox…)."""
+    details, _ = run_batched(service, list(ids), lambda msg_id:
+                             service.users().messages().get(userId=user_id, id=msg_id, format="minimal",
+                                                            fields="id,labelIds"))
+    return {msg_id: detail["labelIds"] for msg_id, detail in details.items() if "labelIds" in detail}
+
+
 def refresh_labels(service, user_id, messages):
-    """Re-read the labels (read / unread, star, Inbox…) of loaded emails, changed in Gmail meanwhile.
+    """Re-read the labels of loaded emails, changed in Gmail meanwhile.
 
     Updates messages in place; returns how many changed.
     """
-    details, _ = run_batched(service, [message["id"] for message in messages], lambda msg_id:
-                             service.users().messages().get(userId=user_id, id=msg_id, format="minimal",
-                                                            fields="id,labelIds"))
+    fresh = current_labels(service, user_id, [message["id"] for message in messages])
     changed = 0
     for message in messages:
-        labels = details.get(message["id"], {}).get("labelIds")
+        labels = fresh.get(message["id"])
         if labels is not None and set(labels) != set(message.get("labels", [])):
             message["labels"] = labels
             changed += 1
@@ -929,7 +936,7 @@ KEY_HELP = [
     ("Tab", "next view: All mail (everything but spam and trash), Inbox, Archived, Starred, Sent, Drafts, Spam, Trash"),
     ("⇧Tab", "previous view (Shift+Tab)"),
     ("m", "load older emails"),
-    ("r", "refresh from Gmail: new emails, deleted or moved ones, read / unread, stars and labels"),
+    ("r", "sync now; the list already syncs with Gmail on its own: after every action and Tab, and every minute"),
     ("p", "preview as PDF, exactly as it would be saved (nothing written to the download folder); marks as read"),
     ("o", "open the current email in Gmail, in your browser; marks as read"),
     ("*", "star / unstar in Gmail"),
@@ -963,11 +970,15 @@ def new_picker_state():
     return {"cursor": 0, "top": 0, "query": "", "filtering": False, "selected": set(), "saved": set(),
             "loading": False, "exhausted": True, "confirm": None, "help": False,
             "cursor_id": None, "sort": "date",
-            "folder": None}
+            "folder": None,
+            "syncing": False, "sync_note": None}
+
+
+SYNC_INTERVAL = 60  # seconds between automatic syncs while the list is shown
 
 
 def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
-                  views=("All mail",), view=0, badges=None, folder=""):
+                  views=("All mail",), view=0, badges=None, folder="", sync=None):
     """Interactive multi-select list over messages (extended in place when older emails load).
 
     Returns (action, chosen messages) where action is "download" (save + trash), "save",
@@ -977,6 +988,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     badges maps view names to (count text, "unread" | "total") shown in their tab.
     folder is the download folder f starts editing from; the "folder" action leaves the new one in
     state["folder"].
+    sync(loaded) re-reads the view from Gmail in a worker thread and returns {"new", "gone",
+    "labels", "badges", "total"}: it runs in the background when the list shows (after every action
+    and Tab), every SYNC_INTERVAL seconds, and on r. Results are applied in place (messages, badges).
     views are the tab names shown in the header, view the current one; the Trash view swaps
     enter / d (meaningless there) for R restore.
     load_more() returns (older messages sorted newest first, whether even older ones remain).
@@ -1077,6 +1091,11 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             info = fit(info, max(0, room)).rstrip()
         parts.append(("class:view", info))
         parts += filter_parts
+        if state["syncing"]:
+            parts.append(("class:dim", " · ↻"))
+        elif state["sync_note"] and time.monotonic() - state["sync_note"][2] < 10:
+            style, text, _ = state["sync_note"]
+            parts.append((style, f" · {text}"))
         if status:
             gap = max(2, size().columns - sum(cell_len(text) for _, text in parts) - cell_len(status) - 1)
             parts += [("", " " * gap), ("class:checked", status)]
@@ -1209,7 +1228,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                       ("z", "by date" if state["sort"] == "size" else "by size")]
             if not state["exhausted"]:
                 browse.append(("m", "loading…" if state["loading"] else "more"))
-            browse += [("r", "refresh"), ("Tab", "views"), ("?", "help"), ("q", "quit")]
+            browse += [("Tab", "views"), ("?", "help"), ("q", "quit")]
             delete = ([] if in_trash else [("d", "trash")]) + [("D", "delete permanently"), ("T", "empty trash")]
             if undo_label:
                 delete.append(("u", f"undo {undo_label}"))
@@ -1365,9 +1384,62 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     bindings.add("!", filter=browsing)(lambda event: submit(event, "unread", chosen()))
     bindings.add("o", filter=browsing)(lambda event: submit(event, "open", {current_id()} - {None}))
 
+    def apply_sync(result):
+        """Merge a sync result into the list, keeping the cursor on the same email."""
+        nonlocal total
+        current = current_id()
+        gone, fresh = result["gone"], result["labels"]
+        updated = 0
+        for message in messages:
+            labels = fresh.get(message["id"])
+            if labels is not None and set(labels) != set(message.get("labels", [])):
+                message["labels"] = labels
+                updated += 1
+        known = {message["id"] for message in messages}
+        new = [message for message in result["new"] if message["id"] not in known]
+        messages[:] = [message for message in messages if message["id"] not in gone] + new
+        messages.sort(key=lambda message: message["internalDate"], reverse=True)
+        rows[:] = [message_row(message) for message in messages]
+        state["selected"] -= gone
+        if badges is not None:
+            badges.clear()
+            badges.update(result["badges"])
+        total = result["total"]
+        if current:
+            state["cursor"] = next((position for position, index in enumerate(visible())
+                                    if messages[index]["id"] == current), state["cursor"])
+        clamp()
+        parts = [f"{len(new)} new"] * bool(new) + [f"{len(gone)} gone"] * bool(gone)
+        parts += [f"{updated} updated"] * bool(updated)
+        state["sync_note"] = ("class:checked", "↻ " + ", ".join(parts), time.monotonic()) if parts else None
+
+    async def run_sync(app):
+        if sync is None or state["syncing"]:
+            return
+        state["syncing"] = True
+        app.invalidate()
+        snapshot = [{"id": message["id"], "internalDate": message["internalDate"],
+                     "labels": list(message.get("labels", []))} for message in messages]
+        try:
+            result = await asyncio.to_thread(sync, snapshot)
+        except Exception as exc:
+            debug(f"Sync failed: {exc}")
+            state["sync_note"] = ("class:error", "↻ sync failed, retrying", time.monotonic())
+        else:
+            apply_sync(result)
+        finally:
+            state["syncing"] = False
+            app.invalidate()
+
+    async def keep_in_sync(app):
+        # Right away (catches what changed elsewhere since the last look), then every SYNC_INTERVAL.
+        while True:
+            await run_sync(app)
+            await asyncio.sleep(SYNC_INTERVAL)
+
     @bindings.add("r", filter=browsing)
     def _(event):
-        event.app.exit(result=("refresh", []))
+        event.app.create_background_task(run_sync(event.app))
 
     @bindings.add("u", filter=browsing & Condition(lambda: bool(undo_label)))
     def _(event):
@@ -1489,7 +1561,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         state["cursor"] = positions[0]
     discard_pending_keys(app.input)
     # Own thread: Playwright's sync API keeps an event loop running in the main one between actions.
-    result = app.run(in_thread=True) or ("quit", [])
+    result = app.run(in_thread=True, pre_run=lambda: sync and app.create_background_task(keep_in_sync(app))) \
+        or ("quit", [])
     state["cursor_id"] = current_id()
     return result
 
@@ -1560,13 +1633,13 @@ def parse_command(answer):
 
 
 def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
-                                views=("All mail",), view=0, badges=None, folder=""):
+                                views=("All mail",), view=0, badges=None, folder="", sync=None):
     """Pick emails interactively, or by typed numbers when not attached to a terminal.
 
     Returns (action, messages); see pick_messages for the actions.
     """
     if sys.stdin.isatty() and sys.stdout.isatty():
-        return pick_messages(messages, load_more, state, notice, undo_label, total, views, view, badges, folder)
+        return pick_messages(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync)
     if not messages:
         return "quit", []
 
@@ -1868,19 +1941,28 @@ def interactive_download_main():
                 return []
             return [[("class:checked", " ↻ "), ("", " · ".join(parts) or "Up to date")]]
 
-        def moved_emails():
-            """Emails changed place (trash, restore, delete): other views refresh when next shown."""
-            nonlocal badges_stale
-            badges_stale = True
-            for view in views:
-                if view is not views[current] and view["loaded"]:
-                    view["stale"] = True
+        # The background sync runs in a worker thread: it gets its own Gmail connection (the client
+        # is not thread-safe) and only reads, the list applies its result.
+        sync_service = build("gmail", "v1", credentials=creds)
+        view_queries = {view["name"]: view["query"] for view in views}
 
-        def update_badges():
-            nonlocal badges
-            badges = view_badges(service, user_id, {view["name"]: view["query"] for view in views}, bool(args.query))
+        def sync_for(view):
+            def sync(loaded):
+                new, gone = refresh_messages(
+                    sync_service, user_id, view["query"], loaded,
+                    since=view["floor"] if view["more"] else None, in_trash=view["in_trash"],
+                )
+                labels = current_labels(sync_service, user_id, [message["id"] for message in loaded
+                                                                if message["id"] not in gone])
+                total = view["total"]
+                if view["more"]:
+                    total = estimate_total(sync_service, user_id, view["query"], view["in_trash"])
+                    view["total"] = total
+                return {"new": new, "gone": gone, "labels": labels, "total": total,
+                        "badges": view_badges(sync_service, user_id, view_queries, bool(args.query))}
+            return sync
 
-        badges, badges_stale = {}, True
+        badges = {}  # tab counters, filled and kept current by the background sync
         load_view(views[current])
         notice = []
         # Last reversible action (d, enter, s or e): its key-help name, emails to restore from the trash,
@@ -1895,15 +1977,11 @@ def interactive_download_main():
         totals = {"saved": 0, "trashed": 0, "deleted": 0}
         # Back to the list after every action, until the user quits.
         while True:
-            if badges_stale:
-                # Tab counters change when emails move, get starred or arrive (r).
-                update_badges()
-                badges_stale = False
             view = views[current]
             messages, state = view["messages"], view["state"]
             action, chosen = ask_user_to_select_messages(
                 messages, load_more_for(view) if view["more"] else None, state, notice, undo_text(undo),
-                view["total"], [view["name"] for view in views], current, badges, shown_dir,
+                view["total"], [view["name"] for view in views], current, badges, shown_dir, sync_for(view),
             )
             if action == "quit" or (
                 action not in {"undo", "empty_trash", "refresh", "next_view", "prev_view", "folder"} and not chosen
@@ -1935,15 +2013,12 @@ def interactive_download_main():
                 notice = []
                 if not view["loaded"]:
                     load_view(view)
-                elif view["stale"]:
-                    notice = refresh_view(view, quiet=True)
 
             elif action == "preview":
                 # Previews live in a session temp dir (never in the download folder), removed on quit.
                 preview_dir = preview_dir or tempfile.mkdtemp(prefix="savegmail-preview-")
                 failed = preview_messages(service, user_id, chosen, get_browser(), preview_dir)
                 mark_read(service, user_id, [message for message in chosen if message["id"] not in failed])
-                badges_stale = True
                 if failed:
                     notice = [[("class:error", " ✗ "), ("", f"Preview failed for {plural(len(failed), 'email')}")]]
                     notice += failure_notice(chosen, failed)
@@ -1972,7 +2047,6 @@ def interactive_download_main():
                         unarchived = undo["archived"]
                 if restored or unarchived:
                     # Emails go back to whichever views they belong to.
-                    moved_emails()
                     refresh_view(view)
                 parts = []
                 if restored:
@@ -2005,7 +2079,6 @@ def interactive_download_main():
                         message["labels"] = [label for label in message.get("labels", []) if label not in remove] + add
                     if view["name"] in {"Inbox", "Spam", "Archived"}:
                         drop(view, ids)
-                    moved_emails()
                     if action == "archive":
                         undo = {"label": "archive", "trashed": [], "files": {}, "archived": chosen}
                         notice = [[("class:checked", " ✓ "), ("", f"{plural(len(chosen), 'email')} archived"),
@@ -2018,8 +2091,6 @@ def interactive_download_main():
                     errors = untrash_messages(service, user_id, list(ids))
                 restored = [message for message in chosen if message["id"] not in errors]
                 drop(view, {message["id"] for message in restored})
-                if restored:
-                    moved_emails()
                 notice = [[("class:checked", " ↶ "), ("", f"{plural(len(restored), 'email')} restored from trash")]]
                 notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
 
@@ -2030,7 +2101,6 @@ def interactive_download_main():
                 drop(view, {message["id"] for message in trashed})
                 if trashed:
                     undo = {"label": "trash", "trashed": trashed, "files": {}}
-                    moved_emails()
                 totals["trashed"] += len(trashed)
                 notice = [[("class:checked", " ✓ "), ("", f"{plural(len(trashed), 'email')} moved to trash (not saved)"),
                            ("class:dim class:keyhint", " · u undo" if trashed else "")]]
@@ -2040,7 +2110,6 @@ def interactive_download_main():
                 open_quietly(gmail_url(account, chosen[0]["id"]))
                 # Gmail marks it read once shown; do it now so the list and counters agree right away.
                 mark_read(service, user_id, chosen)
-                badges_stale = True
 
             elif action == "unread":
                 # Like star: mark them all unread, unless they all already are, then mark them read.
@@ -2054,12 +2123,10 @@ def interactive_download_main():
                     for message in chosen:
                         labels = [label for label in message.get("labels", []) if label != "UNREAD"]
                         message["labels"] = labels + ["UNREAD"] if unread else labels
-                    badges_stale = True
                     notice = [[("class:checked", " ● " if unread else " ○ "),
                                ("", f"{plural(len(chosen), 'email')} marked as {'unread' if unread else 'read'}")]]
 
             elif action == "star":
-                badges_stale = True
                 # Like Gmail: star them all, unless they all are already starred.
                 star = not all("STARRED" in message.get("labels", []) for message in chosen)
                 try:
@@ -2074,10 +2141,6 @@ def interactive_download_main():
                     notice = [[("class:star", " ★ " if star else " ☆ "),
                                ("", f"{plural(len(chosen), 'email')} {'starred' if star else 'unstarred'}")]]
 
-            elif action == "refresh":
-                notice = refresh_view(view)
-                badges_stale = True
-
             elif action == "empty_trash":
                 try:
                     with console.status("[dim]Emptying trash…[/]"):
@@ -2087,7 +2150,6 @@ def interactive_download_main():
                     notice = [[("class:error", " ✗ "), ("", "Could not empty the trash"),
                                ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
                 else:
-                    moved_emails()
                     if view["in_trash"]:
                         drop(view, {message["id"] for message in messages})
                     # Trashed emails are gone for good: they can't be restored, and their saved files are
@@ -2110,7 +2172,6 @@ def interactive_download_main():
                                ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
                 else:
                     drop(view, ids)
-                    moved_emails()
                     totals["deleted"] += len(ids)
                     # Saved files of deleted emails are now the only copy: an undo of s must not remove them.
                     if undo:
@@ -2127,7 +2188,6 @@ def interactive_download_main():
                 summary = f"{plural(len(saved), 'PDF')} · {plural(attachments, 'attachment')}"
                 if trash_after:
                     drop(view, saved_ids)
-                    moved_emails()
                     if saved:
                         undo = {"label": "save+trash", "trashed": saved, "files": files}
                     totals["trashed"] += len(saved)

@@ -11,9 +11,8 @@ SaveGmail is a Python script for archiving Gmail messages as PDFs and saving the
 - Archive (`e`), like Gmail, undoable
 - Compact, borderless list, newest first, Gmail-style: date and time (time only for today), unread with a blue • and in bold, ★ starred, 📎 attachments, `Draft` / `Sent · <recipient>` instead of yourself as sender, size column (big emails highlighted, `z` sorts by size), Gmail category and your own labels before the snippet
 - Star / unstar (`*`), mark unread / read (`!`), open in Gmail (`o`), select all emails from a sender (`A`)
-- Read state stays in sync with Gmail: `p` and `o` mark as read, `r` picks up what changed in Gmail web or on your phone
+- Stays in sync with Gmail on its own, in the background (after every action and `Tab`, and every minute): new emails, deleted or moved ones, read / unread, stars and labels changed in Gmail web or on your phone; `p` and `o` mark as read
 - Each view has its own color; the header shows how many emails are loaded out of Gmail's estimate, and how many are unread
-- `r` refreshes the list with emails received during the session
 - Session workflow: the list comes back after each action, with its result on top
 - PDF preview of any email, rendered exactly as it would be saved, without saving anything
 - Saves selected emails as PDFs with complete metadata, plus their attachments; inline images are embedded
@@ -102,7 +101,7 @@ Actions apply to the selected emails, or to the current one if none is selected.
 | `Tab` / `Shift+Tab` | Next / previous view: All mail, Inbox, Archived, Starred, Sent, Drafts, Spam, Trash |
 | `/` | Filter by sender, subject, category or label, e.g. `/promo`, `/draft`, `/sent`, `/invoices` (`enter` to apply, `esc` to clear) |
 | `m` | Load older emails (added at the bottom) |
-| `r` | Refresh from Gmail: emails received since, the ones deleted or moved, and read / unread, stars and labels changed elsewhere (Gmail web, phone) |
+| `r` | Sync now. The list already syncs with Gmail on its own, in the background: when it shows (after every action and `Tab`) and every minute. It picks up new emails, deleted or moved ones, and read / unread, stars and labels changed elsewhere (Gmail web, phone) |
 | `p` | Preview as the exact PDFs a download would produce, opened in your PDF viewer (temporary file, nothing saved to the download folder); marks them as read; asks `y` before opening more than 5 |
 | `o` | Open the current email in Gmail, in your browser; marks it as read |
 | `*` | Star / unstar in Gmail (stars all, unless all are already starred) |

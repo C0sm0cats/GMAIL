@@ -28,6 +28,21 @@ def pick(keys, messages=None, **kwargs):
     return action, [message["id"] for message in chosen]
 
 
+def pick_later(keys, messages, delay=0.5, **kwargs):
+    """Like pick, but sends the keys once background work (the sync) had time to run."""
+    import threading
+    import time
+    with create_pipe_input() as pipe:
+        with create_app_session(input=pipe, output=DummyOutput()):
+            def send():
+                for key in keys:
+                    time.sleep(delay)
+                    pipe.send_text(key)
+            threading.Thread(target=send, daemon=True).start()
+            action, chosen = savegmail.pick_messages(messages, **kwargs)
+    return action, [message["id"] for message in chosen]
+
+
 class ParseSelectionTest(unittest.TestCase):
     def test_numbers_ranges_and_all(self):
         self.assertEqual(savegmail.parse_selection("1, 3 5-4", 5), [0, 2, 3, 4])
@@ -437,8 +452,45 @@ class PickerTest(unittest.TestCase):
         pick("f\x15~/Archive\r", state=state, folder="~/GMail/")  # ctrl+u clears
         self.assertEqual(state["folder"], "~/Archive")
 
-    def test_refresh_key(self):
-        self.assertEqual(pick("r"), ("refresh", []))
+    def test_background_sync(self):
+        # When the list shows, it syncs on its own: a new email appears, a deleted one goes,
+        # labels change, counters fill in, and the cursor stays on the same email.
+        messages = make_messages(3)
+        badges = {}
+        calls = []
+
+        def sync(loaded):
+            calls.append([message["id"] for message in loaded])
+            new = {**make_messages(1)[0], "id": "new", "internalDate": 1_800_000_000_000}
+            return {"new": [new], "gone": {"2"}, "labels": {"0": ["INBOX", "STARRED"]}, "total": None,
+                    "badges": {"Inbox": ("4", "unread")}}
+
+        state = savegmail.new_picker_state()
+        state["cursor_id"] = "1"
+        action, ids = pick_later("\r", messages, sync=sync, badges=badges, state=state)
+        self.assertEqual(calls, [["0", "1", "2"]])
+        self.assertEqual([message["id"] for message in messages], ["new", "1", "0"])  # newest first
+        self.assertEqual(next(m for m in messages if m["id"] == "0")["labels"], ["INBOX", "STARRED"])
+        self.assertEqual(badges, {"Inbox": ("4", "unread")})
+        self.assertEqual((action, ids), ("download", ["1"]))
+
+    def test_r_syncs_without_leaving(self):
+        calls = []
+
+        def sync(loaded):
+            calls.append(1)
+            return {"new": [], "gone": set(), "labels": {}, "total": None, "badges": {}}
+
+        self.assertEqual(pick_later("rq", make_messages(2), sync=sync), ("quit", []))
+        self.assertEqual(len(calls), 2)  # once when shown, once for r
+
+    def test_failed_sync_keeps_the_list(self):
+        def sync(loaded):
+            raise RuntimeError("offline")
+
+        messages = make_messages(2)
+        self.assertEqual(pick_later("\r", messages, sync=sync), ("download", ["0"]))
+        self.assertEqual(len(messages), 2)
 
     def test_cursor_follows_email_across_runs(self):
         messages = make_messages(3)
