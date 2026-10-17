@@ -936,7 +936,6 @@ KEY_HELP = [
     ("Tab", "next view: All mail (everything but spam and trash), Inbox, Archived, Starred, Sent, Drafts, Spam, Trash"),
     ("⇧Tab", "previous view (Shift+Tab)"),
     ("m", "load older emails"),
-    ("r", "sync now; the list already syncs with Gmail on its own: after every action and Tab, and every minute"),
     ("p", "preview as PDF, exactly as it would be saved (nothing written to the download folder); marks as read"),
     ("o", "open the current email in Gmail, in your browser; marks as read"),
     ("*", "star / unstar in Gmail"),
@@ -990,7 +989,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     state["folder"].
     sync(loaded) re-reads the view from Gmail in a worker thread and returns {"new", "gone",
     "labels", "badges", "total"}: it runs in the background when the list shows (after every action
-    and Tab), every SYNC_INTERVAL seconds, and on r. Results are applied in place (messages, badges).
+    and Tab) and every SYNC_INTERVAL seconds. Results are applied in place (messages, badges).
     views are the tab names shown in the header, view the current one; the Trash view swaps
     enter / d (meaningless there) for R restore.
     load_more() returns (older messages sorted newest first, whether even older ones remain).
@@ -1436,10 +1435,6 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         while True:
             await run_sync(app)
             await asyncio.sleep(SYNC_INTERVAL)
-
-    @bindings.add("r", filter=browsing)
-    def _(event):
-        event.app.create_background_task(run_sync(event.app))
 
     @bindings.add("u", filter=browsing & Condition(lambda: bool(undo_label)))
     def _(event):

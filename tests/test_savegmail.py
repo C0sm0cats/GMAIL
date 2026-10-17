@@ -474,16 +474,6 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(badges, {"Inbox": ("4", "unread")})
         self.assertEqual((action, ids), ("download", ["1"]))
 
-    def test_r_syncs_without_leaving(self):
-        calls = []
-
-        def sync(loaded):
-            calls.append(1)
-            return {"new": [], "gone": set(), "labels": {}, "total": None, "badges": {}}
-
-        self.assertEqual(pick_later("rq", make_messages(2), sync=sync), ("quit", []))
-        self.assertEqual(len(calls), 2)  # once when shown, once for r
-
     def test_failed_sync_keeps_the_list(self):
         def sync(loaded):
             raise RuntimeError("offline")

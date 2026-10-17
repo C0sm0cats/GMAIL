@@ -101,7 +101,6 @@ Actions apply to the selected emails, or to the current one if none is selected.
 | `Tab` / `Shift+Tab` | Next / previous view: All mail, Inbox, Archived, Starred, Sent, Drafts, Spam, Trash |
 | `/` | Filter by sender, subject, category or label, e.g. `/promo`, `/draft`, `/sent`, `/invoices` (`enter` to apply, `esc` to clear) |
 | `m` | Load older emails (added at the bottom) |
-| `r` | Sync now. The list already syncs with Gmail on its own, in the background: when it shows (after every action and `Tab`) and every minute. It picks up new emails, deleted or moved ones, and read / unread, stars and labels changed elsewhere (Gmail web, phone) |
 | `p` | Preview as the exact PDFs a download would produce, opened in your PDF viewer (temporary file, nothing saved to the download folder); marks them as read; asks `y` before opening more than 5 |
 | `o` | Open the current email in Gmail, in your browser; marks it as read |
 | `*` | Star / unstar in Gmail (stars all, unless all are already starred) |
