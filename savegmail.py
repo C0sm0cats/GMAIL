@@ -4,6 +4,7 @@ import base64
 from playwright.sync_api import sync_playwright
 import asyncio
 from datetime import datetime, timezone
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -1421,6 +1422,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                      "labels": list(message.get("labels", []))} for message in messages]
         try:
             result = await asyncio.to_thread(sync, snapshot)
+        except RefreshError as exc:
+            debug(f"Sync failed: {exc}")
+            state["sync_note"] = ("class:error", "↻ Gmail session expired, quit and relaunch to sign in",
+                                  time.monotonic())
         except Exception as exc:
             debug(f"Sync failed: {exc}")
             state["sync_note"] = ("class:error", "↻ sync failed, retrying", time.monotonic())
@@ -1941,8 +1946,30 @@ def interactive_download_main():
         sync_service = build("gmail", "v1", credentials=creds)
         view_queries = {view["name"]: view["query"] for view in views}
 
+        def reload_session():
+            """Pick up a sign-in done since launch (token.json rewritten); True if the session changed.
+
+            The credentials are updated in place, so the main Gmail connection gets them too.
+            """
+            try:
+                fresh = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
+            except (OSError, ValueError):
+                return False
+            if not fresh.refresh_token or fresh.refresh_token == creds.refresh_token:
+                return False
+            creds.token, creds._refresh_token, creds.expiry = fresh.token, fresh.refresh_token, fresh.expiry
+            return True
+
         def sync_for(view):
             def sync(loaded):
+                try:
+                    return sync_once(loaded)
+                except RefreshError:
+                    if not reload_session():
+                        raise
+                    return sync_once(loaded)
+
+            def sync_once(loaded):
                 new, gone = refresh_messages(
                     sync_service, user_id, view["query"], loaded,
                     since=view["floor"] if view["more"] else None, in_trash=view["in_trash"],
