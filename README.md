@@ -101,6 +101,7 @@ Actions apply to the selected emails, or to the current one if none is selected.
 | `Tab` / `Shift+Tab` | Next / previous view: All mail, Inbox, Archived, Starred, Sent, Drafts, Spam, Trash |
 | `/` | Filter by sender, subject, category or label, e.g. `/promo`, `/draft`, `/sent`, `/invoices` (`enter` to apply, `esc` to clear) |
 | `m` | Load older emails (added at the bottom) |
+| `r` | When the header shows the Gmail session expired: sign in again in your browser; the list syncs again once signed in, no restart needed |
 | `p` | Preview as the exact PDFs a download would produce, opened in your PDF viewer (temporary file, nothing saved to the download folder); marks them as read; asks `y` before opening more than 5 |
 | `o` | Open the current email in Gmail, in your browser; marks it as read |
 | `*` | Star / unstar in Gmail (stars all, unless all are already starred) |
@@ -187,7 +188,7 @@ If any step fails, the files written for that email are removed and the email st
 
 - Verify `credentials.json` exists next to `savegmail.py`
 - Check that Gmail API is enabled in Google Cloud Console
-- An expired or revoked session opens a browser sign-in automatically; if sign-in keeps failing, remove `token.json` and run the script again
+- An expired or revoked session opens a browser sign-in automatically at launch; while the list is open, the header says so and `r` (shown in the footer) signs in again without a restart. If sign-in keeps failing, remove `token.json` and run the script again
 
 ### Download issues
 

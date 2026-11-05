@@ -180,6 +180,22 @@ def sign_in(reason):
     return creds
 
 
+def sign_in_quietly(timeout=300):
+    """Browser OAuth sign-in that prints nothing, for use while the list is on screen."""
+    flow = oauth_flow()
+
+    class SilentBrowser(webbrowser.BaseBrowser):
+        def open(self, url, new=0, autoraise=True):
+            return open_quietly(url)
+
+    webbrowser.register("savegmail-silent", None, SilentBrowser("savegmail-silent"))
+    creds = flow.run_local_server(port=0, browser="savegmail-silent", authorization_prompt_message="",
+                                  success_message=SIGN_IN_SUCCESS_PAGE, timeout_seconds=timeout)
+    with open(TOKEN_PATH, "w") as token:
+        token.write(creds.to_json())
+    return creds
+
+
 def authenticate():
     creds = None
     if os.path.exists(TOKEN_PATH):
@@ -937,6 +953,7 @@ KEY_HELP = [
     ("Tab", "next view: All mail (everything but spam and trash), Inbox, Archived, Starred, Sent, Drafts, Spam, Trash"),
     ("⇧Tab", "previous view (Shift+Tab)"),
     ("m", "load older emails"),
+    ("r", "sign in to Gmail again, in your browser, when the session has expired (shown in the header)"),
     ("p", "preview as PDF, exactly as it would be saved (nothing written to the download folder); marks as read"),
     ("o", "open the current email in Gmail, in your browser; marks as read"),
     ("*", "star / unstar in Gmail"),
@@ -971,14 +988,14 @@ def new_picker_state():
             "loading": False, "exhausted": True, "confirm": None, "help": False,
             "cursor_id": None, "sort": "date",
             "folder": None,
-            "syncing": False, "sync_note": None}
+            "syncing": False, "sync_note": None, "signed_out": False, "signing_in": False}
 
 
 SYNC_INTERVAL = 60  # seconds between automatic syncs while the list is shown
 
 
 def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
-                  views=("All mail",), view=0, badges=None, folder="", sync=None):
+                  views=("All mail",), view=0, badges=None, folder="", sync=None, sign_in=None):
     """Interactive multi-select list over messages (extended in place when older emails load).
 
     Returns (action, chosen messages) where action is "download" (save + trash), "save",
@@ -991,6 +1008,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     sync(loaded) re-reads the view from Gmail in a worker thread and returns {"new", "gone",
     "labels", "badges", "total"}: it runs in the background when the list shows (after every action
     and Tab) and every SYNC_INTERVAL seconds. Results are applied in place (messages, badges).
+    When it fails because the Gmail session expired, r runs sign_in() (browser sign-in, in a worker
+    thread), then syncs again.
     views are the tab names shown in the header, view the current one; the Trash view swaps
     enter / d (meaningless there) for R restore.
     load_more() returns (older messages sorted newest first, whether even older ones remain).
@@ -1091,7 +1110,11 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             info = fit(info, max(0, room)).rstrip()
         parts.append(("class:view", info))
         parts += filter_parts
-        if state["syncing"]:
+        if state["signing_in"]:
+            parts.append(("class:error", " · ↻ sign in to Gmail in your browser…"))
+        elif state["signed_out"]:
+            parts.append(("class:error", " · ↻ Gmail session expired" + ", r to sign in" * bool(sign_in)))
+        elif state["syncing"]:
             parts.append(("class:dim", " · ↻"))
         elif state["sync_note"] and time.monotonic() - state["sync_note"][2] < 10:
             style, text, _ = state["sync_note"]
@@ -1228,6 +1251,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                       ("z", "by date" if state["sort"] == "size" else "by size")]
             if not state["exhausted"]:
                 browse.append(("m", "loading…" if state["loading"] else "more"))
+            if state["signed_out"] and sign_in is not None:
+                browse.append(("r", "signing in…" if state["signing_in"] else "sign in"))
             browse += [("Tab", "views"), ("?", "help"), ("q", "quit")]
             delete = ([] if in_trash else [("d", "trash")]) + [("D", "delete permanently"), ("T", "empty trash")]
             if undo_label:
@@ -1424,12 +1449,12 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             result = await asyncio.to_thread(sync, snapshot)
         except RefreshError as exc:
             debug(f"Sync failed: {exc}")
-            state["sync_note"] = ("class:error", "↻ Gmail session expired, quit and relaunch to sign in",
-                                  time.monotonic())
+            state["signed_out"] = True
         except Exception as exc:
             debug(f"Sync failed: {exc}")
             state["sync_note"] = ("class:error", "↻ sync failed, retrying", time.monotonic())
         else:
+            state["signed_out"] = False
             apply_sync(result)
         finally:
             state["syncing"] = False
@@ -1440,6 +1465,27 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         while True:
             await run_sync(app)
             await asyncio.sleep(SYNC_INTERVAL)
+
+    async def run_sign_in(app):
+        state["signing_in"] = True
+        app.invalidate()
+        try:
+            await asyncio.to_thread(sign_in)
+        except Exception as exc:
+            debug(f"Sign-in failed: {exc}")
+            state["sync_note"] = ("class:error", "↻ sign-in failed, r to try again", time.monotonic())
+        else:
+            state["signed_out"] = False
+        finally:
+            state["signing_in"] = False
+            app.invalidate()
+        if not state["signed_out"]:
+            await run_sync(app)
+
+    @bindings.add("r", filter=browsing & Condition(
+        lambda: sign_in is not None and state["signed_out"] and not state["signing_in"]))
+    def _(event):
+        event.app.create_background_task(run_sign_in(event.app))
 
     @bindings.add("u", filter=browsing & Condition(lambda: bool(undo_label)))
     def _(event):
@@ -1633,13 +1679,14 @@ def parse_command(answer):
 
 
 def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
-                                views=("All mail",), view=0, badges=None, folder="", sync=None):
+                                views=("All mail",), view=0, badges=None, folder="", sync=None, sign_in=None):
     """Pick emails interactively, or by typed numbers when not attached to a terminal.
 
     Returns (action, messages); see pick_messages for the actions.
     """
     if sys.stdin.isatty() and sys.stdout.isatty():
-        return pick_messages(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync)
+        return pick_messages(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync,
+                             sign_in)
     if not messages:
         return "quit", []
 
@@ -1957,8 +2004,14 @@ def interactive_download_main():
                 return False
             if not fresh.refresh_token or fresh.refresh_token == creds.refresh_token:
                 return False
-            creds.token, creds._refresh_token, creds.expiry = fresh.token, fresh.refresh_token, fresh.expiry
+            adopt(fresh)
             return True
+
+        def adopt(fresh):
+            creds.token, creds._refresh_token, creds.expiry = fresh.token, fresh.refresh_token, fresh.expiry
+
+        def sign_in_again():
+            adopt(sign_in_quietly())
 
         def sync_for(view):
             def sync(loaded):
@@ -2004,6 +2057,7 @@ def interactive_download_main():
             action, chosen = ask_user_to_select_messages(
                 messages, load_more_for(view) if view["more"] else None, state, notice, undo_text(undo),
                 view["total"], [view["name"] for view in views], current, badges, shown_dir, sync_for(view),
+                sign_in_again,
             )
             if action == "quit" or (
                 action not in {"undo", "empty_trash", "refresh", "next_view", "prev_view", "folder"} and not chosen

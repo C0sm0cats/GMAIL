@@ -482,6 +482,29 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick_later("\r", messages, sync=sync), ("download", ["0"]))
         self.assertEqual(len(messages), 2)
 
+    def test_expired_session_signs_in_again_with_r(self):
+        # The sync fails on an expired session: r signs in, then the list syncs again on its own.
+        from google.auth.exceptions import RefreshError
+        signed_in = []
+
+        def sync(loaded):
+            if not signed_in:
+                raise RefreshError("invalid_grant")
+            return {"new": [], "gone": {"1"}, "labels": {}, "total": None, "badges": {}}
+
+        messages = make_messages(2)
+        state = savegmail.new_picker_state()
+        action, _ = pick_later("rq", messages, sync=sync, sign_in=lambda: signed_in.append(True), state=state)
+        self.assertEqual(signed_in, [True])
+        self.assertFalse(state["signed_out"])
+        self.assertEqual([message["id"] for message in messages], ["0"])
+        self.assertEqual(action, "quit")
+
+    def test_r_does_nothing_while_signed_in(self):
+        signed_in = []
+        action, _ = pick_later("rq", make_messages(2), sign_in=lambda: signed_in.append(True))
+        self.assertEqual((signed_in, action), ([], "quit"))
+
     def test_cursor_follows_email_across_runs(self):
         messages = make_messages(3)
         state = savegmail.new_picker_state()
