@@ -606,5 +606,160 @@ class PdfFileNameTest(unittest.TestCase):
             self.assertFalse([name for name in os.listdir(save_dir) if name.startswith(".")])
 
 
+class FakeGmail:
+    """Where each email is in a fake Gmail: inbox, archive, trash or gone (permanently deleted)."""
+
+    def __init__(self, places, save_dir, failing_untrash=()):
+        self.places, self.save_dir, self.failing_untrash = dict(places), save_dir, set(failing_untrash)
+
+    def message(self, msg_id):
+        return {"id": msg_id, "from": f"S <{msg_id}@example.com>", "subject": f"Subject {msg_id}",
+                "snippet": "", "internalDate": 1_700_000_000_000, "labels": []}
+
+    def list_candidate_messages(self, service, user_id, query="", max_results=50, page_token=None, in_trash=False):
+        wanted = {"trash"} if in_trash else {"inbox", "archive"}
+        return [self.message(msg_id) for msg_id, place in self.places.items() if place in wanted], None
+
+    def save_messages(self, service, user_id, messages, save_dir, browser, trash_after):
+        files = {}
+        for message in messages:
+            paths = [os.path.join(save_dir, f"{message['id']}.pdf"), os.path.join(save_dir, f"{message['id']}-att.bin")]
+            for path in paths:
+                with open(path, "w") as f:
+                    f.write("saved")
+            files[message["id"]] = paths
+            if trash_after:
+                self.places[message["id"]] = "trash"
+        return list(messages), len(messages), {}, files
+
+    def trash_messages(self, service, user_id, ids):
+        for msg_id in ids:
+            self.places[msg_id] = "trash"
+        return {}
+
+    def untrash_messages(self, service, user_id, ids):
+        errors = {}
+        for msg_id in ids:
+            if msg_id in self.failing_untrash or self.places[msg_id] != "trash":
+                errors[msg_id] = RuntimeError("404 Requested entity was not found.")
+            else:
+                self.places[msg_id] = "inbox"
+        return errors
+
+    def modify_labels(self, service, user_id, ids, add=(), remove=()):
+        for msg_id in ids:
+            if self.places[msg_id] == "gone":
+                raise RuntimeError("404 Requested entity was not found.")
+            if "INBOX" in add:
+                self.places[msg_id] = "inbox"
+            if "INBOX" in remove:
+                self.places[msg_id] = "archive"
+
+    def list_trash_ids(self, service, user_id):
+        return [msg_id for msg_id, place in self.places.items() if place == "trash"]
+
+    def delete_messages(self, service, user_id, ids):
+        for msg_id in ids:
+            self.places[msg_id] = "gone"
+
+
+class FakeUsers:
+    def getProfile(self, userId):
+        return FakeResult({"emailAddress": "me@example.com"})
+
+
+class FakeSessionService:
+    def users(self):
+        return FakeUsers()
+
+
+class FakePlaywright:
+    def start(self):
+        return self
+
+    def stop(self):
+        pass
+
+
+class UndoAfterDeleteTest(unittest.TestCase):
+    """Drives interactive_download_main with a fake Gmail and scripted keys, like s, D, u."""
+
+    def run_session(self, places, steps, failing_untrash=()):
+        """steps: (action, ids); an undo is only pressed when u is offered, as in the list.
+
+        Returns (fake Gmail, files left in the download folder, undo label offered before each step).
+        """
+        import io
+        import tempfile
+        from unittest import mock
+        from rich.console import Console
+        save_dir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, save_dir, True)
+        gmail = FakeGmail(places, save_dir, failing_untrash)
+        steps, offered = list(steps), []
+
+        def ask(messages, load_more, state, notice, undo_label, *rest):
+            offered.append(undo_label)
+            if not steps:
+                return "quit", []
+            action, ids = steps.pop(0)
+            if action == "undo" and undo_label is None:
+                return ask(messages, load_more, state, notice, undo_label, *rest)
+            return action, [gmail.message(msg_id) for msg_id in ids]
+
+        fakes = {name: getattr(gmail, name) for name in [
+            "list_candidate_messages", "save_messages", "trash_messages", "untrash_messages",
+            "modify_labels", "list_trash_ids", "delete_messages"]}
+        with mock.patch.multiple(
+            savegmail, authenticate=lambda: object(), build=lambda *a, **k: FakeSessionService(),
+            user_labels=lambda *a: {}, ask_user_to_select_messages=ask,
+            refresh_messages=lambda *a, **k: ([], set()), refresh_labels=lambda *a: 0,
+            sync_playwright=lambda: FakePlaywright(), launch_browser=lambda *a, **k: mock.Mock(),
+            console=Console(file=io.StringIO()), **fakes,
+        ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir]):
+            savegmail.interactive_download_main()
+        return gmail, sorted(os.listdir(save_dir)), offered
+
+    def test_save_keep_then_delete_keeps_the_only_copy(self):
+        gmail, left, offered = self.run_session({"A": "inbox"}, [("save", ["A"]), ("delete", ["A"]), ("undo", [])])
+        self.assertEqual(left, ["A-att.bin", "A.pdf"])
+        self.assertIsNone(offered[-1])
+
+    def test_save_keep_in_trash_then_empty_trash_keeps_the_only_copy(self):
+        gmail, left, offered = self.run_session({"A": "trash"}, [("save", ["A"]), ("empty_trash", []), ("undo", [])])
+        self.assertEqual(gmail.places["A"], "gone")
+        self.assertEqual(left, ["A-att.bin", "A.pdf"])
+        self.assertIsNone(offered[-1])
+
+    def test_failed_untrash_keeps_files(self):
+        gmail, left, offered = self.run_session({"A": "inbox"}, [("download", ["A"]), ("undo", [])],
+                                                failing_untrash={"A"})
+        self.assertEqual(gmail.places["A"], "trash")
+        self.assertEqual(left, ["A-att.bin", "A.pdf"])
+        self.assertEqual(offered[-1], "save+trash (1)")
+
+    def test_undo_save_trash(self):
+        gmail, left, offered = self.run_session({"A": "inbox"}, [("download", ["A"]), ("undo", [])])
+        self.assertEqual(gmail.places["A"], "inbox")
+        self.assertEqual(left, [])
+        self.assertIsNone(offered[-1])
+
+    def test_no_undo_of_permanently_deleted_emails(self):
+        for first in ["trash", "download"]:
+            with self.subTest(first=first):
+                gmail, left, offered = self.run_session({"A": "inbox"}, [(first, ["A"]), ("delete", ["A"])])
+                self.assertIsNone(offered[-1])
+
+    def test_archive_undo_survives_delete_and_empty_trash(self):
+        gmail, left, offered = self.run_session({"A": "inbox", "X": "trash"},
+                                                [("archive", ["A"]), ("empty_trash", []), ("undo", [])])
+        self.assertEqual(offered[-2], "archive (1)")
+        self.assertEqual(gmail.places, {"A": "inbox", "X": "gone"})
+        gmail, left, offered = self.run_session({"A": "inbox", "B": "inbox"},
+                                                [("archive", ["A", "B"]), ("delete", ["B"]), ("undo", [])])
+        self.assertEqual(offered[-2], "archive (1)")
+        self.assertEqual(gmail.places, {"A": "inbox", "B": "gone"})
+
+
 if __name__ == "__main__":
     unittest.main()

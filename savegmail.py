@@ -2056,6 +2056,20 @@ def interactive_download_main():
                 return None
             count = len({message["id"] for message in undo["trashed"] + undo.get("archived", [])} | set(undo["files"]))
             return f"{undo['label']} ({count})"
+
+        def forget_deleted(undo, deleted):
+            """The undo left once emails are permanently deleted (None if nothing is left).
+
+            They can't be restored or put back in the Inbox, and their saved files are now the only copy,
+            so keep them; the rest of the undo (other emails, an e) still applies.
+            """
+            if not undo:
+                return None
+            trashed = [message for message in undo["trashed"] if message["id"] not in deleted]
+            archived = [message for message in undo.get("archived", []) if message["id"] not in deleted]
+            kept = {msg_id: files for msg_id, files in undo["files"].items() if msg_id not in deleted}
+            return ({"label": undo["label"], "trashed": trashed, "archived": archived, "files": kept}
+                    if trashed or archived or kept else None)
         totals = {"saved": 0, "trashed": 0, "deleted": 0}
         # Back to the list after every action, until the user quits.
         while True:
@@ -2235,12 +2249,9 @@ def interactive_download_main():
                 else:
                     if view["in_trash"]:
                         drop(view, {message["id"] for message in messages})
-                    # Trashed emails are gone for good: they can't be restored, and their saved files are
-                    # now the only copy, so keep them. Only an undo of s (emails still in Gmail) remains.
-                    if undo:
-                        trashed_ids = {message["id"] for message in undo["trashed"]}
-                        kept = {msg_id: files for msg_id, files in undo["files"].items() if msg_id not in trashed_ids}
-                        undo = {"label": undo["label"], "trashed": [], "files": kept} if kept else None
+                    # Everything in the trash is gone for good, including emails saved with s from the Trash.
+                    undo = forget_deleted(undo, set(trash_ids) | {message["id"] for message in undo["trashed"]}
+                                          if undo else set())
                     totals["deleted"] += len(trash_ids)
                     notice = [[("class:checked", " ✓ "),
                                ("", f"Trash emptied · {plural(len(trash_ids), 'email')} permanently deleted")]]
@@ -2256,11 +2267,7 @@ def interactive_download_main():
                 else:
                     drop(view, ids)
                     totals["deleted"] += len(ids)
-                    # Saved files of deleted emails are now the only copy: an undo of s must not remove them.
-                    if undo:
-                        kept = {msg_id: files for msg_id, files in undo["files"].items() if msg_id not in ids}
-                        undo = ({"label": undo["label"], "trashed": undo["trashed"], "files": kept}
-                                if kept or undo["trashed"] else None)
+                    undo = forget_deleted(undo, ids)
                     notice = [[("class:checked", " ✓ "), ("", f"{plural(len(ids), 'email')} permanently deleted")]]
 
             else:
