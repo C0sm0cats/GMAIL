@@ -1767,8 +1767,10 @@ class GmailCallSizeTest(unittest.TestCase):
 class UndoAfterDeleteTest(unittest.TestCase):
     """Drives interactive_download_main with a fake Gmail and scripted keys, like s, D, u."""
 
-    def run_session(self, places, steps, failing_untrash=(), failing=(), api=None, down=None, launch=None):
+    def run_session(self, places, steps, failing_untrash=(), failing=(), api=None, down=None, launch=None,
+                    args=(), gmail_class=None):
         """steps: (action, ids); an undo is only pressed when u is offered, as in the list.
+        ids None: every email the list shows (a then the action).
 
         api: a fake Gmail API (FakeBatchApi) that the real modify_labels and delete_messages call.
         down: (n, exception): once n steps are done, every Gmail call raises it (session expired, offline);
@@ -1783,7 +1785,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
         from rich.console import Console
         save_dir = tempfile.mkdtemp()
         self.addCleanup(__import__("shutil").rmtree, save_dir, True)
-        gmail = FakeGmail(places, save_dir, failing_untrash, failing)
+        gmail = (gmail_class or FakeGmail)(places, save_dir, failing_untrash, failing)
         if api is not None:
             api.gmail = gmail
         steps, offered, self.notices, self.signed_out = list(steps), [], [], []
@@ -1800,6 +1802,8 @@ class UndoAfterDeleteTest(unittest.TestCase):
             action, ids = steps.pop(0)
             if action == "undo" and undo_label is None:
                 return ask(messages, load_more, state, notice, undo_label, *rest)
+            if ids is None:
+                return action, list(messages)
             return action, [gmail.message(msg_id) for msg_id in ids]
 
         fakes = {name: getattr(gmail, name) for name in [
@@ -1820,7 +1824,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
             refresh_messages=lambda *a, **k: ([], set()), refresh_labels=lambda *a: 0,
             sync_playwright=lambda: FakePlaywright(), launch_browser=launch or (lambda *a, **k: mock.Mock()),
             open_quietly=lambda url: True, console=Console(file=io.StringIO()), **fakes,
-        ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir]):
+        ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir, *args]):
             savegmail.interactive_download_main()
         return gmail, sorted(os.listdir(save_dir)), offered
 
@@ -2082,6 +2086,41 @@ class RestoreKeyTest(unittest.TestCase):
         gmail, left, offered = self.run_session({"t0": "trash", "t1": "trash"}, [("restore", ["t1"])])
         self.assertEqual(gmail.places, {"t0": "trash", "t1": "inbox"})
         self.assertEqual(self.notices[1][0], " ↶ 1 email restored from trash")
+
+
+class QueryGmail(FakeGmail):
+    """FakeGmail whose search applies "(from:bank)" like Gmail, and records the query of every list call."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.queries = []
+
+    def message(self, msg_id):
+        sender = "bank" if msg_id.startswith("bank") else "other"
+        return dict(super().message(msg_id), **{"from": f"S <{sender}@example.com>"})
+
+    def list_candidate_messages(self, service, user_id, query="", max_results=50, page_token=None, in_trash=False):
+        self.queries.append(query)
+        found, token = super().list_candidate_messages(service, user_id, query, max_results, page_token, in_trash)
+        if "(from:bank)" in query.split():
+            found = [message for message in found if message["from"] == "S <bank@example.com>"]
+        return found, token
+
+
+class QueryOptionTest(unittest.TestCase):
+    """--query is added to every view's search, so a then enter only takes the emails it matches."""
+
+    run_session = UndoAfterDeleteTest.run_session
+
+    def test_query_filters_every_view_and_the_emails_acted_on(self):
+        places = {"bank1": "inbox", "o1": "inbox", "bank2": "archive", "o2": "archive", "o3": "inbox"}
+        steps = [("download", None)] + [("next_view", [])] * (len(savegmail.VIEWS) - 1)
+        gmail, left, offered = self.run_session(places, steps, args=["--query", "from:bank"], gmail_class=QueryGmail)
+        self.assertEqual(gmail.places, {"bank1": "trash", "o1": "inbox", "bank2": "trash", "o2": "archive",
+                                        "o3": "inbox"})
+        self.assertEqual(left, ["bank1-att.bin", "bank1.pdf", "bank2-att.bin", "bank2.pdf"])
+        self.assertEqual(gmail.queries, ["(from:bank)"] + [f"(from:bank) {view_filter}"
+                                                           for _, view_filter in savegmail.VIEWS[1:]])
 
 
 class TypedSelectionTest(unittest.TestCase):
