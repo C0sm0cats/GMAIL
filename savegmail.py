@@ -416,7 +416,7 @@ def discard_pending_keys(app_input=None):
 
 def remove_files(paths):
     for path in paths:
-        with contextlib.suppress(FileNotFoundError):
+        with contextlib.suppress(FileNotFoundError, ValueError):  # ValueError: path open() refused
             os.remove(path)
 
 
@@ -579,7 +579,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     def clean_filename(filename):
         if not filename:
             return None
-        filename = re.sub(r'[<>:\"/\\|?*]', '_', filename).strip()
+        filename = re.sub(r'[<>:\"/\\|?*\x00-\x1f\x7f]', '_', filename).strip()  # NUL: open() refuses it
         base, ext = os.path.splitext(filename)
         base, ext = truncate_bytes(base, 180), truncate_bytes(ext, 20)
         # Windows silently drops trailing dots/spaces, so the saved name would differ from ours.

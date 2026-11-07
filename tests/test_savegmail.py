@@ -1880,6 +1880,14 @@ class PdfFileNameTest(unittest.TestCase):
             self.assertTrue(all(path.startswith(os.path.join("a", "b") + os.sep) for path in found), found)
             self.assertEqual(len(found), 5)  # 3 PDFs + 2 attachments
 
+    def test_control_chars_in_attachment_name_are_replaced(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as save_dir:
+            result = self.save(save_dir, "Hello", attachment=("a\x00b\x1fc.txt", b"X"))
+            self.assertIn("a_b_c.txt", os.listdir(save_dir))
+            self.assertEqual(self.read(os.path.join(save_dir, "a_b_c.txt")), b"X")
+            self.assertEqual(len(result["files"]), 2)
+
     def test_same_attachment_name_gets_suffix(self):
         import tempfile
         with tempfile.TemporaryDirectory() as save_dir:
