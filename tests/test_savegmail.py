@@ -190,10 +190,47 @@ class TextHelpersTest(unittest.TestCase):
                             for size in (999_499, 999_999, 9_949_999, 9_999_999, 999_499_999, 999_999_999, 9_940_000_000)))
 
     def test_attachment_flag(self):
-        detail = {"id": "1", "payload": {"mimeType": "multipart/mixed", "headers": []}}
-        self.assertTrue(savegmail.to_candidate(detail)["attachment"])
-        detail["payload"]["mimeType"] = "multipart/alternative"
-        self.assertFalse(savegmail.to_candidate(detail)["attachment"])
+        from email.mime.application import MIMEApplication
+        from email.mime.image import MIMEImage
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        def api_part(part):  # a Gmail API payload, as fields=METADATA_FIELDS returns it
+            result = {"mimeType": part.get_content_type(), "filename": part.get_filename() or "",
+                      "headers": [{"name": name, "value": str(value)} for name, value in part.items()]}
+            if part.is_multipart():
+                result["parts"] = [api_part(sub) for sub in part.get_payload()]
+            return result
+
+        def flag(message):
+            return savegmail.to_candidate({"id": "1", "payload": api_part(message)})["attachment"]
+
+        def attached(part, filename=None):
+            part.add_header("Content-Disposition", "attachment", **({"filename": filename} if filename else {}))
+            return part
+
+        def mixed(*parts, subtype="mixed"):
+            message = MIMEMultipart(subtype)
+            for part in parts:
+                message.attach(part)
+            return message
+
+        pdf = attached(MIMEApplication(b"%PDF", "pdf"), "contract.pdf")
+        smime = attached(MIMEApplication(b"sig", "pkcs7-signature"), "smime.p7s")
+        pgp = attached(MIMEApplication(b"sig", "pgp-signature"), "signature.asc")
+        logo = MIMEImage(b"GIF89a", "gif")
+        logo.add_header("Content-ID", "<logo>")
+        logo.add_header("Content-Disposition", "inline", filename="logo.gif")
+        html = mixed(MIMEText("a"), MIMEText("<p>a</p>", "html"), subtype="alternative")
+        self.assertTrue(flag(mixed(MIMEText("hi"), pdf)))
+        self.assertTrue(flag(mixed(mixed(MIMEText("hi"), pdf), smime, subtype="signed")))  # S/MIME
+        self.assertTrue(flag(mixed(mixed(MIMEText("hi"), pdf), pgp, subtype="signed")))  # PGP/MIME
+        self.assertTrue(flag(mixed(MIMEText("scan"), attached(MIMEApplication(b"%PDF", "pdf")))))  # no name
+        self.assertFalse(flag(mixed(MIMEText("hi"), smime, subtype="signed")))  # only the signature
+        self.assertFalse(flag(mixed(html, MIMEText("-- list footer"))))  # Mailman footer
+        self.assertFalse(flag(mixed(html, logo, subtype="related")))  # inline image
+        self.assertFalse(flag(html))
+        self.assertFalse(flag(MIMEText("hi")))
 
 
 class FakeRequest:
@@ -263,7 +300,7 @@ class FakeListService(FakeService):
             response["nextPageToken"] = str(start + maxResults)
         return FakeResult(response)
 
-    def get(self, userId, id, format, metadataHeaders, fields):
+    def get(self, userId, id, format, fields):
         return FakeResult({"id": id, "internalDate": dict(self.mailbox)[id], "payload": {"headers": []}})
 
 

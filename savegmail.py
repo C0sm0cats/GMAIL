@@ -1016,7 +1016,15 @@ def extract_header(headers, name, default=""):
     return default
 
 
-METADATA_FIELDS = "id,threadId,internalDate,labelIds,sizeEstimate,payload(mimeType,headers),snippet"
+# The parts' names and headers, without their bodies, to tell which emails have attachments: the top-level
+# type alone is wrong for signed emails (multipart/signed) and list footers (multipart/mixed, no file).
+PART_FIELDS = "mimeType,filename,headers"
+PARTS_FIELDS = PART_FIELDS
+for _ in range(6):
+    PARTS_FIELDS = f"{PART_FIELDS},parts({PARTS_FIELDS})"
+METADATA_FIELDS = f"id,threadId,internalDate,labelIds,sizeEstimate,payload({PARTS_FIELDS}),snippet"
+# The signature of a signed email (S/MIME, PGP/MIME) comes as a file, but it is not one the sender attached.
+SIGNATURE_TYPES = {"application/pkcs7-signature", "application/x-pkcs7-signature", "application/pgp-signature"}
 # Tab cycles through these views; each is the Gmail search added to --query.
 # Archived is ours, not a Gmail label: archiving only removes INBOX, so it is All mail minus the rest.
 VIEWS = [("All mail", ""), ("Inbox", "in:inbox"), ("Archived", "-in:inbox -in:sent -in:drafts -in:chats"),
@@ -1036,10 +1044,22 @@ def metadata_request(service, user_id, msg_id):
     return service.users().messages().get(
         userId=user_id,
         id=msg_id,
-        format="metadata",
-        metadataHeaders=["Subject", "From", "To", "Date"],
+        format="full",  # metadata has no parts; fields leaves the bodies out
         fields=METADATA_FIELDS,
     )
+
+
+def has_attachment(part):
+    # The same parts as save_email_and_attachments saves (attachment_name, then not an inline image),
+    # read from the Gmail API's parts instead of the raw email.
+    headers = part.get("headers", [])
+    mime_type = part.get("mimeType", "").lower()
+    disposition = extract_header(headers, "Content-Disposition", "").split(";")[0].strip().lower()
+    named = bool(part.get("filename")) or disposition == "attachment"
+    if mime_type.startswith("multipart/") or (mime_type.startswith("message/") and not named):
+        return any(has_attachment(sub) for sub in part.get("parts", []))
+    return (named and (disposition == "attachment" or not extract_header(headers, "Content-ID", ""))
+            and mime_type not in SIGNATURE_TYPES)
 
 
 def to_candidate(detail):
@@ -1053,8 +1073,7 @@ def to_candidate(detail):
         "from": extract_header(headers, "From", ""),
         "subject": extract_header(headers, "Subject", "No Subject"),
         "snippet": detail.get("snippet", ""),
-        # Metadata has no parts; multipart/mixed is how mail clients wrap real attachments.
-        "attachment": payload.get("mimeType") == "multipart/mixed",
+        "attachment": has_attachment(payload),
         "to": extract_header(headers, "To", ""),
         "labels": detail.get("labelIds", []),
         "size": int(detail.get("sizeEstimate", 0)),
