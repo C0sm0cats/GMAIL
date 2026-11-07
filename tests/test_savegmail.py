@@ -631,6 +631,11 @@ class PickerTest(unittest.TestCase):
         # Without the filter, A takes both emails of the sender.
         self.assertEqual(pick("jA\r", messages), ("download", ["1", "3"]))
 
+    def test_unselect(self):
+        # space again unselects the email; a again unselects all, so enter acts on the cursor.
+        self.assertEqual(pick(" k \x1b[B\r"), ("download", ["2"]))
+        self.assertEqual(pick("aa\r"), ("download", ["0"]))
+
     def test_undo_only_when_available(self):
         self.assertEqual(pick("uq"), ("quit", []))
         self.assertEqual(pick("u", undo_label="trash (1)"), ("undo", []))
