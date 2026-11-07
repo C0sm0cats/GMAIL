@@ -624,6 +624,16 @@ class PdfFileNameTest(unittest.TestCase):
             self.assertTrue(all(path.startswith(os.path.join("a", "b") + os.sep) for path in found), found)
             self.assertEqual(len(found), 5)  # 3 PDFs + 2 attachments
 
+    def test_same_attachment_name_gets_suffix(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as save_dir:
+            # Two emails saved one after the other, each with its own invoice.pdf.
+            self.save(save_dir, "March", attachment=("invoice.pdf", b"march"))
+            self.save(save_dir, "April", attachment=("invoice.pdf", b"april"))
+            attachments = {name: self.read(os.path.join(save_dir, name))
+                           for name in os.listdir(save_dir) if name.startswith("invoice")}
+            self.assertEqual(attachments, {"invoice.pdf": b"march", "invoice(1).pdf": b"april"})
+
 
 class FakeGmail:
     """Where each email is in a fake Gmail: inbox, archive, trash or gone (permanently deleted)."""
