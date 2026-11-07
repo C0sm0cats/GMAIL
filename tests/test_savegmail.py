@@ -952,6 +952,98 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick("\r", messages, state=state), ("download", ["1"]))
 
 
+TYPEAHEAD_CHILD = """
+import json, os, sys
+sys.path.insert(0, sys.argv[3])
+sys.path.insert(0, sys.argv[4])
+import savegmail
+from test_savegmail import make_messages
+out, go = int(sys.argv[1]), int(sys.argv[2])
+messages = make_messages(3)
+for run in (messages, messages[1:]):
+    action, chosen = savegmail.ask_user_to_select_messages(run)
+    os.write(out, (json.dumps([action, [m["id"] for m in chosen]]) + "\\n").encode())
+    if run is messages:
+        os.read(go, 1)  # the parent types its keys while this "action" runs
+"""
+
+
+class TypeaheadTest(unittest.TestCase):
+    def test_discard_flushes_terminal_input(self):
+        import termios
+        from unittest import mock
+        stdin = mock.Mock(isatty=lambda: True, fileno=lambda: 7)
+        with mock.patch.object(savegmail.sys, "stdin", stdin), mock.patch.object(termios, "tcflush") as tcflush:
+            savegmail.discard_pending_keys()
+        tcflush.assert_called_once_with(7, termios.TCIFLUSH)
+
+    def test_keys_typed_between_lists_are_ignored(self):
+        """In a real terminal: dy typed while enter's action runs must not trash the next email."""
+        import fcntl
+        import pty
+        import struct
+        import subprocess
+        import termios
+        import threading
+        import time
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+        out_r, out_w = os.pipe()
+        go_r, go_w = os.pipe()
+        tests_dir = os.path.dirname(os.path.abspath(__file__))
+        env = {**os.environ, "TERM": "xterm"}
+        child = subprocess.Popen(
+            [sys.executable, "-c", TYPEAHEAD_CHILD, str(out_w), str(go_r), os.path.dirname(tests_dir), tests_dir],
+            stdin=slave, stdout=slave, stderr=slave, pass_fds=(out_w, go_r), env=env, start_new_session=True)
+        os.close(slave), os.close(out_w), os.close(go_r)
+        screen, lock = bytearray(), threading.Lock()
+
+        def drain():
+            while True:
+                try:
+                    data = os.read(master, 4096)
+                except OSError:
+                    return
+                if not data:
+                    return
+                with lock:
+                    screen.extend(data)
+
+        def wait_for(text, start):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                with lock:
+                    if text in screen[start:]:
+                        return
+                time.sleep(0.05)
+            self.fail(f"{text!r} never shown")
+
+        threading.Thread(target=drain, daemon=True).start()
+        results = os.fdopen(out_r)
+        try:
+            wait_for(b"Subject 2", 0)
+            time.sleep(0.3)
+            os.write(master, b"\r")
+            self.assertEqual(results.readline(), '["download", ["0"]]\n')
+            os.write(master, b"dy")
+            time.sleep(0.5)
+            with lock:
+                start = len(screen)
+            os.write(go_w, b"x")
+            wait_for(b"Subject 2", start)
+            time.sleep(0.5)
+            if child.poll() is None:
+                os.write(master, b"q")
+            self.assertEqual(results.readline(), '["quit", []]\n')
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(10)
+            results.close()
+            os.close(go_w)
+            os.close(master)
+
+
 class FakeRawService:
     def __init__(self, raw):
         self.raw = raw
