@@ -949,6 +949,49 @@ class RecordingBrowser:
         return page
 
 
+class BrowserSandboxTest(unittest.TestCase):
+    def test_chromium_starts_with_its_sandbox(self):
+        from unittest import mock
+        fake = mock.Mock()
+        with mock.patch.object(savegmail, "warn") as warn:
+            browser = savegmail.launch_browser(fake)
+        self.assertIs(browser, fake.chromium.launch.return_value)
+        self.assertEqual(fake.chromium.launch.call_args_list,
+                         [mock.call(channel="chromium", headless=True, chromium_sandbox=True)])
+        warn.assert_not_called()
+
+    def test_chromium_without_usable_sandbox_starts_without_it_and_warns(self):
+        from unittest import mock
+        fake = mock.Mock()
+        unsandboxed = mock.Mock()
+        fake.chromium.launch.side_effect = [
+            savegmail.PlaywrightError("BrowserType.launch: Target page, context or browser has been closed\n"
+                                      "No usable sandbox! ..."),
+            unsandboxed]
+        with mock.patch.object(savegmail, "warn") as warn:
+            browser = savegmail.launch_browser(fake, headed=True)
+        self.assertIs(browser, unsandboxed)
+        self.assertEqual([call.kwargs["chromium_sandbox"] for call in fake.chromium.launch.call_args_list],
+                         [True, False])
+        self.assertTrue(all(call.kwargs["headless"] is False for call in fake.chromium.launch.call_args_list))
+        warn.assert_called_once()
+        self.assertIn("sandbox", warn.call_args.args[0])
+
+    def test_real_chromium_renderers_are_sandboxed(self):
+        from unittest import mock
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as playwright, mock.patch.object(savegmail, "warn") as warn:
+            browser = savegmail.launch_browser(playwright)
+            try:
+                if warn.called:
+                    self.skipTest(f"Chromium's sandbox cannot start here: {warn.call_args.args[0]}")
+                page = browser.new_page()
+                page.goto("chrome://sandbox")
+                self.assertIn("You are adequately sandboxed.", page.inner_text("body"))
+            finally:
+                browser.close()
+
+
 class SenderContentPageTest(unittest.TestCase):
     """Email pages run no sender script and never navigate away from the email."""
 

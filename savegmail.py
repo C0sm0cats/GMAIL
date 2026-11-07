@@ -148,9 +148,25 @@ class BrowserStartError(Exception):
 
 
 def launch_browser(playwright, headed=False):
-    """Launch full Chromium (new headless mode unless headed), installing it if missing."""
+    """Launch full Chromium (new headless mode unless headed), installing it if missing.
+
+    Chromium renders senders' HTML, so it starts with its sandbox (Playwright disables it by default):
+    a renderer flaw then stays confined instead of running code with the user's rights. Where the sandbox
+    cannot start (no user namespaces: some containers, Ubuntu's AppArmor restriction), it starts without.
+    """
+    def launch_once(sandbox):
+        return playwright.chromium.launch(channel="chromium", headless=not headed, chromium_sandbox=sandbox)
+
     def launch():
-        return playwright.chromium.launch(channel="chromium", headless=not headed)
+        try:
+            return launch_once(True)
+        except PlaywrightError as error:
+            if "Executable doesn't exist" in str(error):
+                raise
+            browser = launch_once(False)  # fails the same way when the sandbox was not the cause
+            reason = str(error).strip().splitlines()[0] if str(error).strip() else type(error).__name__
+            warn(f"Chromium's sandbox could not start, emails are rendered without it: {reason}")
+            return browser
 
     try:
         return launch()
