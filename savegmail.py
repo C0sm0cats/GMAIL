@@ -237,19 +237,29 @@ def oauth_flow():
 SIGN_IN_SUCCESS_PAGE = "savegmail: you can close this tab and go back to the terminal."
 
 
+# How long open_quietly waits for xdg-open / open to report that nothing could open the file.
+OPENER_WAIT_SECONDS = 3
+
+
 def open_quietly(url):
     """Open url in the default browser without letting the browser write to our terminal.
 
     Falls back to Python's webbrowser (which honors $BROWSER) when no system opener is usable.
+    Returns False when nothing opened it: no opener, or one that exits with an error (xdg-open with no
+    application for it, no display); an opener still running after a few seconds counts as opened.
     """
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     if sys.platform != "win32" and not os.environ.get("BROWSER") and shutil.which(opener):
         try:
-            subprocess.Popen([opener, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
-            return True
+            process = subprocess.Popen([opener, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, start_new_session=True)
         except OSError:
             pass
+        else:
+            try:
+                return process.wait(timeout=OPENER_WAIT_SECONDS) == 0
+            except subprocess.TimeoutExpired:
+                return True
     return webbrowser.open(url)
 
 
@@ -2269,10 +2279,10 @@ def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(),
 def preview_messages(service, user_id, messages, browser, preview_dir):
     """Render emails exactly as a download would (attachments not written) and open each in the PDF viewer.
 
-    Returns (ids opened, {id: error text} for the ones that failed). Ctrl+C stops after the current one:
-    the emails not rendered are in neither.
+    Returns (ids opened, {id: error text} for the ones that failed, {id: PDF path} for the ones rendered
+    but that no PDF viewer opened). Ctrl+C stops after the current one: the emails not rendered are in none.
     """
-    opened, failed = [], {}
+    opened, failed, unopened = [], {}, {}
     with console.status("[dim]Rendering preview…[/]") as status:
         for number, message in enumerate(messages, start=1):
             counter = f" {number}/{len(messages)}" if len(messages) > 1 else ""
@@ -2290,9 +2300,12 @@ def preview_messages(service, user_id, messages, browser, preview_dir):
                 failed[message["id"]] = str(exc)
             else:
                 # Open each one as soon as it is ready instead of waiting for the whole selection.
-                open_quietly(os.path.join(preview_dir, result["pdf"]))
-                opened.append(message["id"])
-    return opened, failed
+                path = os.path.join(preview_dir, result["pdf"])
+                if open_quietly(path):
+                    opened.append(message["id"])
+                else:
+                    unopened[message["id"]] = path
+    return opened, failed, unopened
 
 
 def save_messages(service, user_id, messages, save_dir, browser, trash_after):
@@ -2722,11 +2735,15 @@ def interactive_download_main():
                 elif action == "preview":
                     # Previews live in a session temp dir (never in the download folder), removed on quit.
                     preview_dir = preview_dir or tempfile.mkdtemp(prefix="savegmail-preview-")
-                    opened, failed = preview_messages(service, user_id, chosen, get_browser(), preview_dir)
+                    opened, failed, unopened = preview_messages(service, user_id, chosen, get_browser(), preview_dir)
                     mark_read(service, user_id, [message for message in chosen if message["id"] in opened])
                     lines = []
-                    if len(opened) + len(failed) < len(chosen):
-                        lines.append(stopped_notice(len(opened) + len(failed), len(chosen)))
+                    done = len(opened) + len(failed) + len(unopened)
+                    if done < len(chosen):
+                        lines.append(stopped_notice(done, len(chosen)))
+                    # Full path, not fitted: it is the only way to read the preview (removed on quit).
+                    lines += [[("class:error", " ✗ "), ("", "No PDF viewer opened"), ("class:dim", " · " + path)]
+                              for path in unopened.values()]
                     if failed:
                         lines.append([("class:error", " ✗ "), ("", f"Preview failed for {plural(len(failed), 'email')}")])
                         lines += failure_notice(chosen, failed)
@@ -2842,9 +2859,12 @@ def interactive_download_main():
                     sign_out_if_expired(*errors.values())
 
                 elif action == "open":
-                    open_quietly(gmail_url(account, chosen[0]["id"]))
-                    # Gmail marks it read once shown; do it now so the list and counters agree right away.
-                    mark_read(service, user_id, chosen)
+                    url = gmail_url(account, chosen[0]["id"])
+                    if open_quietly(url):
+                        # Gmail marks it read once shown; do it now so the list and counters agree right away.
+                        mark_read(service, user_id, chosen)
+                    else:
+                        notice = [[("class:error", " ✗ "), ("", "No browser opened"), ("class:dim", " · " + url)]]
 
                 elif action == "unread":
                     # Like star: mark them all unread, unless they all already are, then mark them read.

@@ -2025,11 +2025,23 @@ class SaveCleanupTest(unittest.TestCase):
                 mock.patch.object(savegmail, "open_quietly") as opened_files, \
                 mock.patch.object(savegmail, "console", savegmail.Console(file=io.StringIO())):
             try:
-                opened, failed = savegmail.preview_messages(None, "me", self.messages, None, preview_dir)
+                opened, failed, unopened = savegmail.preview_messages(None, "me", self.messages, None, preview_dir)
             except KeyboardInterrupt:  # escaping, it would stop the whole test run
                 self.fail("Ctrl+C escaped preview_messages")
-        self.assertEqual((opened, list(failed)), (["a"], ["b"]))
+        self.assertEqual((opened, list(failed), unopened), (["a"], ["b"], {}))
         self.assertEqual(opened_files.call_count, 1)
+
+    def test_preview_that_no_viewer_opens_is_not_counted_opened(self):
+        import io
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as preview_dir, \
+                mock.patch.object(savegmail, "save_email_and_attachments", self.fake_save({})), \
+                mock.patch.object(savegmail, "open_quietly", side_effect=lambda path: not path.endswith("b.pdf")), \
+                mock.patch.object(savegmail, "console", savegmail.Console(file=io.StringIO())):
+            opened, failed, unopened = savegmail.preview_messages(None, "me", self.messages, None, preview_dir)
+        self.assertEqual((opened, failed), (["a", "c", "d"], {}))
+        self.assertEqual(unopened, {"b": os.path.join(preview_dir, "b.pdf")})
 
 
 class FakeGmail:
@@ -2198,7 +2210,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
     """Drives interactive_download_main with a fake Gmail and scripted keys, like s, D, u."""
 
     def run_session(self, places, steps, failing_untrash=(), failing=(), api=None, down=None, launch=None,
-                    args=(), gmail_class=None):
+                    args=(), gmail_class=None, opens=True):
         """steps: (action, ids); an undo is only pressed when u is offered, as in the list.
         ids None: every email the list shows (a then the action).
 
@@ -2206,6 +2218,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
         down: (n, exception): once n steps are done, every Gmail call raises it (session expired, offline);
         self.signed_out holds whether the list offered r to sign in again, before each step.
         launch: replaces launch_browser (default: a new mock browser each time).
+        opens: what open_quietly answers (False: no browser or PDF viewer opened anything).
         ids {"select": [...], "cursor": id}: space on those emails, then the key, which acts on the
         selection, or on the email under the cursor when nothing is selected (like chosen() in the list).
         Returns (fake Gmail, files left in the download folder, undo label offered before each step);
@@ -2276,7 +2289,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
             user_labels=lambda *a: {}, ask_user_to_select_messages=ask,
             refresh_messages=lambda *a, **k: ([], set()), refresh_labels=lambda *a: 0,
             sync_playwright=lambda: FakePlaywright(), launch_browser=launch or (lambda *a, **k: mock.Mock()),
-            open_quietly=lambda url: True, console=Console(file=self.output), **fakes,
+            open_quietly=lambda url: opens, console=Console(file=self.output), **fakes,
         ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir, *args]):
             savegmail.interactive_download_main()
         return gmail, sorted(os.listdir(save_dir)), offered
@@ -3126,9 +3139,9 @@ class LabelKeyTargetsTest(unittest.TestCase):
 
     run_session = UndoAfterDeleteTest.run_session
 
-    def labels_after(self, action):
+    def labels_after(self, action, opens=True):
         gmail, left, offered = self.run_session({"m0": "inbox", "m1": "inbox", "m2": "inbox"}, [(action, ["m1"])],
-                                                api=LabelMailboxApi(), gmail_class=LabelGmail)
+                                                api=LabelMailboxApi(), gmail_class=LabelGmail, opens=opens)
         return gmail
 
     def test_archive_moves_only_the_chosen_email(self):
@@ -3159,11 +3172,52 @@ class LabelKeyTargetsTest(unittest.TestCase):
 
         def preview(service, user_id, messages, browser, preview_dir):
             previewed.extend(message["id"] for message in messages)
-            return [message["id"] for message in messages], {}
+            return [message["id"] for message in messages], {}, {}
         with mock.patch.object(savegmail, "preview_messages", preview):
             gmail = self.labels_after("preview")
         self.assertEqual(previewed, ["m1"])
         self.assertEqual(gmail.labels, {"m0": {"STARRED"}, "m1": set(), "m2": {"UNREAD"}})
+
+    def test_open_that_opens_nothing_keeps_the_email_unread(self):
+        from unittest import mock
+        with mock.patch.object(savegmail, "gmail_url", side_effect=lambda account, msg_id: f"https://gmail/{msg_id}"):
+            gmail = self.labels_after("open", opens=False)
+        self.assertEqual(gmail.labels, {"m0": {"STARRED"}, "m1": {"UNREAD"}, "m2": {"UNREAD"}})
+        self.assertEqual(self.notices[1], [" ✗ No browser opened · https://gmail/m1"])
+
+    def test_preview_that_opens_nothing_keeps_the_email_unread(self):
+        from unittest import mock
+        with mock.patch.object(savegmail, "save_email_and_attachments",
+                               side_effect=lambda service, user_id, msg_id, *rest, **kw: {"pdf": f"{msg_id}.pdf"}):
+            gmail = self.labels_after("preview", opens=False)
+        self.assertEqual(gmail.labels, {"m0": {"STARRED"}, "m1": {"UNREAD"}, "m2": {"UNREAD"}})
+        [line] = self.notices[1]
+        self.assertTrue(line.startswith(" ✗ No PDF viewer opened · /"), line)
+        self.assertTrue(line.endswith(os.sep + "m1.pdf"), line)
+
+
+class OpenQuietlyTest(unittest.TestCase):
+    """open_quietly answers False when the opener exits with an error, as xdg-open does with nothing to open it."""
+
+    def open_with(self, exit_code):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as bin_dir:
+            opener = os.path.join(bin_dir, "xdg-open")  # fake: PATH holds only it, the real one never runs
+            with open(opener, "w") as script:
+                script.write(f"#!/bin/sh\nexit {exit_code}\n")
+            os.chmod(opener, 0o755)
+            environ = {key: value for key, value in os.environ.items() if key != "BROWSER"}
+            with mock.patch.dict(os.environ, dict(environ, PATH=bin_dir), clear=True), \
+                    mock.patch.object(sys, "platform", "linux"), \
+                    mock.patch.object(savegmail.webbrowser, "open", side_effect=AssertionError("fallback used")):
+                return savegmail.open_quietly("/nowhere/file.pdf")
+
+    def test_opener_that_fails_is_not_opened(self):
+        self.assertFalse(self.open_with(3))
+
+    def test_opener_that_succeeds_is_opened(self):
+        self.assertTrue(self.open_with(0))
 
 
 class QueryGmail(FakeGmail):
