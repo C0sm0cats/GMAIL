@@ -1537,11 +1537,16 @@ def column_widths(rows, total_width):
     """Return (sender, subject, snippet) widths for the space left after fixed columns."""
     fixed = 4 + 5 + DATE_W + 2 + SIZE_W + 2  # cursor + checkbox, star + attachment + unread dot, date, size, gaps
     sender_w = min(max((cell_len(row["sender"]) for row in rows), default=6), 22)
+    # Narrow screens: the sender gets shorter (down to 8) before the subject goes under 20.
+    sender_w = min(sender_w, max(8, total_width - fixed - 2 - 1 - 20))
     rest = max(0, total_width - fixed - sender_w - 2 - 1)
     longest_subject = max((cell_len(row["subject"]) for row in rows), default=7)
     subject_w = min(longest_subject, max(20, int(rest * 0.6)), rest)
     snippet_w = rest - subject_w - 2
-    return sender_w, subject_w, snippet_w if snippet_w >= 10 else 0
+    if snippet_w < 10:
+        # Too narrow for a preview: its room goes to the subject rather than staying empty.
+        return sender_w, min(longest_subject, rest), 0
+    return sender_w, subject_w, snippet_w
 
 
 KEY_HELP = [

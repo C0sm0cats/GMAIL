@@ -589,6 +589,21 @@ class PickerTest(unittest.TestCase):
         self.assertIn("          (recipient, for sent ones)", keys)
         self.assertIn("  q esc   quit", keys)
 
+    def test_narrow_list_gives_the_dropped_preview_room_to_the_subject(self):
+        # Too narrow for a preview (80 columns and below): its room goes to the subject, which reaches
+        # the right edge, and a long sender gets shorter before the subject disappears.
+        subject = "Weekend photos from the lake and the mountains"
+        for columns, sender, shown in ((80, "Acme Billing", "Weekend photos from the lake"),
+                                       (60, "A very long sender nam", "Weekend photo")):
+            messages = [dict(message, **{"from": f"{sender} <b@example.com>", "subject": subject})
+                        for message in make_messages(3)]
+            lines = [line for line in screen_after("", columns, 24, messages=messages).split("\n")
+                     if "Weekend" in line]
+            self.assertEqual(len(lines), 3, (columns, lines))
+            for line in lines:
+                self.assertIn(shown, line, (columns, line))
+                self.assertEqual(savegmail.cell_len(line), columns, (columns, line))
+
     def test_narrow_footer_keeps_main_keys_and_typed_input(self):
         # 80×24 (the default terminal) and below: every footer line fits, the save, view, help and
         # quit keys keep their label, and what is typed (D, T, f, /) stays visible with its cursor.
