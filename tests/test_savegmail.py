@@ -95,6 +95,10 @@ class ParseSelectionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             savegmail.parse_selection("x", 3)
 
+    def test_range_past_the_end_is_rejected(self):
+        with self.assertRaises(ValueError):
+            savegmail.parse_selection("2-60", 50)
+
     def test_action_prefix(self):
         self.assertEqual(savegmail.parse_command("d 1,3"), ("trash", "1,3"))
         self.assertEqual(savegmail.parse_command("S all"), ("save", "all"))
