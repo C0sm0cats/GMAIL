@@ -4248,5 +4248,28 @@ class TokenFileModeTest(unittest.TestCase):
         self.assertEqual(timeouts, [300, 7])
 
 
+class GitignoreTest(unittest.TestCase):
+    """A fresh clone never stages the OAuth secrets, the token, the venv or bytecode."""
+
+    def test_add_all_skips_secrets_and_generated_files(self):
+        import shutil
+        import subprocess
+        import tempfile
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        source = os.path.join(repo, ".gitignore")
+        self.assertTrue(os.path.exists(source), "no .gitignore")
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        with tempfile.TemporaryDirectory() as clone:
+            subprocess.run(["git", "init", "-q", clone], check=True, env=env)
+            shutil.copy(source, os.path.join(clone, ".gitignore"))
+            for path in (".venv/bin/python", "__pycache__/x.pyc", "credentials.json", "token.json",
+                         "tests/__pycache__/y.pyc"):
+                os.makedirs(os.path.join(clone, os.path.dirname(path)), exist_ok=True)
+                open(os.path.join(clone, path), "w").close()
+            added = subprocess.run(["git", "add", "-A", "--dry-run"], cwd=clone, env=env, check=True,
+                                   capture_output=True, text=True).stdout
+        self.assertEqual(added.splitlines(), ["add '.gitignore'"])
+
+
 if __name__ == "__main__":
     unittest.main()
