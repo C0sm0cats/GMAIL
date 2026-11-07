@@ -399,6 +399,26 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         # a monospace font keeps those columns aligned, as mail clients show plain text.
         return f'<div style="font-family: monospace;font-size: 10px;white-space: pre-wrap">{plain_text}</div>'
 
+    def body_text(part):
+        # get_content() decodes with the declared charset, ASCII when there is none (every accent
+        # becomes U+FFFD), and raises LookupError on a name Python does not know (unknown-8bit,
+        # x-mac-roman, x-user-defined): the email could then never be saved.
+        data = part.get_payload(decode=True) or b""
+        names = [part.get_content_charset()]
+        if part.get_content_subtype() == 'html':  # an HTML part often declares it in a <meta> only
+            meta = re.search(rb'<meta[^>]*charset\s*=\s*["\']?\s*([A-Za-z0-9_.:-]+)', data[:8192], re.I)
+            names.append(meta and meta.group(1).decode('ascii').lower())
+        for name in filter(None, names):
+            for codec in (name, name[2:]) if name.startswith('x-') else (name,):
+                try:
+                    return data.decode(codec, errors='replace')
+                except LookupError:
+                    continue
+        try:
+            return data.decode('utf-8')
+        except UnicodeDecodeError:
+            return data.decode('cp1252', errors='replace')
+
     def body_parts(part):
         # The text parts a reader sees, in order. get_body() returns only one, but a body can be split
         # around an attachment (Apple Mail) or end with a footer in its own part (mailing lists).
@@ -425,7 +445,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     if len(parts) > 1:
         debug(f"Email body selected: {len(parts)} text parts")
     if parts:
-        segments = [p.get_content() if p.get_content_subtype() == 'html' else plain_to_html(p.get_content())
+        segments = [body_text(p) if p.get_content_subtype() == 'html' else plain_to_html(body_text(p))
                     for p in parts]
         if parts[0].get_content_subtype() == 'html':
             debug("Email body selected: HTML")

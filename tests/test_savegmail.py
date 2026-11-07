@@ -1117,6 +1117,40 @@ class SplitBodyTest(unittest.TestCase):
         self.assertEqual(saved[-2:], ["inline.txt", "notes.txt"])
 
 
+class BodyCharsetTest(unittest.TestCase):
+    """A body without a charset, or with one Python does not know, is still decoded and saved."""
+
+    def render(self, raw):
+        import base64
+        import tempfile
+        browser = ContentRecordingBrowser()
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(
+                FakeRawService(base64.urlsafe_b64encode(raw).decode()), "me", "id1", save_dir, browser)
+        return browser.pages[0].html
+
+    def message(self, content_type, body):
+        return (b"Subject: Commande\r\nContent-Type: " + content_type
+                + b"\r\nContent-Transfer-Encoding: 8bit\r\n\r\n" + body + b"\r\n")
+
+    def test_missing_or_unknown_charset(self):
+        utf8 = "Livrée à Besançon : 129,90 €".encode("utf-8")
+        html_body = self.render(self.message(
+            b"text/html", b'<html><head><meta charset="utf-8"></head><body>' + utf8 + b"</body></html>"))
+        self.assertIn("Livrée à Besançon : 129,90 €", html_body)
+        latin = "Livrée à Besançon".encode("latin-1")
+        html_body = self.render(self.message(
+            b"text/html", b'<html><head><meta http-equiv="Content-Type" content="text/html; '
+                          b'charset=iso-8859-1"></head><body>' + latin + b"</body></html>"))
+        self.assertIn("Livrée à Besançon", html_body)
+        self.assertIn("Livrée à Besançon : 129,90 €", self.render(self.message(b"text/plain", utf8)))
+        self.assertIn("Café", self.render(self.message(b"text/plain; charset=unknown-8bit", "Café".encode())))
+        self.assertIn("Café", self.render(self.message(b"text/plain; charset=x-mac-roman", b"Caf\x8e")))
+        self.assertIn("Café", self.render(self.message(b"text/plain; charset=x-user-defined", b"Caf\xe9")))
+        # A declared charset that Python knows is still the one used.
+        self.assertIn("Café", self.render(self.message(b"text/plain; charset=iso-8859-1", b"Caf\xe9")))
+
+
 class PdfFileNameTest(unittest.TestCase):
     """The rendered PDF never overwrites or deletes a file the program did not create."""
 
