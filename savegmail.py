@@ -275,9 +275,16 @@ def sign_in_quietly(timeout=300):
     webbrowser.register("savegmail-silent", None, SilentBrowser("savegmail-silent"))
     creds = flow.run_local_server(port=0, browser="savegmail-silent", authorization_prompt_message="",
                                   success_message=SIGN_IN_SUCCESS_PAGE, timeout_seconds=timeout)
-    with open(TOKEN_PATH, "w") as token:
-        token.write(creds.to_json())
+    save_token(creds)
     return creds
+
+
+def save_token(creds):
+    """Write token.json readable by the owner only: it grants full access to the mailbox."""
+    fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as token:
+        os.fchmod(fd, 0o600)  # a token.json written by an older version keeps its mode otherwise
+        token.write(creds.to_json())
 
 
 def exit_unreachable(error):
@@ -307,8 +314,7 @@ def authenticate():
                 creds = sign_in(reason)
         else:
             creds = sign_in("Sign in to Gmail in your browser.")
-        with open(TOKEN_PATH, "w") as token:
-            token.write(creds.to_json())
+        save_token(creds)
     return creds
 
 def truncate_bytes(text, limit):

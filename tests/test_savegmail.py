@@ -3236,5 +3236,40 @@ class AuthenticateTest(unittest.TestCase):
         self.assertIn("Sign-in cancelled", self.output.getvalue())
 
 
+class TokenFileModeTest(unittest.TestCase):
+    class FakeCreds:
+        def to_json(self):
+            return '{"refresh_token": "fake"}'
+
+    class FakeFlow:
+        def run_local_server(self, **kwargs):
+            return TokenFileModeTest.FakeCreds()
+
+    def test_token_file_is_owner_only(self):
+        import stat
+        import tempfile
+        from unittest import mock
+        old_umask = os.umask(0o022)
+        try:
+            with tempfile.TemporaryDirectory() as folder, \
+                    mock.patch.object(savegmail, "oauth_flow", lambda: self.FakeFlow()), \
+                    mock.patch.object(savegmail, "sign_in", lambda reason: self.FakeCreds()):
+                for name, sign_in, existing in [("quiet.json", savegmail.sign_in_quietly, False),
+                                                ("launch.json", savegmail.authenticate, False),
+                                                ("old.json", savegmail.sign_in_quietly, True)]:
+                    path = os.path.join(folder, name)
+                    if existing:  # token.json written by an older version, readable by everyone
+                        with open(path, "w"):
+                            pass
+                        os.chmod(path, 0o644)
+                    with mock.patch.object(savegmail, "TOKEN_PATH", path):
+                        sign_in()
+                    self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600, name)
+                    with open(path) as token:
+                        self.assertEqual(token.read(), '{"refresh_token": "fake"}')
+        finally:
+            os.umask(old_umask)
+
+
 if __name__ == "__main__":
     unittest.main()
