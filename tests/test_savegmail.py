@@ -227,6 +227,33 @@ class RefreshTest(unittest.TestCase):
         self.assertEqual(service.sizes, [])  # z and y are older than the loaded range: no metadata fetched
 
 
+class ListCandidatesTest(unittest.TestCase):
+    """list_candidate_messages: first page, token for m, and Gmail pages of at most 500."""
+
+    def mailbox(self, count):
+        return [(f"m{i}", count - i) for i in range(count)]  # newest first
+
+    def ids(self, messages):
+        return [message["id"] for message in messages]
+
+    def test_first_page_leaves_a_token_for_m(self):
+        service = FakeListService(self.mailbox(120))
+        messages, token = savegmail.list_candidate_messages(service, "me", max_results=50)
+        self.assertEqual(self.ids(messages), [f"m{i}" for i in range(50)])
+        self.assertIsNotNone(token)
+        older, token = savegmail.list_candidate_messages(service, "me", max_results=50, page_token=token)
+        self.assertEqual(self.ids(older), [f"m{i}" for i in range(50, 100)])
+        self.assertIsNotNone(token)
+        last, token = savegmail.list_candidate_messages(service, "me", max_results=50, page_token=token)
+        self.assertEqual((self.ids(last), token), ([f"m{i}" for i in range(100, 120)], None))
+
+    def test_more_than_one_gmail_page_has_no_duplicates(self):
+        service = FakeListService(self.mailbox(1200))
+        messages, token = savegmail.list_candidate_messages(service, "me", max_results=600)
+        self.assertEqual(self.ids(messages), [f"m{i}" for i in range(600)])
+        self.assertEqual(token, "600")
+
+
 class FakeBadgeService(FakeService):
     def __init__(self, matches=1):
         super().__init__()
