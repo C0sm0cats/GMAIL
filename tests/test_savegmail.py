@@ -108,6 +108,32 @@ class TextHelpersTest(unittest.TestCase):
         self.assertEqual(savegmail.fit("abcdef", 4), "abc…")
         self.assertEqual(savegmail.fit("a\n  b", 3), "a b")
 
+    def test_sender_text_writes_no_terminal_sequence(self):
+        """Subject, sender and --verbose lines never pass a sender's raw escape sequences to the terminal."""
+        import io
+        from unittest import mock
+        seq = "\x1b]52;c;ZWNobyBwd25lZA==\x1b\\ \x1b]0;FAKE\x1b\\ \x1b[8mhidden\x1b[0m"
+        message = {"id": "e1", "from": f'"Eve{seq}" <eve@x.test>', "subject": f"Invoice {seq}",
+                   "snippet": "", "internalDate": 1_700_000_000_000}
+
+        def fake_save(service, user_id, msg_id, save_dir, browser, on_step, **kwargs):
+            on_step("rendering")
+            savegmail.debug(f"No mapping found for CID: {seq}")
+            return {"files": [], "attachments": 0}
+
+        out = io.StringIO()
+        console = savegmail.Console(file=out, force_terminal=True, highlight=False, width=200)
+        with mock.patch.object(savegmail, "console", console), mock.patch.object(savegmail, "VERBOSE", True), \
+                mock.patch.object(savegmail, "save_email_and_attachments", fake_save), \
+                mock.patch.object(sys.stdin, "isatty", lambda: False), \
+                mock.patch("builtins.input", side_effect=EOFError):
+            savegmail.save_messages(None, "me", [message], "", None, False)
+            notice = savegmail.failure_notice([message], {"e1": f"failed {seq}"})
+            savegmail.ask_user_to_select_messages([message], notice=notice)
+        for sequence in ("\x1b]52;", "\x1b]0;", "\x1b[8m"):
+            self.assertNotIn(sequence, out.getvalue())
+        self.assertIn("Invoice �]52;c;", savegmail.fit(message["subject"], 40))
+
     def test_emoji_sequences_have_one_width_for_list_and_terminal(self):
         from prompt_toolkit.utils import get_cwidth
         text = "✈️ ⚠️ 🇫🇷 Météo ☀️ 👨‍👩‍👧 👍🏽 ❤️"

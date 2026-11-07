@@ -44,9 +44,18 @@ ACCOUNT = None  # signed-in address, so emails sent to yourself show "Sent · me
 USER_LABELS = {}  # your own Gmail label ids -> names, shown and filterable like categories
 
 
+# C0/C1 control characters: a sender's subject, name, attachment name or Content-ID could otherwise
+# write raw terminal sequences (clipboard via OSC 52, window title, hidden text). Shown as �.
+CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def strip_controls(text):
+    return CONTROL_CHARS.sub("\ufffd", text)
+
+
 def debug(message):
     if VERBOSE:
-        console.print(f"[dim]  {escape(message)}[/]")
+        console.print(f"[dim]  {escape(strip_controls(message))}[/]")
 
 
 def warn(message):
@@ -1091,7 +1100,7 @@ def estimate_total(service, user_id, query="", in_trash=False):
 
 def fit(value, width):
     """Collapse whitespace, then truncate/pad to a visible terminal width."""
-    value = re.sub(r"\s+", " ", value or "").strip()
+    value = strip_controls(re.sub(r"\s+", " ", value or "").strip())
     if width <= 0:
         return ""
     if cell_len(value) <= width:
