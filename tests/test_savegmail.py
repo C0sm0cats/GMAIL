@@ -437,6 +437,37 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick("s", **trash), ("save", ["0"]))
         self.assertEqual(pick("Rq"), ("quit", []))  # R only in Trash
 
+    def test_enter_in_trash_says_why(self):
+        state = savegmail.new_picker_state()
+        self.assertEqual(pick("\rq", views=("All mail", "Trash"), view=1, state=state), ("quit", []))
+        self.assertEqual(state["sync_note"][1], "enter is off in Trash · s save, R restore")
+
+    def test_full_header_keeps_selection_sync_and_current_tab(self):
+        # 8 tabs with counters, a filter, an expired session and 2 selected emails: from 80 to 140
+        # columns the line fits, and keeps the current tab, the filter, the session and the selection.
+        badges = {"All mail": ("1,000+", "unread"), "Inbox": ("1,000+", "unread"), "Archived": ("107", "unread"),
+                  "Spam": ("25", "unread"), "Trash": ("14", "unread")}
+        tail = [("class:dim", " · 1 match "), ("class:accent", "news"),
+                ("class:error", " · ↻ Gmail session expired, r to sign in")]
+        infos = (" · 8 of ~1,240 emails, 312 unread · newest first", " · 8 of ~1,240 emails, 312 unread",
+                 " · 8 of ~1,240 emails")
+        for view in (0, 7):
+            tabs = [(name, *badges.get(name, (None, "total"))) for name, _ in savegmail.VIEWS]
+            current = tabs[view][0]
+            for columns in (80, 100, 120, 140):
+                line = "".join(text for _, text in savegmail.header_line(tabs, view, infos, tail, "2 selected ", columns))
+                self.assertLessEqual(savegmail.cell_len(line), columns - 1, (columns, line))
+                for part in (f" {current} ", "1 match news",
+                             "↻ Gmail session expired, r to sign in", "2 selected"):
+                    self.assertIn(part, line, (columns, line))
+                if columns >= 120:
+                    self.assertIn(f" {current} ({badges[current][0]}) ", line, (columns, line))
+        # With room to spare, nothing is shortened.
+        tabs = [(name, *badges.get(name, (None, "total"))) for name, _ in savegmail.VIEWS]
+        line = "".join(text for _, text in savegmail.header_line(tabs, 0, infos, [], "", 200))
+        self.assertIn(" Inbox (1,000+) ", line)
+        self.assertIn("newest first", line)
+
     def test_sort_by_size(self):
         messages = make_messages(3)
         for message, size in zip(messages, (10, 30, 20)):

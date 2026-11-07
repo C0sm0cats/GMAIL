@@ -873,6 +873,45 @@ def fit(value, width):
     return "".join(kept) + "…" + " " * (width - 1 - used)
 
 
+def header_line(tabs, view, infos, tail, status, columns):
+    """Fit the picker's one-line header into columns.
+
+    tabs are (name, counter text or None, style) per view, view the current one; infos the view info
+    from longest to shortest; tail the filter and sync / sign-in fragments; status the selection
+    text, written at the right edge. tail and status always stay. When the line is full, the info
+    gets shorter first, then the other tabs lose their counters, get abbreviated, and finally only
+    the current tab is left, then without its counter; the info is cut last.
+    """
+    width = columns - 1 - sum(cell_len(text) for _, text in tail) - (cell_len(status) + 2 if status else 0)
+
+    def tab_parts(level):
+        parts = []
+        for position, (name, text, style) in enumerate(tabs):
+            if position == view:
+                parts.append((style, f" {name} ({text}) " if text and level < 4 else f" {name} "))
+            elif level == 0:
+                parts.append((style, f" {name} ({text}) " if text else f" {name} "))
+            elif level == 1:
+                parts.append((style, f" {name} "))
+            elif level == 2:
+                parts.append((style, f" {name.split()[0][:3]} "))
+        return parts
+
+    for level in range(5):
+        parts = tab_parts(level)
+        room = width - sum(cell_len(text) for _, text in parts)
+        if cell_len(infos[-1]) <= room:
+            info = next(info for info in infos if cell_len(info) <= room)
+            break
+    else:
+        info = fit(infos[-1], max(0, room)).rstrip()
+    parts = parts + [("class:view", info)] + list(tail)
+    if status:
+        gap = max(2, columns - sum(cell_len(text) for _, text in parts) - cell_len(status) - 1)
+        parts += [("", " " * gap), ("class:checked", status)]
+    return parts
+
+
 def sender_name(sender):
     name, address = parseaddr(sender or "")
     return name.strip().strip('"') or address or "—"
@@ -1133,46 +1172,34 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         text, kind = (badges or {}).get(views[view], (None, None))
         unread = text if kind == "unread" else sum(row["unread"] for row in rows)
         full_count = f"{count}, {unread} unread" if unread else count
-        parts = []
+        tabs = []
         for position, name in enumerate(views):
             text, kind = (badges or {}).get(name, (None, None))
-            label = f" {name} ({text}) " if text else f" {name} "
             style = "class:tab.current" if position == view else "class:tab.badge" if kind == "unread" else "class:tab"
-            parts.append((style, label))
+            tabs.append((name, text, style))
         order = "largest first" if state["sort"] == "size" else "newest first"
-        filter_parts = []
+        tail = []
         if state["query"]:
-            filter_parts = [("class:dim", f" · {len(indexes)} match "), ("class:accent", state["query"])]
+            tail = [("class:dim", f" · {len(indexes)} match "), ("class:accent", state["query"])]
+        if state["signing_in"]:
+            tail.append(("class:error", " · ↻ sign in to Gmail in your browser…"))
+        elif state["signed_out"]:
+            tail.append(("class:error", " · ↻ Gmail session expired" + ", r to sign in" * bool(sign_in)))
+        elif state["syncing"]:
+            tail.append(("class:dim", " · ↻"))
+        elif state["sync_note"] and time.monotonic() - state["sync_note"][2] < 10:
+            style, text, _ = state["sync_note"]
+            tail.append((style, f" · {text}"))
         selected = len(state["selected"])
         status = ""
         if selected:
             status = f"{selected} selected "
             if hidden(state["selected"]):
                 status = f"{selected} selected · {hidden(state['selected'])} hidden by the filter "
-        # The selection count and the filter matter more than the view info: when the line is full,
-        # the info gets shorter (sort order first, then the unread part), then cut.
-        room = (size().columns - 1 - sum(cell_len(text) for _, text in parts + filter_parts)
-                - (cell_len(status) + 2 if status else 0))
-        for info in (f" · {full_count} · {order}", f" · {full_count}", f" · {count}"):
-            if cell_len(info) <= room:
-                break
-        else:
-            info = fit(info, max(0, room)).rstrip()
-        parts.append(("class:view", info))
-        parts += filter_parts
-        if state["signing_in"]:
-            parts.append(("class:error", " · ↻ sign in to Gmail in your browser…"))
-        elif state["signed_out"]:
-            parts.append(("class:error", " · ↻ Gmail session expired" + ", r to sign in" * bool(sign_in)))
-        elif state["syncing"]:
-            parts.append(("class:dim", " · ↻"))
-        elif state["sync_note"] and time.monotonic() - state["sync_note"][2] < 10:
-            style, text, _ = state["sync_note"]
-            parts.append((style, f" · {text}"))
-        if status:
-            gap = max(2, size().columns - sum(cell_len(text) for _, text in parts) - cell_len(status) - 1)
-            parts += [("", " " * gap), ("class:checked", status)]
-        return parts
+        # The selection count, the filter and the sync / sign-in state always show: the tabs and
+        # the view info make room for them (see header_line).
+        infos = (f" · {full_count} · {order}", f" · {full_count}", f" · {count}")
+        return header_line(tabs, view, infos, tail, status, size().columns)
 
     def render_notice():
         parts = []
@@ -1396,6 +1423,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     not_trash = Condition(lambda: not in_trash)
     bindings.add("enter", filter=browsing & not_trash)(lambda event: submit(event, "download", chosen()))
+
+    @bindings.add("enter", filter=browsing & ~not_trash)
+    def _(event):
+        state["sync_note"] = ("class:error", "enter is off in Trash · s save, R restore", time.monotonic())
     bindings.add("R", filter=browsing & ~not_trash)(lambda event: submit(event, "restore", chosen()))
     bindings.add("R", filter=browsing & Condition(lambda: in_spam))(lambda event: submit(event, "not_spam", chosen()))
     bindings.add("R", filter=browsing & Condition(lambda: in_archived))(lambda event: submit(event, "unarchive", chosen()))
