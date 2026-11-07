@@ -1305,6 +1305,68 @@ class PdfFileNameTest(unittest.TestCase):
             self.assertEqual(inner_pdf.get_content(), b"%PDF-INNER")
 
 
+class AttachmentPartTest(unittest.TestCase):
+    """Which parts of an email are files written next to its PDF."""
+
+    def save(self, msg, save_attachments=True):
+        import base64
+        import tempfile
+        from unittest import mock
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        with tempfile.TemporaryDirectory() as save_dir, \
+                mock.patch.object(savegmail, "measure_pdf_margins", return_value={}):
+            result = savegmail.save_email_and_attachments(
+                FakeRawService(raw), "me", "id1", save_dir, FakePdfBrowser(), save_attachments=save_attachments)
+            files = {}
+            for name in os.listdir(save_dir):
+                if name != result["pdf"]:
+                    with open(os.path.join(save_dir, name), "rb") as f:
+                        files[name] = f.read()
+            return result, files
+
+    def email(self):
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["Subject"] = "Scan"
+        msg["From"] = "Sender <s@example.com>"
+        msg.set_content("See attached.")
+        return msg
+
+    def test_named_attachment_inline_or_without_disposition_is_saved(self):
+        for disposition in ("attachment", "inline", None):
+            with self.subTest(disposition=disposition):
+                msg = self.email()
+                msg.add_attachment(b"%PDF-CONTRACT", maintype="application", subtype="pdf",
+                                   filename="contrat.pdf", disposition=disposition or "attachment")
+                part = list(msg.iter_parts())[-1]
+                if disposition is None:  # only `Content-Type: …; name=` (older clients, generated mail)
+                    del part["Content-Disposition"]
+                    part.set_param("name", "contrat.pdf")
+                result, files = self.save(msg)
+                self.assertEqual(result["attachments"], 1)
+                self.assertEqual(files, {"contrat.pdf": b"%PDF-CONTRACT"})
+
+    def test_attachment_without_name_is_saved(self):
+        from email.message import EmailMessage
+        inner = EmailMessage()
+        inner["Subject"] = "Original"
+        inner.set_content("inner body")
+        inner.add_attachment(b"%PDF-INNER", maintype="application", subtype="pdf", filename="inner.pdf")
+        msg = self.email()
+        msg.add_attachment(b"%PDF-SCAN", maintype="application", subtype="pdf")
+        msg.add_attachment(b"\x00\x01", maintype="application", subtype="octet-stream")
+        msg.add_attachment(inner)  # an attached email without a name: one file, its parts inside it
+        result, files = self.save(msg)
+        self.assertEqual(result["attachments"], 3)
+        self.assertEqual(sorted(files), ["attachment.bin", "attachment.eml", "attachment.pdf"])
+        self.assertEqual(files["attachment.pdf"], b"%PDF-SCAN")
+        self.assertEqual(files["attachment.bin"], b"\x00\x01")
+        self.assertIn(b"inner body", files["attachment.eml"])
+        # The preview lists them too, without writing them.
+        result, files = self.save(msg, save_attachments=False)
+        self.assertEqual((result["attachments"], files), (3, {}))
+
+
 class FakeSaveService(FakeService):
     """Serves one raw email and records the ids moved to the trash (when the batch runs)."""
 

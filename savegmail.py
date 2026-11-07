@@ -27,6 +27,7 @@ import uuid
 import webbrowser
 from urllib.parse import quote
 import html
+import mimetypes
 from email.parser import BytesParser
 from email.policy import default as policy_default
 from email.utils import getaddresses, parseaddr
@@ -493,11 +494,19 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         used_filenames.add(candidate)
         return candidate
 
+    def attachment_name(part):
+        # The sender's file name, or one of ours for a part sent as an attachment without a name
+        # (scanners, invoicing tools; Gmail shows "noname"): it is still a file to keep.
+        name = part.get_filename()
+        if not name and part.get_content_disposition() == 'attachment':
+            name = "attachment" + (mimetypes.guess_extension(part.get_content_type()) or ".bin")
+        return name
+
     def walk(part):
         # Like msg.walk(), but an attached email (message/rfc822 with a name) is one attachment: its own
         # parts belong to it, not to this email.
         yield part
-        if part.is_multipart() and not (part.get_content_maintype() == 'message' and part.get_filename()):
+        if part.is_multipart() and not (part.get_content_maintype() == 'message' and attachment_name(part)):
             for sub in part.get_payload():
                 yield from walk(sub)
 
@@ -510,7 +519,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         debug(f"Part: Content-Type={part.get_content_type()}, Content-ID={part.get('Content-ID')}, Filename={part.get_filename()}, Disposition={part.get_content_disposition()}")
         if part.get_content_maintype() == 'multipart':
             continue
-        original_filename = part.get_filename()
+        original_filename = attachment_name(part)
         filename = clean_filename(original_filename) if original_filename else None
         content_type = part.get_content_type()
         content_id = part.get('Content-ID')
