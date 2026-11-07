@@ -989,6 +989,8 @@ class ContentRecordingPage(RecordingPage):
 
     def evaluate(self, script, *args, **kwargs):
         self.scripts = getattr(self, "scripts", []) + [script]
+        if "insertAdjacentHTML" in script:
+            self.appended = getattr(self, "appended", "") + args[0]
         return True
 
 
@@ -1237,7 +1239,7 @@ class EscapedTextTest(unittest.TestCase):
         self.assertNotIn("<style>", header)
         self.assertIn("Bank &lt;security@bank.example&gt; evil@attacker.test", header)
         self.assertIn("Alice alice@example.com, Dev list dev@lists.example.org", header)
-        self.assertIn("Q&amp;A&amp;para2.txt</a>", footer)
+        self.assertIn("Q&amp;A&amp;para2.txt</a>", browser.pages[0].appended)
 
 
 class PdfHeaderTest(unittest.TestCase):
@@ -1271,10 +1273,11 @@ class PdfHeaderTest(unittest.TestCase):
                 self.pages.append(page)
                 return page
 
+        browser = MeasuringBrowser()
         with tempfile.TemporaryDirectory() as save_dir:
             savegmail.save_email_and_attachments(
                 FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1", save_dir,
-                MeasuringBrowser())
+                browser)
         self.assertEqual(len(options), 1)
         printed = options[0]
         self.assertIs(printed["display_header_footer"], True)
@@ -1282,11 +1285,57 @@ class PdfHeaderTest(unittest.TestCase):
         self.assertIn("Contrat de bail", header)
         self.assertIn("From : Alice Martin alice@example.com", header)
         self.assertIn(f"Date : {savegmail.get_real_date(msg['Date'])}", header)
-        self.assertIn("bail.pdf", footer)
+        self.assertIn("bail.pdf", browser.pages[0].appended)
         self.assertIn("View in Gmail", footer)
         # Room for the measured templates plus Chromium's 20px edge padding and an 8px gap.
         self.assertEqual(printed["margin"]["top"], "128px")
         self.assertEqual(printed["margin"]["bottom"], "128px")
+
+
+class AttachmentListTest(unittest.TestCase):
+    """Attachments are listed once, after the body, in readable text, not in the footer of every page."""
+
+    def test_attachments_are_listed_once_after_the_body_in_10px_text(self):
+        import base64
+        import tempfile
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["Subject"] = "Photos"
+        msg["From"] = "s@example.com"
+        msg.set_content("alt")
+        msg.add_alternative("<p>Body</p><!-- unclosed comment", subtype="html")
+        for i in range(40):
+            msg.add_attachment(b"x", maintype="image", subtype="jpeg", filename=f"IMG_{i:04d}.jpg")
+        options = []
+
+        class OptionsRecordingPage(ContentRecordingPage):
+            def pdf(self, path, **kwargs):
+                options.append(kwargs)
+                super().pdf(path, **kwargs)
+
+        class OptionsRecordingBrowser(ContentRecordingBrowser):
+            def new_page(self, **kwargs):
+                page = OptionsRecordingPage()
+                self.pages.append(page)
+                return page
+
+        browser = OptionsRecordingBrowser()
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(
+                FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1", save_dir,
+                browser)
+        footer = options[0]["footer_template"]
+        appended = browser.pages[0].appended
+        self.assertNotIn("IMG_", footer)
+        self.assertNotIn("Attachments", footer)
+        self.assertIn("View in Gmail", footer)
+        self.assertIn("pageNumber", footer)
+        self.assertEqual(appended.count("IMG_0007.jpg</a>"), 1)
+        self.assertIn("Attachments:", appended)
+        self.assertIn("font-size: 10px", appended)
+        self.assertNotIn("<h", appended)  # no heading shrinks the names below the label
+        # Appended to the parsed page, so the email's unclosed comment cannot swallow it.
+        self.assertNotIn("IMG_", browser.pages[0].html)
 
 
 class SplitBodyTest(unittest.TestCase):

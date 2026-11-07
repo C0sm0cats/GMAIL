@@ -590,19 +590,24 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     # Handle external URLs (keep intact)
     # The regex already skips them since it looks for cid:
 
-    # Generate attachments_html
+    # The attachment list is printed once, at the end of the email, in the 10px text of the header:
+    # in the footer template, Chromium would repeat it on every page and take that room from the body.
+    block_style = ("font-family: Arial, sans-serif; font-size: 10px; line-height: normal; color: #666;"
+                   " text-align: center; white-space: normal; overflow-wrap: anywhere; clear: both;"
+                   " margin: 16px 0 0; padding: 8px 12px 0; border-top: 1px solid #ccc;")
     if attachments_files:
-        attachments_html_footer = "<div>Attachments:</div>\n<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
+        attachments_html = f"<div style='{block_style}'>\n<div>Attachments:</div>\n"
+        attachments_html += "<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
         for attachment in attachments_files:
             attachment_path = os.path.join(save_dir, attachment)
             attachment_url = pathlib.Path(os.path.abspath(attachment_path)).as_uri()  # file:///C:/… on Windows
             # Previews don't write attachments, so there is no file to link to.
             name = html.escape(attachment)
             label = f"<a href='{html.escape(attachment_url)}'>{name}</a>" if save_attachments else name
-            attachments_html_footer += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'>{label}</h6></li>\n"
-        attachments_html_footer += "</ul>\n"
+            attachments_html += f"  <li style='margin: 0; padding: 0;'>{label}</li>\n"
+        attachments_html += "</ul>\n</div>\n"
     else:
-        attachments_html_footer = "<div>No attachments for this mail</div>"
+        attachments_html = f"<div style='{block_style}'>No attachments for this mail</div>\n"
 
     # Generate PDF. Render under a name of our own: the subject may match an attachment of this email
     # or a file already in the folder, which would be overwritten, or removed if the save fails.
@@ -628,6 +633,9 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
                 "[...document.images].every(img => img.complete) && document.fonts.status === 'loaded'"):
             page.wait_for_timeout(100)
         page.wait_for_timeout(300)
+        # Added to the parsed page, not to the email's HTML, which may leave a comment or tag unclosed.
+        page.evaluate("""html => (document.body || document.documentElement)
+            .insertAdjacentHTML('beforeend', html)""", attachments_html)
 
         header_template = """
             <div style="font-family: Arial, sans-serif; font-size: 10px; line-height: normal; color: #666; text-align: center; width: 100%; box-sizing: border-box; padding: 0 12px; overflow-wrap: anywhere; display: flow-root">
@@ -641,8 +649,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         """.format(fro=fro, reply=reply, to=to, cc=cc, date=date, subject=html.escape(subject))
         footer_template = f"""
             <div style="font-family: Arial, sans-serif; font-size: 10px; line-height: normal; color: #666; text-align: center; width: 100%; box-sizing: border-box; padding: 0 12px; overflow-wrap: anywhere; display: flow-root">
-                {attachments_html_footer}
-                <div style="margin-top: 8px;"><a href='https://mail.google.com/mail/u/0/#inbox/{msg_id}'>View in Gmail</a></div>
+                <div><a href='https://mail.google.com/mail/u/0/#inbox/{msg_id}'>View in Gmail</a></div>
                 <span class="pageNumber"></span> / <span class="totalPages"></span>
             </div>
         """
