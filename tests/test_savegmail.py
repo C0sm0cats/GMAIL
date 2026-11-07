@@ -2377,6 +2377,39 @@ class GmailCallSizeTest(unittest.TestCase):
         savegmail.modify_labels(api, "me", [str(i) for i in range(2000)], add=["STARRED"])
         self.assertEqual(api.calls, [("batchModify", 1000), ("batchModify", 1000)])
 
+    def test_list_trash_ids_follows_every_page(self):
+        trash = [f"t{i}" for i in range(1200)]
+
+        class PagedTrash:
+            """messages.list over the trash, at most 500 per page as Gmail caps it, with list_next."""
+            def __init__(self):
+                self.pages = []
+
+            def users(self):
+                return self
+
+            def messages(self):
+                return self
+
+            def list(self, userId, labelIds=None, maxResults=100, pageToken=None):
+                assert labelIds == ["TRASH"]
+                start, size = int(pageToken or 0), min(maxResults, 500)
+                self.pages.append(start)
+                result = {"messages": [{"id": msg_id} for msg_id in trash[start:start + size]]}
+                if start + size < len(trash):
+                    result["nextPageToken"] = str(start + size)
+                request = FakeResult(result)
+                request.args = (userId, labelIds, maxResults)
+                return request
+
+            def list_next(self, request, results):
+                token = results.get("nextPageToken")
+                return None if token is None else self.list(*request.args, pageToken=token)
+
+        api = PagedTrash()
+        self.assertEqual(savegmail.list_trash_ids(api, "me"), trash)
+        self.assertEqual(api.pages, [0, 500, 1000])
+
     def test_failed_later_call_reports_what_was_done(self):
         for call, name in [(savegmail.delete_messages, "batchDelete"), (savegmail.modify_labels, "batchModify")]:
             with self.subTest(name=name):
