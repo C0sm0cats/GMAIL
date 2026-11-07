@@ -29,7 +29,7 @@ from urllib.parse import quote
 import html
 from email.parser import BytesParser
 from email.policy import default as policy_default
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 from rich.cells import cell_len
 from rich.console import Console
 from rich.markup import escape
@@ -346,6 +346,14 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir, browser, on_s
         raise
 
 
+def format_addresses(value):
+    """An address header as escaped HTML text: every `Name address`, or the raw value if it does not parse."""
+    value = str(value or "")
+    pairs = getaddresses([value])
+    if not pairs or not all(addr for _, addr in pairs):
+        return html.escape(value)
+    return html.escape(", ".join(f"{name} {addr}" if name else addr for name, addr in pairs))
+
 def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, written, save_attachments=True):
     def sanitize_subject_for_filename(subject):
         safe = (subject or "")
@@ -371,49 +379,12 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     # Extract headers
     subject = msg['Subject'] or ""
     file_safe_subject = sanitize_subject_for_filename(subject)
-    fro = msg['From'] or ""
-    if '<' in fro and '>' in fro:
-        fro_name, fro_email = fro.split('<', 1)
-        fro_email = fro_email.rstrip('>')
-        fro_email = f" {fro_email}"
-        fro = f"{fro_name.strip()} {fro_email.strip()} "
-    reply = msg['Reply-To'] or ""
-    if '<' in reply and '>' in reply:
-        reply_name, reply_email = reply.split('<', 1)
-        reply_email = reply_email.rstrip('>')
-        reply_email = f" {reply_email}"
-        reply = f"{reply_name.strip()} {reply_email.strip()} "
-    to = msg['To'] or ""
-    if '<' in to and '>' in to:
-        # First split all recipients by comma
-        recipients = [r.strip() for r in to.split(',')]
-
-        formatted = []
-        for recipient in recipients:
-            if '<' in recipient and '>' in recipient:
-                to_name, to_email = recipient.split('<', 1)
-                to_email = to_email.rstrip('>')
-                to_email = f" {to_email}"
-                formatted.append(f"{to_name.strip()} {to_email.strip()} ")
-            else:
-                formatted.append(recipient)
-
-        # Rebuild the full string
-        to = ", ".join(formatted)
-    cc = msg['Cc'] or ""
-    if cc:
-        cc_list = []
-        for email in cc.split(','):
-            email = email.strip()
-            if '<' in email and '>' in email:
-                cc_name, cc_email = email.split('<', 1)
-                cc_email = cc_email.rstrip('>')
-                cc_email = f" {cc_email}"
-                cc_list.append(f"{cc_name.strip()} {cc_email.strip()}")
-            else:
-                cc_list.append(email.strip())
-        cc = ', '.join(cc_list)
-    date = get_real_date(msg['Date'] or 'No Date')
+    # Every header value is the sender's text: escape it, or a `<` in it is read as HTML by Chromium.
+    fro = format_addresses(msg['From'])
+    reply = format_addresses(msg['Reply-To'])
+    to = format_addresses(msg['To'])
+    cc = format_addresses(msg['Cc'])
+    date = html.escape(get_real_date(msg['Date'] or 'No Date'))
 
     # Extract HTML or plain text
     html_part = msg.get_body(preferencelist=('html',))
@@ -424,20 +395,19 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         plain_part = msg.get_body(preferencelist=('plain',))
         if plain_part:
             debug("Email body selected: plain text")
-            plain_text = plain_part.get_content()
+            plain_text = html.escape(plain_part.get_content())  # `<` and `&` are text, not HTML
             plain_text = re.sub(r'(>>?|>)', r'\1', plain_text)
             plain_text = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'\n\n\1', plain_text)
             date_regex = r'((Le|The) \d{1,2} (janv\.|févr\.|mars\.|avr\.|mai\.|juin\.|juil\.|août\.|sept\.|oct\.|nov\.|déc\.|Jan\.|Feb\.|Mar\.|Apr\.|May\.|Jun\.|Jul\.|Aug\.|Sep\.|Oct\.|Nov\.|Dec\.) \d{4}( (à|at) \d{1,2}:\d{2})?)'
             plain_text = re.sub(date_regex, r'\n\n\1', plain_text)
-            url_regex = r'(https?://[^\s<>"]+|www\.[^\s<>"]+)'
+            # The text is escaped: an URL stops at an escaped `<`, `>` or `"`, as it did before escaping.
+            url_regex = r'((?:https?://|www\.)(?:(?!&lt;|&gt;|&quot;)\S)+)'
             plain_text = re.sub(url_regex, r'<a href="\1" target="_blank">\1</a>', plain_text)
-            html_content = plain_text.replace('\n', '<br>')
-            html_content = f"""
-            <html>
+            # pre-wrap keeps line breaks and the spaces that align columns, and still wraps long lines;
+            # a monospace font keeps those columns aligned, as mail clients show plain text.
+            html_content = f"""<html>
             <body>
-                <div style="font-family: Arial, sans-serif;font-size: 10px">
-                    {html_content}
-                </div>
+                <div style="font-family: monospace;font-size: 10px;white-space: pre-wrap">{plain_text}</div>
             </body>
             </html>
             """
@@ -545,7 +515,8 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
             attachment_path = os.path.join(save_dir, attachment)
             attachment_url = pathlib.Path(os.path.abspath(attachment_path)).as_uri()  # file:///C:/… on Windows
             # Previews don't write attachments, so there is no file to link to.
-            label = f"<a href='{attachment_url}'>{attachment}</a>" if save_attachments else attachment
+            name = html.escape(attachment)
+            label = f"<a href='{html.escape(attachment_url)}'>{name}</a>" if save_attachments else name
             attachments_html_footer += f"  <li style='margin-bottom: 0;'><h6 style='margin: 0; padding: 0;'>{label}</h6></li>\n"
         attachments_html_footer += "</ul>\n"
     else:
@@ -583,7 +554,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
                 <div>Cc : {cc}</div>
                 <div>Date : {date}</div>
             </div>
-        """.format(fro=fro, reply=reply, to=to, cc=cc, date=date, subject=subject)
+        """.format(fro=fro, reply=reply, to=to, cc=cc, date=date, subject=html.escape(subject))
         footer_template = f"""
             <div style="font-family: Arial, sans-serif; font-size: 10px; line-height: normal; color: #666; text-align: center; width: 100%; box-sizing: border-box; padding: 0 12px; overflow-wrap: anywhere; display: flow-root">
                 {attachments_html_footer}

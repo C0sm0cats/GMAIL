@@ -989,6 +989,53 @@ class PageCountTest(unittest.TestCase):
         self.assertEqual(len(re.findall(rb"/Type\s*/Page[^s]", pdf)), 5)
 
 
+class EscapedTextTest(unittest.TestCase):
+    """Plain text and header values are text: a `<` or `&` in them is shown, never read as HTML."""
+
+    def test_plain_text_headers_and_attachment_names_are_escaped(self):
+        import base64
+        import tempfile
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["Subject"] = "Fix List<String> <style>h3~div{display:none}</style>"
+        msg["From"] = '"Bank <security@bank.example>" <evil@attacker.test>'
+        msg["Reply-To"] = "Alice <alice@example.com>, Dev list <dev@lists.example.org>"
+        msg["To"] = "Bob <bob@example.com>"
+        msg["Cc"] = "Carol <carol@example.com>"
+        msg.set_content("On Mon, Bob <bob@example.com> wrote:\n> if a<b and b>c\n> Tom &copy;\n"
+                        "Item   Qty\nSee <https://example.com/a?x=1&y=2> now\n")
+        msg.add_attachment(b"x", maintype="text", subtype="plain", filename="Q&A&para2.txt")
+        options = []
+
+        class OptionsRecordingPage(ContentRecordingPage):
+            def pdf(self, path, **kwargs):
+                options.append(kwargs)
+                super().pdf(path, **kwargs)
+
+        class OptionsRecordingBrowser(ContentRecordingBrowser):
+            def new_page(self, **kwargs):
+                page = OptionsRecordingPage()
+                self.pages.append(page)
+                return page
+
+        browser = OptionsRecordingBrowser()
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(
+                FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1", save_dir,
+                browser)
+        body, header, footer = browser.pages[0].html, options[0]["header_template"], options[0]["footer_template"]
+        self.assertIn("Bob &lt;bob@example.com&gt; wrote:", body)
+        self.assertIn("&gt; if a&lt;b and b&gt;c", body)
+        self.assertIn("Tom &amp;copy;", body)
+        self.assertIn("white-space: pre-wrap", body)  # the spaces that align columns are kept
+        self.assertIn('<a href="https://example.com/a?x=1&amp;y=2" target="_blank">', body)
+        self.assertIn("Fix List&lt;String&gt; &lt;style&gt;", header)
+        self.assertNotIn("<style>", header)
+        self.assertIn("Bank &lt;security@bank.example&gt; evil@attacker.test", header)
+        self.assertIn("Alice alice@example.com, Dev list dev@lists.example.org", header)
+        self.assertIn("Q&amp;A&amp;para2.txt</a>", footer)
+
+
 class PdfFileNameTest(unittest.TestCase):
     """The rendered PDF never overwrites or deletes a file the program did not create."""
 
