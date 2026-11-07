@@ -2657,6 +2657,8 @@ def interactive_download_main():
                     each["state"]["signed_out"] = True
 
         totals = {"saved": 0, "trashed": 0, "deleted": 0}
+        # Files this session saved and still on disk, by download folder: the Done summary lists those folders.
+        saved_files = {}
         # Emails this session moved to the trash and that are still there (a restore takes them off the total).
         trashed_here = set()
         # Back to the list after every action, until the user quits.
@@ -2726,6 +2728,8 @@ def interactive_download_main():
                     unsaved = {msg_id: files for msg_id, files in undo["files"].items() if msg_id not in errors}
                     removed = [path for files in unsaved.values() for path in files]
                     remove_files(removed)
+                    for paths in saved_files.values():
+                        paths.difference_update(removed)
                     totals["saved"] -= len(unsaved)
                     # Only the ✓ this s added: one from an earlier s stays, its files are still there.
                     for each in views:
@@ -2909,6 +2913,7 @@ def interactive_download_main():
                     saved, attachments, failed, files = save_messages(service, user_id, chosen, save_dir, get_browser(), trash_after)
                     saved_ids = {message["id"] for message in saved}
                     totals["saved"] += len(saved)
+                    saved_files.setdefault(save_dir, set()).update(path for paths in files.values() for path in paths)
                     summary = f"{plural(len(saved), 'PDF')} · {plural(attachments, 'attachment')}"
                     if trash_after:
                         drop(view, saved_ids)
@@ -2957,7 +2962,10 @@ def interactive_download_main():
             summary = f"{plural(totals['saved'], 'email')} saved · {totals['trashed']} moved to trash"
             if totals["deleted"]:
                 summary += f" · {totals['deleted']} permanently deleted"
-            console.print(f" [bold]Done[/] [dim]·[/] {summary}\n [dim]→[/] {escape(shown_dir)}")
+            console.print(f" [bold]Done[/] [dim]·[/] {summary}")
+            folders = [home_relative(folder) for folder, paths in saved_files.items() if paths]
+            if folders:
+                console.print(f" [dim]→[/] {escape(' · '.join(folders))}")
 
     except HttpError as error:
         console.print(f"[red]✗[/] Gmail API error: {escape(str(error))}")

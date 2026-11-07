@@ -2350,6 +2350,26 @@ class UndoAfterDeleteTest(unittest.TestCase):
             self.assertEqual(savegmail.home_relative(home), "~")
             self.assertEqual(savegmail.home_relative(os.path.join(home, "GMail")), os.path.join("~", "GMail"))
 
+    def test_done_summary_lists_the_folders_saved_to(self):
+        # s in the first folder, f to an empty one, q: the summary points at the saves, not at the last f.
+        # With saves in two folders, both are listed; one whose saves u took back is not.
+        import tempfile
+        from unittest import mock
+        home = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, home, True)
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            self.run_session({"A": "inbox"}, [("save", ["A"]), ("folder", "~/Later")],
+                             args=["--download-path", "~/First"])
+            self.assertEqual(os.listdir(os.path.join(home, "Later")), [])
+            self.assertEqual(self.output.getvalue().strip().splitlines()[-1].strip(), "→ ~/First")
+
+            self.run_session({"A": "inbox", "B": "inbox", "C": "inbox"},
+                             [("save", ["A"]), ("folder", "~/Second"), ("save", ["B"]),
+                              ("folder", "~/Third"), ("save", ["C"]), ("undo", []), ("folder", "~/Later")],
+                             args=["--download-path", "~/First"])
+            self.assertEqual(os.listdir(os.path.join(home, "Third")), [])
+            self.assertEqual(self.output.getvalue().strip().splitlines()[-1].strip(), "→ ~/First · ~/Second")
+
     def test_partial_delete_keeps_the_deleted_emails_files(self):
         ids = [f"m{i}" for i in range(1500)]
         api = FakeBatchApi(fail_on=2)
