@@ -1195,6 +1195,61 @@ class PageCountTest(unittest.TestCase):
         self.assertEqual(len(re.findall(rb"/Type\s*/Page[^s]", pdf)), 5)
 
 
+class LongLineTest(unittest.TestCase):
+    """A link, token or log line wider than the page wraps: Chromium would shrink the email, then cut it."""
+
+    def test_long_unbroken_lines_fit_the_printed_page(self):
+        import base64
+        import tempfile
+        from email.message import EmailMessage
+        from playwright.sync_api import sync_playwright
+        plain = EmailMessage()
+        plain["Subject"] = "Confirm"
+        plain["From"] = "s@example.com"
+        plain.set_content("Confirm: https://example.com/c?t=" + "a1b2" * 65 + "\nToken: " + "Z" * 290 + "\n")
+        html_part = EmailMessage()
+        html_part["Subject"] = "CI"
+        html_part["From"] = "s@example.com"
+        html_part.set_content("alt")
+        html_part.add_alternative('<pre style="white-space: pre">ERROR at line 2 ' + "x" * 300 + "</pre>",
+                                  subtype="html")
+        widths = {}
+
+        class MeasuringBrowser:
+            # The real page, measured at the A4 width (no side margins) when it is printed.
+            def __init__(self, browser, name):
+                self.browser, self.name = browser, name
+
+            def new_page(self, **kwargs):
+                page = self.browser.new_page(**kwargs)
+                real_pdf = page.pdf
+
+                def pdf(**options):
+                    page.set_viewport_size({"width": 794, "height": 1123})
+                    page.emulate_media(media="print")
+                    widths.setdefault(self.name, page.evaluate("document.documentElement.scrollWidth"))
+                    return real_pdf(**options)
+
+                page.pdf = pdf
+                return page
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(channel="chromium")
+            except Exception as error:  # no Playwright Chromium here; never install it from a test
+                self.skipTest(f"Chromium unavailable: {error}")
+            try:
+                with tempfile.TemporaryDirectory() as save_dir:
+                    for name, msg in (("plain", plain), ("html", html_part)):
+                        savegmail.save_email_and_attachments(
+                            FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1",
+                            save_dir, MeasuringBrowser(browser, name))
+            finally:
+                browser.close()
+        self.assertLessEqual(widths["plain"], 794)
+        self.assertLessEqual(widths["html"], 794)
+
+
 class EscapedTextTest(unittest.TestCase):
     """Plain text and header values are text: a `<` or `&` in them is shown, never read as HTML."""
 

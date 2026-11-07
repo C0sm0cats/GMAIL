@@ -78,6 +78,9 @@ MAX_PDF_PAGES = 1000
 # Longest wait for an email's images and fonts before printing; one that never answers is printed without.
 IMAGE_WAIT_SECONDS = 15
 
+# Added to every email page before printing; !important wins over a sender's own white-space: pre.
+PRINT_WRAP_CSS = "pre { white-space: pre-wrap !important; overflow-wrap: anywhere !important; }"
+
 
 def new_email_page(browser, resources=None):
     """Open a page for content written by a sender: its scripts never run, and it never navigates away
@@ -421,8 +424,10 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         url_regex = r'((?:https?://|www\.)(?:(?!&lt;|&gt;|&quot;)\S)+)'
         plain_text = re.sub(url_regex, r'<a href="\1" target="_blank">\1</a>', plain_text)
         # pre-wrap keeps line breaks and the spaces that align columns, and still wraps long lines;
-        # a monospace font keeps those columns aligned, as mail clients show plain text.
-        return f'<div style="font-family: monospace;font-size: 10px;white-space: pre-wrap">{plain_text}</div>'
+        # a monospace font keeps those columns aligned, as mail clients show plain text. overflow-wrap
+        # breaks a link or token wider than the page, which Chromium would shrink the page for, then cut.
+        return ('<div style="font-family: monospace;font-size: 10px;white-space: pre-wrap;'
+                f'overflow-wrap: anywhere">{plain_text}</div>')
 
     def body_text(part):
         # get_content() decodes with the declared charset, ASCII when there is none (every accent
@@ -636,6 +641,11 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         # Added to the parsed page, not to the email's HTML, which may leave a comment or tag unclosed.
         page.evaluate("""html => (document.body || document.documentElement)
             .insertAdjacentHTML('beforeend', html)""", attachments_html)
+        # A <pre> line wider than the page (logs, code) would shrink the whole email, then be cut at
+        # the right edge: wrap it, keeping its spaces.
+        page.evaluate("""css => (document.head || document.documentElement)
+            .appendChild(Object.assign(document.createElement('style'), {textContent: css}))""",
+                      PRINT_WRAP_CSS)
 
         header_template = """
             <div style="font-family: Arial, sans-serif; font-size: 10px; line-height: normal; color: #666; text-align: center; width: 100%; box-sizing: border-box; padding: 0 12px; overflow-wrap: anywhere; display: flow-root">
