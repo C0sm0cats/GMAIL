@@ -3493,6 +3493,47 @@ class AuthenticateTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 1)
         self.assertIn("Sign-in cancelled", self.output.getvalue())
 
+    def test_refused_sign_in_neither_says_signed_in_nor_traces(self):
+        # Google redirects "Cancel" on its consent page to the local server as error=access_denied.
+        import json
+        import threading
+        import urllib.parse
+        import urllib.request
+        from unittest import mock
+        with open(savegmail.CREDENTIALS_PATH, "w") as credentials:  # fake client, never sent anywhere
+            json.dump({"installed": {"client_id": "id.example.invalid", "client_secret": "fake",
+                                     "auth_uri": "https://accounts.example.invalid/auth",
+                                     "token_uri": "https://oauth2.example.invalid/token",
+                                     "redirect_uris": ["http://localhost"]}}, credentials)
+        os.remove(self.token_path)
+        pages, threads = [], []
+
+        def refuse(url):  # the browser: Google answers the consent page with a refusal
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            target = query["redirect_uri"][0] + "?" + urllib.parse.urlencode(
+                {"error": "access_denied", "state": query["state"][0]})
+            thread = threading.Thread(target=lambda: pages.append(urllib.request.urlopen(target, timeout=10).read()))
+            thread.start()
+            threads.append(thread)
+            return True
+
+        with mock.patch.object(savegmail, "open_quietly", refuse):
+            with self.assertRaises(SystemExit) as raised:
+                try:
+                    self.real_sign_in("Sign in to Gmail in your browser.")
+                except savegmail.OAuth2Error:
+                    self.fail("a refused sign-in escaped sign_in as a traceback")
+            with self.assertRaises(savegmail.OAuth2Error):  # run_sign_in turns it into "sign-in failed"
+                savegmail.sign_in_quietly(timeout=20)
+        for thread in threads:
+            thread.join()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("Sign-in cancelled or refused (access_denied)", self.output.getvalue())
+        self.assertEqual(len(pages), 2)
+        for page in pages:
+            self.assertNotIn(b"signed in", page)
+        self.assertFalse(os.path.exists(self.token_path))
+
 
 class TokenFileModeTest(unittest.TestCase):
     class FakeCreds:

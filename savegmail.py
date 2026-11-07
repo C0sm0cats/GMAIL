@@ -8,6 +8,7 @@ from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+from oauthlib.oauth2.rfc6749.errors import OAuth2Error
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import httplib2
@@ -232,7 +233,8 @@ def oauth_flow():
     return InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
 
 
-SIGN_IN_SUCCESS_PAGE = "savegmail: signed in. You can close this tab."
+# run_local_server shows this page for every redirect, before it knows whether Google granted access.
+SIGN_IN_SUCCESS_PAGE = "savegmail: you can close this tab and go back to the terminal."
 
 
 def open_quietly(url):
@@ -273,6 +275,11 @@ def sign_in(reason):
             )
     except KeyboardInterrupt:
         console.print("[yellow]![/] Sign-in cancelled.")
+        sys.exit(1)
+    except OAuth2Error as e:
+        # "Cancel" on Google's consent page, or an account the app does not allow: error=access_denied.
+        console.print(f"[red]✗[/] Sign-in cancelled or refused ({escape(e.error or str(e))}), "
+                      "run savegmail again to retry.")
         sys.exit(1)
     if not VERBOSE and console.is_terminal:
         console.file.write("\x1b[2F\x1b[J")  # erase the two prompt lines
