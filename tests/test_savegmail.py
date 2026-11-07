@@ -883,6 +883,27 @@ class PickerTest(unittest.TestCase):
         self.assertEqual([message["id"] for message in messages], ["0"])
         self.assertEqual(action, "quit")
 
+    def test_sync_repeats_while_idle_and_clears_expired_session(self):
+        # The list left open keeps syncing; a sync that works again after an expired session
+        # (signed in elsewhere, or a passing token-server error) drops "session expired" without r.
+        from unittest import mock
+        from google.auth.exceptions import RefreshError
+        state = savegmail.new_picker_state()
+        signed_out_at_call = []
+
+        def sync(loaded):
+            signed_out_at_call.append(state["signed_out"])
+            if len(signed_out_at_call) == 1:
+                raise RefreshError("temporary", retryable=True)
+            return {"new": [], "gone": set(), "labels": {}, "total": None, "badges": {}}
+
+        with mock.patch.object(savegmail, "SYNC_INTERVAL", 0.1):
+            action, _ = pick_later("q", make_messages(2), delay=0.8, sync=sync, state=state)
+        self.assertEqual(action, "quit")
+        self.assertGreaterEqual(len(signed_out_at_call), 3)
+        self.assertEqual(signed_out_at_call[:2], [False, True])
+        self.assertFalse(state["signed_out"])
+
     def test_r_with_another_account_says_so_and_stays_signed_out(self):
         from google.auth.exceptions import RefreshError
 
