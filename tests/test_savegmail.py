@@ -407,7 +407,8 @@ class PickerTest(unittest.TestCase):
     def test_load_more_appends_older(self):
         messages = make_messages(2)
         older = [{**make_messages(1)[0], "id": "old", "internalDate": 1}]
-        action, ids = pick("m\r", messages, load_more=lambda: (older, False))
+        # Enter once the load is done: leaving the list earlier drops it.
+        action, ids = pick_later("m\r", messages, delay=0.2, load_more=lambda: (older, False))
         self.assertEqual([message["id"] for message in messages], ["0", "1", "old"])
         self.assertEqual(ids, ["0"])
 
@@ -588,6 +589,39 @@ class PickerTest(unittest.TestCase):
         self.assertTrue(state["signed_out"])
         self.assertFalse(state["loading"])
         self.assertEqual((action, ids), ("download", ["0"]))
+
+    def test_leaving_the_list_does_not_wait_for_background_work(self):
+        # Tab, q or an action during a sync, an m or an r: the list goes at once, the work is dropped.
+        import threading
+        import time
+        from google.auth.exceptions import RefreshError
+        release = threading.Event()
+        self.addCleanup(release.set)
+        applied = []
+
+        def slow_sync(loaded):
+            release.wait(10)
+            return {"new": [], "gone": {"0"}, "labels": {}, "total": None, "badges": {}}
+
+        def slow_load_more():
+            release.wait(10)
+            return [{**make_messages(1)[0], "id": "old", "internalDate": 1}], False, lambda: applied.append(True)
+
+        def expired(loaded):
+            raise RefreshError("invalid_grant")
+
+        cases = [("\t", {"sync": slow_sync}, "next_view"), ("q", {"sync": slow_sync}, "quit"),
+                 ("m\t", {"load_more": slow_load_more}, "next_view"),
+                 ("rq", {"sync": expired, "sign_in": lambda: release.wait(10)}, "quit")]
+        for keys, kwargs, expected in cases:
+            with self.subTest(keys=keys):
+                messages = make_messages(2)
+                start = time.monotonic()
+                action, _ = pick_later(keys, messages, delay=0.3, **kwargs)
+                self.assertEqual(action, expected)
+                self.assertLess(time.monotonic() - start, 0.3 * len(keys) + 1.5)
+                self.assertEqual([message["id"] for message in messages], ["0", "1"])  # result dropped
+        self.assertEqual(applied, [])
 
     def test_r_does_nothing_while_signed_in(self):
         signed_in = []

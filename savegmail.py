@@ -22,6 +22,7 @@ import contextlib
 import shutil
 import time
 import tempfile
+import threading
 import uuid
 import webbrowser
 from urllib.parse import quote
@@ -223,6 +224,32 @@ def authenticate():
 def truncate_bytes(text, limit):
     """Cut text to at most limit UTF-8 bytes without splitting a character."""
     return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def in_background(fn, *args):
+    """Await fn(*args) run in a daemon thread, unlike asyncio.to_thread: leaving the list never waits for it.
+
+    An abandoned call keeps running and its result is dropped.
+    """
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+
+    def settle(setter, value):
+        if not future.done():
+            setter(value)
+
+    def work():
+        try:
+            value, setter = fn(*args), future.set_result
+        except BaseException as exc:
+            value, setter = exc, future.set_exception
+        try:
+            loop.call_soon_threadsafe(settle, setter, value)
+        except RuntimeError:
+            pass  # the list is gone (its event loop is closed)
+
+    threading.Thread(target=work, daemon=True).start()
+    return future
 
 
 def discard_pending_keys(app_input=None):
@@ -1101,7 +1128,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     thread), then syncs again.
     views are the tab names shown in the header, view the current one; the Trash view swaps
     enter / d (meaningless there) for R restore.
-    load_more() returns (older messages sorted newest first, whether even older ones remain).
+    load_more() runs in a worker thread and returns (older messages sorted newest first, whether even
+    older ones remain), optionally followed by a callable run once they are in the list.
+    Leaving the list never waits for sync, sign_in or load_more: their result is then dropped.
     notice is a list of formatted-text lines shown under the header (last action result).
     undo_label describes what u would undo (e.g. "trash (3)"), None when there is nothing to undo.
     total is Gmail's estimate of how many emails match the query (shown while more can be loaded).
@@ -1527,7 +1556,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         snapshot = [{"id": message["id"], "internalDate": message["internalDate"],
                      "labels": list(message.get("labels", []))} for message in messages]
         try:
-            result = await asyncio.to_thread(sync, snapshot)
+            result = await in_background(sync, snapshot)
         except RefreshError as exc:
             debug(f"Sync failed: {exc}")
             state["signed_out"] = True
@@ -1551,7 +1580,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         state["signing_in"] = True
         app.invalidate()
         try:
-            await asyncio.to_thread(sign_in)
+            await in_background(sign_in)
         except Exception as exc:
             debug(f"Sign-in failed: {exc}")
             state["sync_note"] = ("class:error", "↻ sign-in failed, r to try again", time.monotonic())
@@ -1580,7 +1609,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
         async def load():
             try:
-                older, more = await asyncio.to_thread(load_more)
+                older, more, *loaded = await in_background(load_more)
             except Exception as exc:
                 debug(f"Loading more failed: {exc}")
                 if isinstance(exc, RefreshError):
@@ -1592,6 +1621,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                 # Older emails go at the bottom, so the cursor stays where it is.
                 messages.extend(older)
                 rows.extend(message_row(message) for message in older)
+                for done in loaded:
+                    done()
             finally:
                 state["loading"] = False
                 event.app.invalidate()
@@ -2022,18 +2053,23 @@ def interactive_download_main():
             view["loaded"], view["stale"] = True, False
 
         def load_more_for(view):
+            # Runs in a worker thread the list may abandon: it uses the sync connection (the main one
+            # is used meanwhile), and the view only moves its floor once the emails are in the list.
             def load_more():
-                before = f"before:{view['floor'] // 1000 + 1}"  # Gmail dates are in seconds; duplicates dropped
-                older, token = list_candidate_messages(
-                    service, user_id, query=f"{view['query']} {before}".strip(), max_results=args.max,
-                    in_trash=view["in_trash"],
-                )
+                with sync_lock:
+                    before = f"before:{view['floor'] // 1000 + 1}"  # Gmail dates are in seconds; duplicates dropped
+                    older, token = list_candidate_messages(
+                        sync_service, user_id, query=f"{view['query']} {before}".strip(), max_results=args.max,
+                        in_trash=view["in_trash"],
+                    )
                 known = {message["id"] for message in view["messages"]}
                 older = [message for message in older if message["id"] not in known]
-                if older:
-                    view["floor"] = min(view["floor"], min(message["internalDate"] for message in older))
-                view["more"] = token is not None
-                return older, view["more"]
+
+                def loaded():
+                    if older:
+                        view["floor"] = min(view["floor"], min(message["internalDate"] for message in older))
+                    view["more"] = token is not None
+                return older, token is not None, loaded
             return load_more
 
         def drop(view, ids):
@@ -2081,8 +2117,10 @@ def interactive_download_main():
             return [[("class:checked", " ↻ "), ("", " · ".join(parts) or "Up to date")]]
 
         # The background sync runs in a worker thread: it gets its own Gmail connection (the client
-        # is not thread-safe) and only reads, the list applies its result.
+        # is not thread-safe) and only reads, the list applies its result. The list may abandon it
+        # (Tab, q, an action) while it runs, so the next one waits for it on the lock.
         sync_service = build("gmail", "v1", credentials=creds)
+        sync_lock = threading.Lock()
         view_queries = {view["name"]: view["query"] for view in views}
 
         def reload_session():
@@ -2107,12 +2145,13 @@ def interactive_download_main():
 
         def sync_for(view):
             def sync(loaded):
-                try:
-                    return sync_once(loaded)
-                except RefreshError:
-                    if not reload_session():
-                        raise
-                    return sync_once(loaded)
+                with sync_lock:
+                    try:
+                        return sync_once(loaded)
+                    except RefreshError:
+                        if not reload_session():
+                            raise
+                        return sync_once(loaded)
 
             def sync_once(loaded):
                 new, gone = refresh_messages(
