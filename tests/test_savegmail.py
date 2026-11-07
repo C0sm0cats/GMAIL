@@ -865,6 +865,43 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick_later("\r", messages, sync=sync), ("download", ["0"]))
         self.assertEqual(len(messages), 2)
 
+    def test_verbose_lines_never_write_over_the_list(self):
+        # --verbose while the list shows: a failed sync's lines (from the sync thread and from the list's
+        # own loop) go above the list, which is erased and drawn again under them, never over it.
+        import io
+        import time
+        from unittest import mock
+        from prompt_toolkit.renderer import Renderer
+        render, apps = Renderer.render, []
+
+        def record(self, app, layout, is_done=False):
+            apps.append(app)
+            render(self, app, layout, is_done)
+
+        class Terminal(io.StringIO):
+            over_list = []
+
+            def write(self, text):
+                if apps and apps[-1].is_running and not apps[-1]._running_in_terminal:
+                    self.over_list.append(text)
+                return super().write(text)
+
+        def sync(loaded):
+            time.sleep(0.1)  # the list is drawn by then
+            savegmail.debug("Gmail batch request failed: offline")
+            raise RuntimeError("Unable to find the server at gmail.googleapis.com")
+
+        out = Terminal()
+        console = savegmail.Console(file=out, force_terminal=True, highlight=False, width=200)
+        with mock.patch.object(Renderer, "render", record), mock.patch.object(savegmail, "console", console), \
+                mock.patch.object(savegmail, "VERBOSE", True):
+            self.assertEqual(pick_later("q", make_messages(2), sync=sync)[0], "quit")
+            savegmail.debug("after the list")  # once it is closed, printed as before
+        self.assertIn("Gmail batch request failed: offline", out.getvalue())
+        self.assertIn("Sync failed: Unable to find the server at gmail.googleapis.com", out.getvalue())
+        self.assertIn("after the list", out.getvalue())
+        self.assertEqual(out.over_list, [])
+
     def test_expired_session_signs_in_again_with_r(self):
         # The sync fails on an expired session: r signs in, then the list syncs again on its own.
         from google.auth.exceptions import RefreshError

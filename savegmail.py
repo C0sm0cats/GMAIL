@@ -54,9 +54,17 @@ def strip_controls(text):
     return CONTROL_CHARS.sub("\ufffd", text)
 
 
+# While the list shows, takes the --verbose lines (from any thread) and returns True: printed straight to
+# the terminal, they would land over the list. pick_messages prints them above it.
+DEBUG_SINK = None
+
+
 def debug(message):
     if VERBOSE:
-        console.print(f"[dim]  {escape(strip_controls(message))}[/]")
+        line = f"[dim]  {escape(strip_controls(message))}[/]"
+        sink = DEBUG_SINK
+        if sink is None or not sink(line):
+            console.print(line)
 
 
 def warn(message):
@@ -2212,9 +2220,59 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     if positions:
         state["cursor"] = positions[0]
     discard_pending_keys(app.input)
-    # Own thread: Playwright's sync API keeps an event loop running in the main one between actions.
-    result = app.run(in_thread=True, pre_run=lambda: sync and app.create_background_task(keep_in_sync(app))) \
-        or ("quit", [])
+
+    # --verbose lines while the list shows: queued, then printed above it by the list's own loop (the list
+    # is erased, then drawn again under them); those still queued when it closes are printed after it.
+    debug_lines, debug_lock, relay = [], threading.Lock(), {}
+
+    def take_debug(line):
+        with debug_lock:
+            if relay.get("closed"):
+                return False
+            debug_lines.append(line)
+            wake = relay.get("wake")
+        if wake:
+            try:
+                wake()
+            except RuntimeError:  # the loop just closed: printed after the list
+                pass
+        return True
+
+    async def relay_debug():
+        from prompt_toolkit.application.run_in_terminal import in_terminal
+        pending = asyncio.Event()
+        with debug_lock:
+            relay["wake"] = lambda: app.loop.call_soon_threadsafe(pending.set)
+            if debug_lines:
+                pending.set()
+        while True:
+            await pending.wait()
+            pending.clear()
+            async with in_terminal():
+                with debug_lock:
+                    lines = debug_lines[:]
+                    debug_lines.clear()
+                for line in lines:
+                    console.print(line)
+
+    def pre_run():
+        app.create_background_task(relay_debug())
+        if sync:
+            app.create_background_task(keep_in_sync(app))
+
+    global DEBUG_SINK
+    DEBUG_SINK = take_debug
+    try:
+        # Own thread: Playwright's sync API keeps an event loop running in the main one between actions.
+        result = app.run(in_thread=True, pre_run=pre_run) or ("quit", [])
+    finally:
+        DEBUG_SINK = None
+        with debug_lock:
+            relay["closed"] = True
+            lines = debug_lines[:]
+            debug_lines.clear()
+        for line in lines:
+            console.print(line)
     state["cursor_id"] = current_id()
     return result
 
