@@ -2173,8 +2173,8 @@ class UndoAfterDeleteTest(unittest.TestCase):
         selection, or on the email under the cursor when nothing is selected (like chosen() in the list).
         Returns (fake Gmail, files left in the download folder, undo label offered before each step);
         self.notices holds the notice shown before each step, as plain text lines; self.marked the ids
-        shown ✓, and self.selected those selected, before each step; self.saved the ids passed to each
-        save_messages call.
+        shown ✓, self.selected those selected, and self.shown those listed, before each step; self.saved
+        the ids passed to each save_messages call.
         """
         import io
         import tempfile
@@ -2186,7 +2186,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
         if api is not None:
             api.gmail = gmail
         steps, offered, self.notices, self.signed_out = list(steps), [], [], []
-        self.marked, self.selected, self.saved = [], [], []
+        self.marked, self.selected, self.saved, self.shown = [], [], [], []
         broken = []
 
         def ask(messages, load_more, state, notice, undo_label, *rest):
@@ -2197,6 +2197,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
             self.notices.append(["".join(text for _, text in line) for line in notice])
             self.marked.append(sorted(state["saved"]))
             self.selected.append(sorted(state["selected"]))
+            self.shown.append(sorted(message["id"] for message in messages))
             if not steps:
                 return "quit", []
             action, ids = steps.pop(0)
@@ -2581,6 +2582,14 @@ class EmptyTrashCommandTest(unittest.TestCase):
                 self.assertIn("2 message(s) permanently deleted from trash.", output)
 
 
+class ViewGmail(FakeGmail):
+    """FakeGmail whose Spam and Trash views list only the spam or the trash, like their Gmail search."""
+
+    def list_candidate_messages(self, service, user_id, query="", max_results=50, page_token=None, in_trash=False):
+        wanted = {"in:spam": {"spam"}, "in:trash": {"trash"}}.get(query, {"inbox", "archive"})
+        return [self.message(msg_id) for msg_id, place in self.places.items() if place in wanted], None
+
+
 class ActionTargetsTest(unittest.TestCase):
     """D, d, T and --trash act on the chosen emails or the trash only, never on the rest of the view or mailbox."""
 
@@ -2600,6 +2609,19 @@ class ActionTargetsTest(unittest.TestCase):
         gmail, left, offered = self.run_session({"m0": "inbox", "m1": "archive", "t1": "trash"},
                                                 [("empty_trash", [])], api=FakeMailboxApi())
         self.assertEqual(gmail.places, {"m0": "inbox", "m1": "archive", "t1": "gone"})
+
+    def test_empty_trash_from_spam_keeps_the_spam_list(self):
+        # Shift+Tab twice: Trash, then Spam; T there, then Tab back to the Trash.
+        gmail, left, offered = self.run_session(
+            {"s1": "spam", "s2": "spam", "t1": "trash"},
+            [("prev_view", []), ("prev_view", []), ("empty_trash", {"select": ["s1"], "cursor": "s1"}),
+             ("next_view", [])],
+            api=FakeMailboxApi(), gmail_class=ViewGmail)
+        self.assertEqual(gmail.places, {"s1": "spam", "s2": "spam", "t1": "gone"})
+        self.assertEqual(self.notices[3][0], " ✓ Trash emptied · 1 email permanently deleted")
+        self.assertEqual(self.shown[3], ["s1", "s2"])
+        self.assertEqual(self.selected[3], ["s1"])
+        self.assertEqual(self.shown[4], [])
 
     def test_trash_command_deletes_only_the_trash(self):
         import io

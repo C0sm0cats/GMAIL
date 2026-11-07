@@ -2851,6 +2851,7 @@ def interactive_download_main():
 
                 elif action == "empty_trash":
                     trash_ids = []
+                    trash_view = next(other for other in views if other["name"] == "Trash")
 
                     def empty():
                         trash_ids.extend(list_trash_ids(service, user_id))
@@ -2861,14 +2862,13 @@ def interactive_download_main():
                     if deleted is None:
                         # Everything in the trash is gone for good, including emails saved with s from the Trash.
                         deleted = set(trash_ids) | ({message["id"] for message in undo["trashed"]} if undo else set())
-                        if view["in_trash"]:
-                            drop(view, {message["id"] for message in messages})
+                        # Only the Trash view empties: Spam is listed with the trash but stays in Gmail.
+                        drop(trash_view, {message["id"] for message in trash_view["messages"]})
                         notice = [[("class:checked", " ✓ "),
                                    ("", f"Trash emptied · {plural(len(trash_ids), 'email')} permanently deleted")]]
                     elif deleted:
                         # Gmail takes 1000 emails per call: the ones before the failed call are gone.
-                        if view["in_trash"]:
-                            drop(view, deleted)
+                        drop(trash_view, deleted)
                         notice = [[("class:checked", " ✓ "), ("", f"{plural(len(deleted), 'email')} permanently deleted")]]
                     if deleted:
                         undo = forget_deleted(undo, deleted)
