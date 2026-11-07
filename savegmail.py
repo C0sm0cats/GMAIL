@@ -280,8 +280,15 @@ def sign_in(reason):
     return creds
 
 
-def sign_in_quietly(timeout=300):
-    """Browser OAuth sign-in that prints nothing, for use while the list is on screen."""
+class WrongAccountError(Exception):
+    """Signed in again with another Google account than the one the list shows."""
+
+
+def sign_in_quietly(check=lambda creds: None, timeout=300):
+    """Browser OAuth sign-in that prints nothing, for use while the list is on screen.
+
+    check(creds) runs before token.json is written, and may raise to refuse the sign-in.
+    """
     flow = oauth_flow()
 
     class SilentBrowser(webbrowser.BaseBrowser):
@@ -291,6 +298,7 @@ def sign_in_quietly(timeout=300):
     webbrowser.register("savegmail-silent", None, SilentBrowser("savegmail-silent"))
     creds = flow.run_local_server(port=0, browser="savegmail-silent", authorization_prompt_message="",
                                   success_message=SIGN_IN_SUCCESS_PAGE, timeout_seconds=timeout)
+    check(creds)
     save_token(creds)
     return creds
 
@@ -1442,7 +1450,8 @@ def new_picker_state():
             "loading": False, "exhausted": True, "confirm": None, "help": False,
             "cursor_id": None, "sort": "date",
             "folder": None,
-            "syncing": False, "sync_note": None, "signed_out": False, "signing_in": False}
+            "syncing": False, "sync_note": None, "signed_out": False, "signing_in": False,
+            "sign_in_note": None}
 
 
 SYNC_INTERVAL = 60  # seconds between automatic syncs while the list is shown
@@ -1553,6 +1562,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             tail = [("class:dim", f" · {len(indexes)} match "), ("class:accent", state["query"])]
         if state["signing_in"]:
             tail.append(("class:error", " · ↻ sign in to Gmail in your browser…"))
+        elif state["signed_out"] and state["sign_in_note"] and time.monotonic() - state["sign_in_note"][1] < 10:
+            tail.append(("class:error", f" · {state['sign_in_note'][0]}"))
         elif state["signed_out"]:
             tail.append(("class:error", " · ↻ Gmail session expired" + ", r to sign in" * bool(sign_in)))
         elif state["syncing"]:
@@ -1961,7 +1972,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             await in_background(sign_in)
         except Exception as exc:
             debug(f"Sign-in failed: {exc}")
-            state["sync_note"] = ("class:error", "↻ sign-in failed, r to try again", time.monotonic())
+            failure = str(exc) if isinstance(exc, WrongAccountError) else "sign-in failed"
+            state["sign_in_note"] = (f"↻ {failure}, r to try again", time.monotonic())
         else:
             state["signed_out"] = False
         finally:
@@ -2567,14 +2579,26 @@ def interactive_download_main():
                 return False
             if not fresh.refresh_token or fresh.refresh_token == creds.refresh_token:
                 return False
+            try:
+                check_account(fresh)
+            except (RefreshError, WrongAccountError) as exc:
+                debug(f"token.json not picked up: {exc}")
+                return False
             adopt(fresh)
             return True
+
+        def check_account(fresh):
+            """Raise WrongAccountError unless fresh credentials open the mailbox the list shows."""
+            profile = build("gmail", "v1", credentials=fresh).users().getProfile(userId=user_id).execute()
+            address = profile.get("emailAddress", user_id)
+            if address.lower() != account.lower():
+                raise WrongAccountError(f"signed in as {address}, not {account}")
 
         def adopt(fresh):
             creds.token, creds._refresh_token, creds.expiry = fresh.token, fresh.refresh_token, fresh.expiry
 
         def sign_in_again():
-            adopt(sign_in_quietly())
+            adopt(sign_in_quietly(check_account))
 
         def sync_for(view):
             def sync(loaded):

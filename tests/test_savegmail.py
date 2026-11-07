@@ -787,6 +787,21 @@ class PickerTest(unittest.TestCase):
         self.assertEqual([message["id"] for message in messages], ["0"])
         self.assertEqual(action, "quit")
 
+    def test_r_with_another_account_says_so_and_stays_signed_out(self):
+        from google.auth.exceptions import RefreshError
+
+        def sync(loaded):
+            raise RefreshError("invalid_grant")
+
+        def sign_in():
+            raise savegmail.WrongAccountError("signed in as other@example.com, not me@example.com")
+
+        state = savegmail.new_picker_state()
+        self.assertEqual(pick_later("rq", make_messages(2), sync=sync, sign_in=sign_in, state=state)[0], "quit")
+        self.assertTrue(state["signed_out"])
+        self.assertEqual(state["sign_in_note"][0],
+                         "↻ signed in as other@example.com, not me@example.com, r to try again")
+
     def test_failed_load_more_can_be_retried(self):
         # m while the session expired or Gmail is unreachable: no trace, and m works again afterwards.
         from google.auth.exceptions import RefreshError
@@ -2712,6 +2727,117 @@ class BackgroundSyncSessionTest(unittest.TestCase):
         self.assertEqual(result["badges"]["Inbox"], ("2", "unread"))
         self.assertEqual(result["badges"]["Starred"], ("1", "unread"))
         self.assertEqual(result["badges"]["All mail"], ("2", "unread"))
+
+
+class SignInAgainSessionTest(unittest.TestCase):
+    """r and a token.json rewritten elsewhere, as interactive_download_main wires them to the Gmail connection."""
+
+    MAILBOXES = {"tokA": ("alice@example.com", "a1"), "tokA2": ("alice@example.com", "a1"),
+                 "tokB": ("alice.work@example.com", "b1")}
+
+    class Gmail:
+        """One fake Gmail per connection: answers for the account of the token its credentials carry now."""
+
+        def __init__(self, creds, revoked):
+            self.creds, self.revoked = creds, revoked
+
+        def __getattr__(self, name):  # users(), new_batch_http_request()...
+            if self.creds.token in self.revoked:
+                raise savegmail.RefreshError("invalid_grant: Token has been expired or revoked.")
+            address, msg_id = SignInAgainSessionTest.MAILBOXES[self.creds.token]
+            api = SyncedMailboxApi({msg_id: ["INBOX"]})
+            api.get = lambda userId, id, **kwargs: FakeResult({
+                "id": id, "labelIds": ["INBOX"], "internalDate": "1700000000000", "snippet": "", "sizeEstimate": 1,
+                "payload": {"headers": [{"name": "Subject", "value": "Subject"}]}})
+            api.getProfile = lambda userId: FakeResult({"emailAddress": address})
+            return getattr(api, name)
+
+    @staticmethod
+    def credentials(token):
+        return savegmail.Credentials(token=token, refresh_token="ref" + token[3:], client_id="id", client_secret="s")
+
+    def run_session(self, step, signs_in_as, other_launch_writes=None):
+        import io
+        import tempfile
+        from unittest import mock
+        from rich.console import Console
+        folder = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, folder, True)
+        token_path = os.path.join(folder, "token.json")
+        creds = self.credentials("tokA")
+        revoked, connections, calls = set(), [], []
+
+        def build(*args, credentials, **kwargs):
+            connections.append(credentials)
+            return self.Gmail(credentials, revoked)
+
+        class Flow:
+            def run_local_server(self, **kwargs):
+                return SignInAgainSessionTest.credentials(signs_in_as)
+
+        def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, sign_in):
+            if not calls:
+                calls.append(None)
+                revoked.add("tokA")  # the session expires while the list is open
+                if other_launch_writes:
+                    savegmail.save_token(self.credentials(other_launch_writes))
+                step(sync, sign_in, [dict(message) for message in messages])
+            return "quit", []
+
+        listed = [{"id": "a1", "from": "S <s@example.com>", "subject": "Subject", "snippet": "",
+                   "internalDate": 1_700_000_000_000, "labels": ["INBOX"]}]
+        with mock.patch.multiple(
+            savegmail, authenticate=lambda: creds, build=build, user_labels=lambda *a: {},
+            list_candidate_messages=lambda *a, **k: (listed, None), ask_user_to_select_messages=ask,
+            oauth_flow=lambda: Flow(), TOKEN_PATH=token_path, sync_playwright=lambda: FakePlaywright(),
+            launch_browser=lambda *a, **k: mock.Mock(), open_quietly=lambda url: True,
+            console=Console(file=io.StringIO()),
+        ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", folder]):
+            savegmail.interactive_download_main()
+        token = None
+        if os.path.exists(token_path):
+            token = savegmail.Credentials.from_authorized_user_file(token_path, savegmail.SCOPES).token
+        return creds, connections, token
+
+    def test_r_signs_the_gmail_connection_in_again(self):
+        # Expired session, r with the same account: the next sync goes through with the new token.
+        results = []
+
+        def step(sync, sign_in, loaded):
+            with self.assertRaises(savegmail.RefreshError):
+                sync(loaded)
+            sign_in()
+            results.append(sync(loaded))
+        creds, connections, token = self.run_session(step, signs_in_as="tokA2")
+        self.assertEqual((results[0]["new"], results[0]["gone"]), ([], set()))
+        self.assertEqual((creds.token, creds.refresh_token, token), ("tokA2", "refA2", "tokA2"))
+        self.assertTrue(all(connection is creds for connection in connections[:2]))  # service and sync_service
+
+    def test_r_with_another_account_is_refused(self):
+        # Signed in with another Google account: refused, the list stays on the first mailbox, signed out.
+        def step(sync, sign_in, loaded):
+            with self.assertRaisesRegex(savegmail.WrongAccountError, "alice.work@example.com"):
+                sign_in()
+            with self.assertRaises(savegmail.RefreshError):
+                sync(loaded)
+        creds, _, token = self.run_session(step, signs_in_as="tokB")
+        self.assertEqual((creds.token, token), ("tokA", None))
+
+    def test_token_of_another_account_written_elsewhere_is_not_adopted(self):
+        # Another launch signed in with another account: the expired list offers r instead of switching.
+        def step(sync, sign_in, loaded):
+            with self.assertRaises(savegmail.RefreshError):
+                sync(loaded)
+        creds, _, token = self.run_session(step, signs_in_as="tokA2", other_launch_writes="tokB")
+        self.assertEqual((creds.token, token), ("tokA", "tokB"))
+
+    def test_token_of_the_same_account_written_elsewhere_is_adopted(self):
+        results = []
+
+        def step(sync, sign_in, loaded):
+            results.append(sync(loaded))
+        creds, _, _ = self.run_session(step, signs_in_as="tokA2", other_launch_writes="tokA2")
+        self.assertEqual((results[0]["gone"], creds.token), (set(), "tokA2"))
 
 
 class HistoryMailboxApi(SyncedMailboxApi):
