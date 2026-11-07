@@ -2756,6 +2756,17 @@ class UndoAfterDeleteTest(unittest.TestCase):
             savegmail.interactive_download_main()
         return gmail, sorted(os.listdir(save_dir)), offered
 
+    def test_banner_stays_on_one_line_at_80_columns(self):
+        # The list leaves one line for the banner: a wrapped one scrolls the account and query off screen.
+        from rich.cells import cell_len
+        query = "has:attachment newer_than:30d -category:promotions"
+        self.run_session({"A": "inbox"}, [], args=("--query", query))
+        first, second = self.output.getvalue().split("\n")[:2]
+        self.assertLessEqual(cell_len(first), 79)
+        self.assertIn("me@example.com", first)
+        self.assertIn("query: has:attachment", first)
+        self.assertEqual(second, "")
+
     def test_save_keep_then_delete_keeps_the_only_copy(self):
         gmail, left, offered = self.run_session({"A": "inbox"}, [("save", ["A"]), ("delete", ["A"]), ("undo", [])])
         self.assertEqual(left, ["A-att.bin", "A.pdf"])
@@ -3678,6 +3689,38 @@ class MaxOptionTest(unittest.TestCase):
     def test_max_of_one_and_more_is_accepted(self):
         self.assertEqual(savegmail.positive_int("1"), 1)
         self.assertEqual(savegmail.positive_int("50"), 50)
+
+
+class BannerTest(unittest.TestCase):
+    """The banner above the list fits one line: account whole, query then folder shortened."""
+
+    def test_banner_fits_and_keeps_the_account(self):
+        import io
+
+        from rich.cells import cell_len
+        from rich.console import Console
+        account = "firstname.lastname.longcompany@example.com"
+        query = "has:attachment newer_than:30d -category:promotions"
+        folder = "~/Documents/Archives/Gmail/Personal/2025"
+        for account, columns, query_shown, folder_shown in ((account, 80, None, None),
+                                                            ("me@example.com", 60, None, None),
+                                                            (account, 200, query, folder)):
+            with self.subTest(columns=columns):
+                output = io.StringIO()
+                Console(file=output, width=columns).print(savegmail.banner_markup(account, query, folder, columns))
+                lines = output.getvalue().split("\n")
+                self.assertEqual(lines[1:], ["", ""])
+                self.assertLessEqual(cell_len(lines[0]), columns - 1)
+                self.assertIn(account, lines[0])
+                self.assertIn("query: has:", lines[0])
+                if query_shown:
+                    self.assertIn(query_shown, lines[0])
+                    self.assertTrue(lines[0].endswith(folder_shown))
+                else:
+                    self.assertRegex(lines[0], r"→ …\S*2025$")
+        output = io.StringIO()
+        Console(file=output, width=80).print(savegmail.banner_markup("me@example.com", "", "~/Gmail", 80))
+        self.assertEqual(output.getvalue(), " savegmail  ·  me@example.com  ·  query: (all)  ·  → ~/Gmail\n\n")
 
 
 class DownloadPathOptionTest(unittest.TestCase):

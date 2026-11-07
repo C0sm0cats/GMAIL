@@ -1226,6 +1226,45 @@ def fit(value, width):
     return "".join(kept) + "…" + " " * (width - 1 - used)
 
 
+def banner_markup(account, query, folder, columns):
+    """The startup line above the list, as Rich markup that fits on one line of columns.
+
+    The list leaves exactly one line for it (plus a blank one): a longer line would wrap and push the
+    account and query off the screen. The account stays whole; the query, then the folder, get shorter
+    first, the folder losing its start so its last folders stay readable. When they would get too short,
+    the separators get narrower, then the savegmail name goes.
+    """
+    account = strip_controls(account)
+    query = fit(query, cell_len(query)).rstrip() if query else ""
+    folder = strip_controls(folder)
+    shown_query = query or "(all)"
+    wanted = cell_len(shown_query) + cell_len(folder)
+    for named, gap in ((True, "  "), (True, " "), (False, " ")):
+        start = f" savegmail{gap}·{gap}" if named else " "
+        room = columns - 1 - cell_len(start + account + f"{gap}·{gap}query: {gap}·{gap}→ ")
+        if room >= min(wanted, 20):
+            break
+    if room < 2:
+        account = fit(account, max(1, cell_len(account) - (2 - room))).rstrip()
+        room = 2
+    if wanted > room:
+        query_width = min(cell_len(shown_query), max(room - cell_len(folder), room // 2))
+        folder_width = room - query_width
+        shown_query = fit(shown_query, query_width).rstrip()
+        if cell_len(folder) > folder_width:
+            kept, used = [], 0
+            for char in reversed(folder):
+                if used + cell_len(char) > folder_width - 1:
+                    break
+                kept.append(char)
+                used += cell_len(char)
+            folder = "…" + "".join(reversed(kept))
+    shown_query = escape(shown_query) if query else f"[dim]{escape(shown_query)}[/]"
+    start = f" [bold]savegmail[/]{gap}[dim]·[/]{gap}" if named else " "
+    return (f"{start}{escape(account)}{gap}[dim]·{gap}query:[/] "
+            f"{shown_query}{gap}[dim]·{gap}→[/] {escape(folder)}\n")
+
+
 def header_line(tabs, view, infos, tail, status, columns):
     """Fit the picker's one-line header into columns.
 
@@ -2710,13 +2749,9 @@ def interactive_download_main():
         except NETWORK_ERRORS as error:
             exit_unreachable(error)
         def make_banner():
-            return (
-                f" [bold]savegmail[/]  [dim]·[/]  {escape(account)}  [dim]·  query:[/] "
-                f"{escape(args.query) if args.query else '[dim](all)[/]'}  [dim]·  →[/] {escape(shown_dir)}\n"
-            )
+            return banner_markup(account, args.query, shown_dir, console.width)
 
-        banner = make_banner()
-        console.print(banner)
+        console.print(make_banner())
         global ACCOUNT, USER_LABELS
         ACCOUNT = account
         USER_LABELS = user_labels(service, user_id)
@@ -2935,10 +2970,9 @@ def interactive_download_main():
                 else:
                     save_dir = os.path.abspath(wanted)
                     shown_dir = home_relative(save_dir)
-                    banner = make_banner()
                     notice = [[("class:checked", " ✓ "), ("", "Download folder: "), ("class:dim", shown_dir)]]
                 console.clear()
-                console.print(banner)
+                console.print(make_banner())
                 continue
 
             try:
@@ -3208,7 +3242,7 @@ def interactive_download_main():
                                ("class:dim", " · " + fit(error_text(exc), 80).rstrip())]]
 
             console.clear()
-            console.print(banner)
+            console.print(make_banner())
 
         # The screen only holds our banner (cleared at launch): leave just the session result behind.
         console.clear()
