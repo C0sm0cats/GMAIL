@@ -1881,6 +1881,44 @@ class PdfHeaderTest(unittest.TestCase):
         self.assertEqual(printed["margin"]["top"], "128px")
         self.assertEqual(printed["margin"]["bottom"], "128px")
 
+    def header_for(self, **headers):
+        import base64
+        import tempfile
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["Subject"] = "Point projet"
+        msg["From"] = "Alice Martin <alice@example.com>"
+        for name, value in headers.items():
+            msg[name.replace("_", "-")] = value
+        msg.set_content("Bonjour")
+        options = []
+
+        class OptionsPage(ContentRecordingPage):
+            def pdf(self, path, **kwargs):
+                options.append(kwargs)
+                super().pdf(path, **kwargs)
+
+        class OptionsBrowser(ContentRecordingBrowser):
+            def new_page(self, **kwargs):
+                page = OptionsPage()
+                self.pages.append(page)
+                return page
+
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(
+                FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1", save_dir,
+                OptionsBrowser())
+        return options[0]["header_template"]
+
+    def test_header_omits_empty_reply_to_and_cc_and_spaces_commas(self):
+        header = self.header_for(To="Paul Martin <paul@example.com>, Marie Curie <marie@example.com>")
+        self.assertIn("To : Paul Martin paul@example.com, Marie Curie marie@example.com</div>", header)
+        self.assertNotIn("Reply To", header)
+        self.assertNotIn("Cc :", header)
+        header = self.header_for(To="paul@example.com", Reply_To="Bob <bob@example.com>", Cc="carol@example.com")
+        self.assertIn("<div>Reply To : Bob bob@example.com</div>", header)
+        self.assertIn("<div>Cc : carol@example.com</div>", header)
+
 
 class AttachmentListTest(unittest.TestCase):
     """Attachments are listed once, after the body, in readable text, not in the footer of every page."""

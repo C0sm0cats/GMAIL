@@ -749,13 +749,14 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         header_template = """
             <div style="font-family: Arial, sans-serif; font-size: 10px; line-height: normal; color: #666; text-align: center; width: 100%; box-sizing: border-box; padding: 0 12px; overflow-wrap: anywhere; display: flow-root">
                 <h3 style='margin-top: 0px;'>{subject}</h3>
-                <div>From : {fro}</div>
-                <div>Reply To : {reply}</div>
-                <div>To : {to}</div>
-                <div>Cc : {cc}</div>
+                <div>From : {fro}</div>{reply}
+                <div>To : {to}</div>{cc}
                 <div>Date : {date}</div>
             </div>
-        """.format(fro=fro, reply=reply, to=to, cc=cc, date=date, subject=html.escape(subject))
+        """.format(fro=fro, to=to, date=date, subject=html.escape(subject),
+                   # Most emails have no Reply-To or Cc: an empty line would only push the body down.
+                   reply=f"\n                <div>Reply To : {reply}</div>" if reply else "",
+                   cc=f"\n                <div>Cc : {cc}</div>" if cc else "")
         footer_template = f"""
             <div style="font-family: Arial, sans-serif; font-size: 10px; line-height: normal; color: #666; text-align: center; width: 100%; box-sizing: border-box; padding: 0 12px; overflow-wrap: anywhere; display: flow-root">
                 <div><a href='https://mail.google.com/mail/u/0/#inbox/{msg_id}'>View in Gmail</a></div>
