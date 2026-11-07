@@ -4169,6 +4169,21 @@ class TokenFileModeTest(unittest.TestCase):
         finally:
             os.umask(old_umask)
 
+    def test_quiet_sign_in_gives_up_after_a_while(self):
+        # A closed sign-in tab must not leave "signing in…" forever with r disabled.
+        import tempfile
+        from unittest import mock
+        flow = mock.Mock()
+        flow.run_local_server.return_value = self.FakeCreds()
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(savegmail, "oauth_flow", return_value=flow), \
+                mock.patch.object(savegmail.webbrowser, "register"), \
+                mock.patch.object(savegmail, "TOKEN_PATH", os.path.join(folder, "token.json")):
+            savegmail.sign_in_quietly()
+            savegmail.sign_in_quietly(timeout=7)
+        timeouts = [call.kwargs.get("timeout_seconds") for call in flow.run_local_server.call_args_list]
+        self.assertEqual(timeouts, [300, 7])
+
 
 if __name__ == "__main__":
     unittest.main()
