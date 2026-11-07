@@ -545,6 +545,8 @@ def empty_trash(service):
 
         console.print(f"[green]✓[/] {len(ids)} message(s) permanently deleted from trash.")
 
+    except PartialBatchError as e:
+        console.print(f"[red]✗[/] {len(e.done)} message(s) permanently deleted from trash, then: {escape(str(e))}")
     except Exception as e:
         console.print(f"[red]✗[/] Error while emptying trash: {escape(str(e))}")
 
@@ -622,6 +624,10 @@ def mark_read(service, user_id, messages):
         return
     try:
         modify_labels(service, user_id, [message["id"] for message in unread], remove=["UNREAD"])
+    except PartialBatchError as exc:
+        debug(f"Could not mark as read: {exc}")
+        done = set(exc.done)
+        unread = [message for message in unread if message["id"] in done]
     except HttpError as exc:
         debug(f"Could not mark as read: {exc}")
         return
@@ -629,11 +635,42 @@ def mark_read(service, user_id, messages):
         message["labels"] = [label for label in message["labels"] if label != "UNREAD"]
 
 
+class PartialBatchError(Exception):
+    """A call per 1000 ids failed after earlier ones went through: done lists their ids, error is Gmail's."""
+
+    def __init__(self, done, error):
+        super().__init__(str(error))
+        self.done, self.error = done, error
+
+
+def per_thousand(ids, call):
+    """call(chunk) for every 1000 ids (Gmail's limit); each call stands alone, so a failure after the first
+    raises PartialBatchError with the ids already done, and a failure of the first one raises as is."""
+    ids = list(ids)
+    for start in range(0, len(ids), 1000):
+        try:
+            call(ids[start:start + 1000])
+        except Exception as exc:
+            if start:
+                raise PartialBatchError(ids[:start], exc) from exc
+            raise
+
+
+def batch_outcome(call, errors=Exception):
+    """(ids done, error) of a modify_labels / delete_messages call: (None, None) when all went through."""
+    try:
+        call()
+    except PartialBatchError as exc:
+        return set(exc.done), exc.error
+    except errors as exc:
+        return set(), exc
+    return None, None
+
+
 def modify_labels(service, user_id, ids, add=(), remove=()):
     """Add / remove Gmail labels (STARRED, INBOX, SPAM…) on messages, in one call per 1000."""
-    for start in range(0, len(ids), 1000):
-        body = {"ids": ids[start:start + 1000], "addLabelIds": list(add), "removeLabelIds": list(remove)}
-        service.users().messages().batchModify(userId=user_id, body=body).execute()
+    per_thousand(ids, lambda chunk: service.users().messages().batchModify(
+        userId=user_id, body={"ids": chunk, "addLabelIds": list(add), "removeLabelIds": list(remove)}).execute())
 
 
 def gmail_url(account, msg_id):
@@ -653,8 +690,8 @@ def list_trash_ids(service, user_id):
 
 def delete_messages(service, user_id, ids):
     """Permanently delete messages, bypassing the trash. Cannot be undone."""
-    for start in range(0, len(ids), 1000):
-        service.users().messages().batchDelete(userId=user_id, body={"ids": ids[start:start + 1000]}).execute()
+    per_thousand(ids, lambda chunk: service.users().messages().batchDelete(
+        userId=user_id, body={"ids": chunk}).execute())
 
 
 def trash_messages(service, user_id, ids):
@@ -2136,12 +2173,11 @@ def interactive_download_main():
                     each["state"]["saved"] -= set(unsaved)
                 unarchived = []
                 if undo.get("archived"):
-                    try:
-                        modify_labels(service, user_id, [message["id"] for message in undo["archived"]], add=["INBOX"])
-                    except HttpError as exc:
-                        errors.update({message["id"]: exc for message in undo["archived"]})
-                    else:
-                        unarchived = undo["archived"]
+                    done, error = batch_outcome(lambda: modify_labels(
+                        service, user_id, [message["id"] for message in undo["archived"]], add=["INBOX"]), HttpError)
+                    unarchived = [message for message in undo["archived"] if done is None or message["id"] in done]
+                    errors.update({message["id"]: error for message in undo["archived"]
+                                   if done is not None and message["id"] not in done})
                 if restored or unarchived:
                     # Emails go back to whichever views they belong to.
                     refresh_view(view)
@@ -2165,30 +2201,35 @@ def interactive_download_main():
                 # Archive leaves the Inbox; "not spam" and unarchive go back to it, like in Gmail.
                 add, remove = {"archive": ([], ["INBOX"]), "not_spam": (["INBOX"], ["SPAM"]),
                                "unarchive": (["INBOX"], [])}[action]
-                try:
-                    modify_labels(service, user_id, list(ids), add=add, remove=remove)
-                except HttpError as exc:
-                    notice = [[("class:error", " ✗ "), ("", f"Could not {'archive' if action == 'archive' else 'move'} "
-                                                         f"{plural(len(ids), 'email')}"),
-                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
-                else:
-                    for message in chosen:
+                # Gmail takes 1000 emails per call: a failed call can follow ones that went through.
+                done, error = batch_outcome(lambda: modify_labels(service, user_id, list(ids), add=add, remove=remove),
+                                            HttpError)
+                moved = [message for message in chosen if done is None or message["id"] in done]
+                notice = []
+                if moved:
+                    for message in moved:
                         message["labels"] = [label for label in message.get("labels", []) if label not in remove] + add
                     if view["name"] in {"Inbox", "Spam", "Archived"}:
-                        drop(view, ids)
+                        drop(view, {message["id"] for message in moved})
                     if action == "archive":
-                        undo = {"label": "archive", "trashed": [], "files": {}, "archived": chosen}
-                        notice = [[("class:checked", " ✓ "), ("", f"{plural(len(chosen), 'email')} archived"),
+                        undo = {"label": "archive", "trashed": [], "files": {}, "archived": moved}
+                        notice = [[("class:checked", " ✓ "), ("", f"{plural(len(moved), 'email')} archived"),
                                    ("class:dim class:keyhint", " · u undo")]]
                     else:
-                        notice = [[("class:checked", " ✓ "), ("", f"{plural(len(chosen), 'email')} moved to the Inbox")]]
+                        notice = [[("class:checked", " ✓ "), ("", f"{plural(len(moved), 'email')} moved to the Inbox")]]
+                if error is not None:
+                    notice.append([("class:error", " ✗ "),
+                                   ("", f"Could not {'archive' if action == 'archive' else 'move'} "
+                                        f"{plural(len(chosen) - len(moved), 'email')}"),
+                                   ("class:dim", " · " + fit(str(error), 80).rstrip())])
 
             elif action == "restore":
                 with console.status("[dim]Restoring from trash…[/]"):
                     errors = untrash_messages(service, user_id, list(ids))
                 restored = [message for message in chosen if message["id"] not in errors]
                 drop(view, {message["id"] for message in restored})
-                notice = [[("class:checked", " ↶ "), ("", f"{plural(len(restored), 'email')} restored from trash")]]
+                notice = [[("class:checked", " ↶ "), ("", f"{plural(len(restored), 'email')} restored from trash")]
+                          if restored else [("class:error", " ✗ "), ("", "Nothing restored from trash")]]
                 notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
 
             elif action == "trash":
@@ -2200,7 +2241,8 @@ def interactive_download_main():
                     undo = {"label": "trash", "trashed": trashed, "files": {}}
                 totals["trashed"] += len(trashed)
                 notice = [[("class:checked", " ✓ "), ("", f"{plural(len(trashed), 'email')} moved to trash (not saved)"),
-                           ("class:dim class:keyhint", " · u undo" if trashed else "")]]
+                           ("class:dim class:keyhint", " · u undo")]
+                          if trashed else [("class:error", " ✗ "), ("", "Nothing moved to trash")]]
                 notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
 
             elif action == "open":
@@ -2211,64 +2253,79 @@ def interactive_download_main():
             elif action == "unread":
                 # Like star: mark them all unread, unless they all already are, then mark them read.
                 unread = not all("UNREAD" in message.get("labels", []) for message in chosen)
-                try:
-                    modify_labels(service, user_id, list(ids), **{"add" if unread else "remove": ["UNREAD"]})
-                except HttpError as exc:
-                    notice = [[("class:error", " ✗ "), ("", "Could not change the read state"),
-                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
-                else:
-                    for message in chosen:
-                        labels = [label for label in message.get("labels", []) if label != "UNREAD"]
-                        message["labels"] = labels + ["UNREAD"] if unread else labels
-                    notice = [[("class:checked", " ● " if unread else " ○ "),
-                               ("", f"{plural(len(chosen), 'email')} marked as {'unread' if unread else 'read'}")]]
+                done, error = batch_outcome(lambda: modify_labels(
+                    service, user_id, list(ids), **{"add" if unread else "remove": ["UNREAD"]}), HttpError)
+                changed = [message for message in chosen if done is None or message["id"] in done]
+                for message in changed:
+                    labels = [label for label in message.get("labels", []) if label != "UNREAD"]
+                    message["labels"] = labels + ["UNREAD"] if unread else labels
+                notice = [[("class:checked", " ● " if unread else " ○ "),
+                           ("", f"{plural(len(changed), 'email')} marked as {'unread' if unread else 'read'}")]
+                          ] if changed else []
+                if error is not None:
+                    notice.append([("class:error", " ✗ "), ("", "Could not change the read state" + (
+                        f" of {plural(len(chosen) - len(changed), 'email')}" if changed else "")),
+                                   ("class:dim", " · " + fit(str(error), 80).rstrip())])
 
             elif action == "star":
                 # Like Gmail: star them all, unless they all are already starred.
                 star = not all("STARRED" in message.get("labels", []) for message in chosen)
-                try:
-                    modify_labels(service, user_id, list(ids), **{"add" if star else "remove": ["STARRED"]})
-                except HttpError as exc:
-                    notice = [[("class:error", " ✗ "), ("", "Could not change the star"),
-                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
-                else:
-                    for message in chosen:
-                        labels = [label for label in message.get("labels", []) if label != "STARRED"]
-                        message["labels"] = labels + ["STARRED"] if star else labels
-                    notice = [[("class:star", " ★ " if star else " ☆ "),
-                               ("", f"{plural(len(chosen), 'email')} {'starred' if star else 'unstarred'}")]]
+                done, error = batch_outcome(lambda: modify_labels(
+                    service, user_id, list(ids), **{"add" if star else "remove": ["STARRED"]}), HttpError)
+                changed = [message for message in chosen if done is None or message["id"] in done]
+                for message in changed:
+                    labels = [label for label in message.get("labels", []) if label != "STARRED"]
+                    message["labels"] = labels + ["STARRED"] if star else labels
+                notice = [[("class:star", " ★ " if star else " ☆ "),
+                           ("", f"{plural(len(changed), 'email')} {'starred' if star else 'unstarred'}")]
+                          ] if changed else []
+                if error is not None:
+                    notice.append([("class:error", " ✗ "), ("", "Could not change the star" + (
+                        f" of {plural(len(chosen) - len(changed), 'email')}" if changed else "")),
+                                   ("class:dim", " · " + fit(str(error), 80).rstrip())])
 
             elif action == "empty_trash":
-                try:
-                    with console.status("[dim]Emptying trash…[/]"):
-                        trash_ids = list_trash_ids(service, user_id)
-                        delete_messages(service, user_id, trash_ids)
-                except Exception as exc:
-                    notice = [[("class:error", " ✗ "), ("", "Could not empty the trash"),
-                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
-                else:
+                trash_ids = []
+
+                def empty():
+                    trash_ids.extend(list_trash_ids(service, user_id))
+                    delete_messages(service, user_id, trash_ids)
+                with console.status("[dim]Emptying trash…[/]"):
+                    deleted, error = batch_outcome(empty)
+                notice = []
+                if deleted is None:
+                    # Everything in the trash is gone for good, including emails saved with s from the Trash.
+                    deleted = set(trash_ids) | ({message["id"] for message in undo["trashed"]} if undo else set())
                     if view["in_trash"]:
                         drop(view, {message["id"] for message in messages})
-                    # Everything in the trash is gone for good, including emails saved with s from the Trash.
-                    undo = forget_deleted(undo, set(trash_ids) | {message["id"] for message in undo["trashed"]}
-                                          if undo else set())
-                    totals["deleted"] += len(trash_ids)
                     notice = [[("class:checked", " ✓ "),
                                ("", f"Trash emptied · {plural(len(trash_ids), 'email')} permanently deleted")]]
+                elif deleted:
+                    # Gmail takes 1000 emails per call: the ones before the failed call are gone.
+                    if view["in_trash"]:
+                        drop(view, deleted)
+                    notice = [[("class:checked", " ✓ "), ("", f"{plural(len(deleted), 'email')} permanently deleted")]]
+                if deleted:
+                    undo = forget_deleted(undo, deleted)
+                    totals["deleted"] += len(deleted & set(trash_ids))
+                if error is not None:
+                    notice.append([("class:error", " ✗ "), ("", "Could not empty the trash"),
+                                   ("class:dim", " · " + fit(str(error), 80).rstrip())])
 
             elif action == "delete":
-                try:
-                    with console.status("[dim]Deleting…[/]"):
-                        delete_messages(service, user_id, list(ids))
-                except Exception as exc:
-                    # batchDelete is all-or-nothing: nothing was deleted.
-                    notice = [[("class:error", " ✗ "), ("", f"Could not delete {plural(len(ids), 'email')}"),
-                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
-                else:
-                    drop(view, ids)
-                    totals["deleted"] += len(ids)
-                    undo = forget_deleted(undo, ids)
-                    notice = [[("class:checked", " ✓ "), ("", f"{plural(len(ids), 'email')} permanently deleted")]]
+                with console.status("[dim]Deleting…[/]"):
+                    deleted, error = batch_outcome(lambda: delete_messages(service, user_id, list(ids)))
+                # Each call of 1000 is all-or-nothing, not the whole: the ones before a failed call are gone.
+                deleted = ids if deleted is None else deleted
+                notice = []
+                if deleted:
+                    drop(view, deleted)
+                    totals["deleted"] += len(deleted)
+                    undo = forget_deleted(undo, deleted)
+                    notice = [[("class:checked", " ✓ "), ("", f"{plural(len(deleted), 'email')} permanently deleted")]]
+                if error is not None:
+                    notice.append([("class:error", " ✗ "), ("", f"Could not delete {plural(len(ids) - len(deleted), 'email')}"),
+                                   ("class:dim", " · " + fit(str(error), 80).rstrip())])
 
             else:
                 trash_after = action == "download"
@@ -2288,9 +2345,9 @@ def interactive_download_main():
                     if saved:
                         undo = {"label": "save+keep", "trashed": [], "files": files}
                     summary += " · kept in Gmail"
-                notice = [[("class:checked", " ✓ "), ("", summary), ("class:dim", f" → {shown_dir}")]]
-                if saved:
-                    notice[0].append(("class:dim class:keyhint", " · u undo"))
+                notice = [[("class:checked", " ✓ "), ("", summary), ("class:dim", f" → {shown_dir}"),
+                           ("class:dim class:keyhint", " · u undo")]
+                          if saved else [("class:error", " ✗ "), ("", "Nothing saved")]]
                 notice += failure_notice(chosen, failed)
 
             console.clear()

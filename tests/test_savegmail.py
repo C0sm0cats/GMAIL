@@ -609,8 +609,9 @@ class PdfFileNameTest(unittest.TestCase):
 class FakeGmail:
     """Where each email is in a fake Gmail: inbox, archive, trash or gone (permanently deleted)."""
 
-    def __init__(self, places, save_dir, failing_untrash=()):
+    def __init__(self, places, save_dir, failing_untrash=(), failing=()):
         self.places, self.save_dir, self.failing_untrash = dict(places), save_dir, set(failing_untrash)
+        self.failing = set(failing)  # emails whose save or move to trash fails
 
     def message(self, msg_id):
         return {"id": msg_id, "from": f"S <{msg_id}@example.com>", "subject": f"Subject {msg_id}",
@@ -622,6 +623,8 @@ class FakeGmail:
 
     def save_messages(self, service, user_id, messages, save_dir, browser, trash_after):
         files = {}
+        failed = {message["id"]: "PDF generation failed: timeout" for message in messages if message["id"] in self.failing}
+        messages = [message for message in messages if message["id"] not in self.failing]
         for message in messages:
             paths = [os.path.join(save_dir, f"{message['id']}.pdf"), os.path.join(save_dir, f"{message['id']}-att.bin")]
             for path in paths:
@@ -630,12 +633,13 @@ class FakeGmail:
             files[message["id"]] = paths
             if trash_after:
                 self.places[message["id"]] = "trash"
-        return list(messages), len(messages), {}, files
+        return list(messages), len(messages), failed, files
 
     def trash_messages(self, service, user_id, ids):
         for msg_id in ids:
-            self.places[msg_id] = "trash"
-        return {}
+            if msg_id not in self.failing:
+                self.places[msg_id] = "trash"
+        return {msg_id: RuntimeError("Backend Error") for msg_id in ids if msg_id in self.failing}
 
     def untrash_messages(self, service, user_id, ids):
         errors = {}
@@ -681,13 +685,81 @@ class FakePlaywright:
         pass
 
 
+class FakeBatchApi:
+    """Gmail API whose batchDelete / batchModify move emails in a FakeGmail; the fail_on-th call fails."""
+
+    def __init__(self, fail_on=None):
+        self.gmail, self.fail_on, self.calls = None, fail_on, []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def getProfile(self, userId):
+        return FakeResult({"emailAddress": "me@example.com"})
+
+    def batchDelete(self, userId, body):
+        return self.request("batchDelete", body["ids"], lambda msg_id: "gone")
+
+    def batchModify(self, userId, body):
+        def place(msg_id):
+            if "INBOX" in body["addLabelIds"]:
+                return "inbox"
+            return "archive" if "INBOX" in body["removeLabelIds"] else self.gmail.places[msg_id]
+        return self.request("batchModify", body["ids"], place)
+
+    def request(self, name, ids, place):
+        from unittest import mock
+        self.calls.append((name, len(ids)))
+        failing = len(self.calls) == self.fail_on
+
+        def execute():
+            if failing:
+                raise savegmail.HttpError(mock.Mock(status=503, reason="Backend Error"), b"Backend Error")
+            if self.gmail is not None:
+                for msg_id in ids:
+                    self.gmail.places[msg_id] = place(msg_id)
+            return {}
+        return mock.Mock(execute=execute)
+
+
+class GmailCallSizeTest(unittest.TestCase):
+    """Gmail takes at most 1000 ids per batchDelete / batchModify."""
+
+    def test_delete_messages_splits_by_1000(self):
+        api = FakeBatchApi()
+        savegmail.delete_messages(api, "me", [str(i) for i in range(1500)])
+        self.assertEqual(api.calls, [("batchDelete", 1000), ("batchDelete", 500)])
+
+    def test_modify_labels_splits_by_1000(self):
+        api = FakeBatchApi()
+        savegmail.modify_labels(api, "me", [str(i) for i in range(2000)], add=["STARRED"])
+        self.assertEqual(api.calls, [("batchModify", 1000), ("batchModify", 1000)])
+
+    def test_failed_later_call_reports_what_was_done(self):
+        for call, name in [(savegmail.delete_messages, "batchDelete"), (savegmail.modify_labels, "batchModify")]:
+            with self.subTest(name=name):
+                ids = [str(i) for i in range(1500)]
+                with self.assertRaises(savegmail.PartialBatchError) as caught:
+                    call(FakeBatchApi(fail_on=2), "me", ids)
+                self.assertEqual(caught.exception.done, ids[:1000])
+                self.assertIsInstance(caught.exception.error, savegmail.HttpError)
+                # A first call that fails: nothing was done, the Gmail error as is.
+                with self.assertRaises(savegmail.HttpError):
+                    call(FakeBatchApi(fail_on=1), "me", ids)
+
+
 class UndoAfterDeleteTest(unittest.TestCase):
     """Drives interactive_download_main with a fake Gmail and scripted keys, like s, D, u."""
 
-    def run_session(self, places, steps, failing_untrash=()):
+    def run_session(self, places, steps, failing_untrash=(), failing=(), api=None):
         """steps: (action, ids); an undo is only pressed when u is offered, as in the list.
 
-        Returns (fake Gmail, files left in the download folder, undo label offered before each step).
+        api: a fake Gmail API (FakeBatchApi) that the real modify_labels and delete_messages call.
+        Returns (fake Gmail, files left in the download folder, undo label offered before each step);
+        self.notices holds the notice shown before each step, as plain text lines.
         """
         import io
         import tempfile
@@ -695,11 +767,14 @@ class UndoAfterDeleteTest(unittest.TestCase):
         from rich.console import Console
         save_dir = tempfile.mkdtemp()
         self.addCleanup(__import__("shutil").rmtree, save_dir, True)
-        gmail = FakeGmail(places, save_dir, failing_untrash)
-        steps, offered = list(steps), []
+        gmail = FakeGmail(places, save_dir, failing_untrash, failing)
+        if api is not None:
+            api.gmail = gmail
+        steps, offered, self.notices = list(steps), [], []
 
         def ask(messages, load_more, state, notice, undo_label, *rest):
             offered.append(undo_label)
+            self.notices.append(["".join(text for _, text in line) for line in notice])
             if not steps:
                 return "quit", []
             action, ids = steps.pop(0)
@@ -709,9 +784,10 @@ class UndoAfterDeleteTest(unittest.TestCase):
 
         fakes = {name: getattr(gmail, name) for name in [
             "list_candidate_messages", "save_messages", "trash_messages", "untrash_messages",
-            "modify_labels", "list_trash_ids", "delete_messages"]}
+            "modify_labels", "list_trash_ids", "delete_messages"]
+            if api is None or name not in {"modify_labels", "delete_messages"}}
         with mock.patch.multiple(
-            savegmail, authenticate=lambda: object(), build=lambda *a, **k: FakeSessionService(),
+            savegmail, authenticate=lambda: object(), build=lambda *a, **k: api or FakeSessionService(),
             user_labels=lambda *a: {}, ask_user_to_select_messages=ask,
             refresh_messages=lambda *a, **k: ([], set()), refresh_labels=lambda *a: 0,
             sync_playwright=lambda: FakePlaywright(), launch_browser=lambda *a, **k: mock.Mock(),
@@ -759,6 +835,76 @@ class UndoAfterDeleteTest(unittest.TestCase):
                                                 [("archive", ["A", "B"]), ("delete", ["B"]), ("undo", [])])
         self.assertEqual(offered[-2], "archive (1)")
         self.assertEqual(gmail.places, {"A": "inbox", "B": "gone"})
+
+    def test_partial_delete_keeps_the_deleted_emails_files(self):
+        ids = [f"m{i}" for i in range(1500)]
+        api = FakeBatchApi(fail_on=2)
+        gmail, left, offered = self.run_session({msg_id: "inbox" for msg_id in ids},
+                                                [("save", ids), ("delete", ids), ("undo", [])], api=api)
+        self.assertEqual(api.calls, [("batchDelete", 1000), ("batchDelete", 500)])
+        self.assertEqual(self.notices[2][0], " ✓ 1000 emails permanently deleted")
+        self.assertTrue(self.notices[2][1].startswith(" ✗ Could not delete 500 emails"))
+        self.assertEqual(offered[2], "save+keep (500)")
+        # u removes only the files of the 500 emails still in Gmail; the others are the only copy.
+        self.assertEqual(len(left), 2000)
+        gone = {msg_id for msg_id, place in gmail.places.items() if place == "gone"}
+        self.assertEqual(len(gone), 1000)
+        self.assertEqual({name.split(".")[0].split("-")[0] for name in left}, gone)
+
+    def test_partial_empty_trash_counts_the_deleted_emails(self):
+        ids = [f"m{i}" for i in range(1500)]
+        gmail, left, offered = self.run_session({msg_id: "trash" for msg_id in ids}, [("empty_trash", [])],
+                                                api=FakeBatchApi(fail_on=2))
+        self.assertEqual(self.notices[1][0], " ✓ 1000 emails permanently deleted")
+        self.assertTrue(self.notices[1][1].startswith(" ✗ Could not empty the trash"))
+        self.assertEqual(sum(place == "gone" for place in gmail.places.values()), 1000)
+
+    def test_partial_archive_can_be_undone(self):
+        ids = [f"m{i}" for i in range(1500)]
+        gmail, left, offered = self.run_session({msg_id: "inbox" for msg_id in ids}, [("archive", ids), ("undo", [])],
+                                                api=FakeBatchApi(fail_on=2))
+        self.assertEqual(self.notices[1][0], " ✓ 1000 emails archived · u undo")
+        self.assertTrue(self.notices[1][1].startswith(" ✗ Could not archive 500 emails"))
+        self.assertEqual(offered[1], "archive (1000)")
+        self.assertEqual(set(gmail.places.values()), {"inbox"})
+
+    def test_partial_star_and_read_state(self):
+        ids = [f"m{i}" for i in range(1500)]
+        for action, done, failed in [("star", " ★ 1000 emails starred", " ✗ Could not change the star of 500 emails"),
+                                     ("unread", " ● 1000 emails marked as unread",
+                                      " ✗ Could not change the read state of 500 emails")]:
+            with self.subTest(action=action):
+                self.run_session({msg_id: "inbox" for msg_id in ids}, [(action, ids)], api=FakeBatchApi(fail_on=2))
+                self.assertEqual(self.notices[1][0], done)
+                self.assertTrue(self.notices[1][1].startswith(failed))
+
+    def test_nothing_done_shows_no_success(self):
+        cases = [("download", "inbox", {}, " ✗ Nothing saved"), ("save", "inbox", {}, " ✗ Nothing saved"),
+                 ("trash", "inbox", {}, " ✗ Nothing moved to trash"),
+                 ("restore", "trash", {"failing_untrash": {"A"}}, " ✗ Nothing restored from trash")]
+        for action, place, failures, first in cases:
+            with self.subTest(action=action):
+                failures = failures or {"failing": {"A"}}
+                gmail, left, offered = self.run_session({"A": place}, [(action, ["A"])], **failures)
+                self.assertEqual(self.notices[1][0], first)
+                self.assertTrue(self.notices[1][1].startswith(" ✗ Subject A"))
+                self.assertEqual(gmail.places["A"], place)
+                self.assertIsNone(offered[1])
+
+
+class EmptyTrashCommandTest(unittest.TestCase):
+    def test_partial_failure_reports_deleted_emails(self):
+        import io
+        from unittest import mock
+        from rich.console import Console
+        ids = [str(i) for i in range(1500)]
+        output = io.StringIO()
+        test_console = Console(file=output, width=200)
+        test_console.input = lambda prompt: "y"
+        with mock.patch.multiple(savegmail, console=test_console, list_trash_ids=lambda *a: ids):
+            savegmail.empty_trash(FakeBatchApi(fail_on=2))
+        self.assertIn("1000 message(s) permanently deleted from trash, then: ", output.getvalue())
+        self.assertIn("Backend Error", output.getvalue())
 
 
 if __name__ == "__main__":
