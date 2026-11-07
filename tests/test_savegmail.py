@@ -717,6 +717,8 @@ class FakePlaywright:
 class FakeBatchApi:
     """Gmail API whose batchDelete / batchModify move emails in a FakeGmail; the fail_on-th call fails."""
 
+    real_calls = {"modify_labels", "delete_messages"}  # savegmail functions run_session leaves real
+
     def __init__(self, fail_on=None):
         self.gmail, self.fail_on, self.calls = None, fail_on, []
 
@@ -752,6 +754,20 @@ class FakeBatchApi:
                     self.gmail.places[msg_id] = place(msg_id)
             return {}
         return mock.Mock(execute=execute)
+
+
+class FakeMailboxApi(FakeBatchApi):
+    """FakeBatchApi that also lists emails like Gmail's messages.list: trash only when labelIds asks for it."""
+
+    real_calls = FakeBatchApi.real_calls | {"list_trash_ids"}
+
+    def list(self, userId, labelIds=None, maxResults=100, pageToken=None, **kwargs):
+        wanted = {"trash"} if labelIds and "TRASH" in labelIds else {"inbox", "archive"}
+        return FakeResult({"messages": [{"id": msg_id} for msg_id, place in self.gmail.places.items()
+                                        if place in wanted]})
+
+    def list_next(self, request, results):
+        return None
 
 
 class GmailCallSizeTest(unittest.TestCase):
@@ -814,7 +830,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
         fakes = {name: getattr(gmail, name) for name in [
             "list_candidate_messages", "save_messages", "trash_messages", "untrash_messages",
             "modify_labels", "list_trash_ids", "delete_messages"]
-            if api is None or name not in {"modify_labels", "delete_messages"}}
+            if api is None or name not in api.real_calls}
         with mock.patch.multiple(
             savegmail, authenticate=lambda: object(), build=lambda *a, **k: api or FakeSessionService(),
             user_labels=lambda *a: {}, ask_user_to_select_messages=ask,
@@ -960,6 +976,41 @@ class EmptyTrashCommandTest(unittest.TestCase):
                 calls, output = self.run_empty_trash(answer)
                 self.assertEqual(calls, [("batchDelete", 2)])
                 self.assertIn("2 message(s) permanently deleted from trash.", output)
+
+
+class ActionTargetsTest(unittest.TestCase):
+    """D, d, T and --trash act on the chosen emails or the trash only, never on the rest of the view or mailbox."""
+
+    run_session = UndoAfterDeleteTest.run_session
+
+    def test_delete_removes_only_the_chosen_email(self):
+        gmail, left, offered = self.run_session({"m0": "inbox", "m1": "inbox", "m2": "inbox"}, [("delete", ["m1"])],
+                                                api=FakeMailboxApi())
+        self.assertEqual(gmail.places, {"m0": "inbox", "m1": "gone", "m2": "inbox"})
+        self.assertEqual(self.notices[1][0], " ✓ 1 email permanently deleted")
+
+    def test_trash_moves_only_the_chosen_email(self):
+        gmail, left, offered = self.run_session({"m0": "inbox", "m1": "inbox", "m2": "inbox"}, [("trash", ["m1"])])
+        self.assertEqual(gmail.places, {"m0": "inbox", "m1": "trash", "m2": "inbox"})
+
+    def test_empty_trash_deletes_only_the_trash(self):
+        gmail, left, offered = self.run_session({"m0": "inbox", "m1": "archive", "t1": "trash"},
+                                                [("empty_trash", [])], api=FakeMailboxApi())
+        self.assertEqual(gmail.places, {"m0": "inbox", "m1": "archive", "t1": "gone"})
+
+    def test_trash_command_deletes_only_the_trash(self):
+        import io
+        from unittest import mock
+        from rich.console import Console
+        api = FakeMailboxApi()
+        api.gmail = FakeGmail({"m0": "inbox", "m1": "archive", "t1": "trash"}, save_dir=None)
+        output = io.StringIO()
+        test_console = Console(file=output, width=200)
+        test_console.input = lambda prompt: "y"
+        with mock.patch.object(savegmail, "console", test_console):
+            savegmail.empty_trash(api)
+        self.assertEqual(api.gmail.places, {"m0": "inbox", "m1": "archive", "t1": "gone"})
+        self.assertIn("1 message(s) permanently deleted from trash.", output.getvalue())
 
 
 class TypedSelectionTest(unittest.TestCase):
