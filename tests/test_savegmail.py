@@ -2603,6 +2603,13 @@ fi
 exit 1
 """
 
+# A .venv built with Python 3.10: pip works, the minimum version check fails.
+OLD_VENV_PYTHON = """#!/bin/sh
+printf 'old %s\\n' "$*" >> "$FAKE_LOG"
+case "$*" in *version_info*) exit 1 ;; esac
+exit 0
+"""
+
 # A .venv left without pip: every call fails as `No module named pip` would.
 BROKEN_VENV_PYTHON = """#!/bin/sh
 printf 'broken %s\\n' "$*" >> "$FAKE_LOG"
@@ -2729,11 +2736,11 @@ class LauncherVenvTest(unittest.TestCase):
     def test_no_python_or_too_old_says_so(self):
         result, _ = self.launch()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Python 3.9 or newer is required", result.stderr)
+        self.assertIn("Python 3.11 or newer is required", result.stderr)
         self.provide("python3")
         result, calls = self.launch(FAKE_TOO_OLD="1")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Python 3.9 or newer is required", result.stderr)
+        self.assertIn("Python 3.11 or newer is required", result.stderr)
         self.assertFalse(any("venv" in call for call in calls))
 
     def test_venv_without_pip_is_recreated(self):
@@ -2745,6 +2752,25 @@ class LauncherVenvTest(unittest.TestCase):
         self.assertIn(f"system -m venv --clear {self.root}/.venv", calls)
         self.assertTrue(any(call.startswith("-m pip install") for call in calls))
         self.assertTrue(calls[-1].endswith("savegmail.py --help"))
+
+    def test_venv_on_old_python_is_recreated(self):
+        self.provide("python3")
+        os.makedirs(os.path.join(self.root, ".venv", "bin"))
+        self.write(os.path.join(self.root, ".venv", "bin", "python"), OLD_VENV_PYTHON)
+        result, calls = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"system -m venv --clear {self.root}/.venv", calls)
+        self.assertFalse(any(call.startswith("old -m pip install") for call in calls))
+        self.assertTrue(calls[-1].endswith("savegmail.py --help"))
+
+    def test_venv_on_old_python_with_old_system_python_says_so(self):
+        self.provide("python3")
+        os.makedirs(os.path.join(self.root, ".venv", "bin"))
+        self.write(os.path.join(self.root, ".venv", "bin", "python"), OLD_VENV_PYTHON)
+        result, calls = self.launch(FAKE_TOO_OLD="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Python 3.11 or newer is required", result.stderr)
+        self.assertFalse(any("venv" in call or "pip install" in call for call in calls))
 
 
 class AuthenticateTest(unittest.TestCase):

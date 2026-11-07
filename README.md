@@ -27,7 +27,7 @@ SaveGmail is a Python script for archiving Gmail messages as PDFs and saving the
 
 ## Prerequisites
 
-- Python 3.9 or higher
+- Python 3.11 or higher
 - Google Cloud Platform project with Gmail API enabled
 - OAuth 2.0 credentials file (`credentials.json`) next to `savegmail.py`
 

@@ -3,16 +3,22 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
+# Python 3.9 and 3.10 are end-of-life: their dependencies (requests, urllib3,
+# google-api-core) no longer get security fixes there.
+min_python='import sys; sys.exit(sys.version_info < (3, 11))'
+
 # (Re)create the .venv when it has no working pip: missing, left half-made by a
 # failed or interrupted creation (no python3-venv on Debian/Ubuntu), or built
-# for a Python version the system no longer provides.
-if ! "$script_dir/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
+# for a Python version the system no longer provides; or when it was built
+# with a Python older than 3.11.
+if ! "$script_dir/.venv/bin/python" -m pip --version >/dev/null 2>&1 ||
+    ! "$script_dir/.venv/bin/python" -c "$min_python" >/dev/null 2>&1; then
     python=$(command -v python3 || command -v python) || {
-        echo "run-savegmail.sh: Python 3.9 or newer is required (no python3 or python command found)" >&2
+        echo "run-savegmail.sh: Python 3.11 or newer is required (no python3 or python command found)" >&2
         exit 1
     }
-    if ! "$python" -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
-        echo "run-savegmail.sh: Python 3.9 or newer is required ($python is older)" >&2
+    if ! "$python" -c "$min_python" >/dev/null 2>&1; then
+        echo "run-savegmail.sh: Python 3.11 or newer is required ($python is older)" >&2
         exit 1
     fi
     "$python" -m venv --clear "$script_dir/.venv"
