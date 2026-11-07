@@ -483,9 +483,6 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     def plain_to_html(text):
         plain_text = html.escape(text)  # `<` and `&` are text, not HTML
         plain_text = re.sub(r'(>>?|>)', r'\1', plain_text)
-        plain_text = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'\n\n\1', plain_text)
-        date_regex = r'((Le|The) \d{1,2} (janv\.|févr\.|mars\.|avr\.|mai\.|juin\.|juil\.|août\.|sept\.|oct\.|nov\.|déc\.|Jan\.|Feb\.|Mar\.|Apr\.|May\.|Jun\.|Jul\.|Aug\.|Sep\.|Oct\.|Nov\.|Dec\.) \d{4}( (à|at) \d{1,2}:\d{2})?)'
-        plain_text = re.sub(date_regex, r'\n\n\1', plain_text)
         # The text is escaped: an URL stops at an escaped `<`, `>` or `"`, as it did before escaping.
         url_regex = r'((?:https?://|www\.)(?:(?!&lt;|&gt;|&quot;)\S)+)'
         plain_text = re.sub(url_regex, link_url, plain_text)

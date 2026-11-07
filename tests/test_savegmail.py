@@ -1432,6 +1432,22 @@ class EscapedTextTest(unittest.TestCase):
         self.assertIn("Alice alice@example.com, Dev list dev@lists.example.org", header)
         self.assertIn("Q&amp;A&amp;para2.txt</a>", browser.pages[0].appended)
 
+    def test_plain_text_dates_do_not_split_the_line(self):
+        import base64
+        import tempfile
+        from email.message import EmailMessage
+        line = "Deploy status: On 05/02/2024 the server was upgraded and Le 5 janv. 2024 nous avons fini."
+        msg = EmailMessage()
+        msg["Subject"] = "Deploy"
+        msg.set_content(f"{line}\nOn 05/02/2024, Bob wrote:\n> ok\n")
+        browser = ContentRecordingBrowser()
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(
+                FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1", save_dir,
+                browser)
+        body = browser.pages[0].html
+        self.assertIn(f"{line}\nOn 05/02/2024, Bob wrote:\n&gt; ok\n", body)  # the text's own line breaks only
+
     def test_plain_text_links_open_the_written_address(self):
         import base64
         import glob
