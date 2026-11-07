@@ -320,6 +320,18 @@ class ReadStateTest(unittest.TestCase):
         savegmail.mark_read(service, "me", emails)
         self.assertEqual(len(service.modified), 1)  # nothing unread left: no call
 
+    def test_mark_read_offline_or_signed_out(self):
+        # o and p mark the email read: an expired session or no network leaves it unread, without a trace.
+        import httplib2
+        from unittest import mock
+        from google.auth.exceptions import RefreshError
+        for error in [RefreshError("invalid_grant"), httplib2.ServerNotFoundError("Unable to find the server")]:
+            with self.subTest(error=type(error).__name__):
+                emails = [{"id": "1", "labels": ["INBOX", "UNREAD"]}]
+                with mock.patch.object(savegmail, "modify_labels", side_effect=error):
+                    savegmail.mark_read(object(), "me", emails)
+                self.assertEqual(emails[0]["labels"], ["INBOX", "UNREAD"])
+
 
 class CompactDateTest(unittest.TestCase):
     def test_formats(self):
@@ -499,6 +511,27 @@ class PickerTest(unittest.TestCase):
         self.assertFalse(state["signed_out"])
         self.assertEqual([message["id"] for message in messages], ["0"])
         self.assertEqual(action, "quit")
+
+    def test_failed_load_more_can_be_retried(self):
+        # m while the session expired or Gmail is unreachable: no trace, and m works again afterwards.
+        from google.auth.exceptions import RefreshError
+        older = [{**make_messages(1)[0], "id": "old", "internalDate": 1}]
+        calls = []
+
+        def load_more():
+            calls.append(True)
+            if len(calls) == 1:
+                raise RefreshError("invalid_grant")
+            return older, False
+
+        messages = make_messages(2)
+        state = savegmail.new_picker_state()
+        action, ids = pick_later("mm\r", messages, load_more=load_more, state=state)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([message["id"] for message in messages], ["0", "1", "old"])
+        self.assertTrue(state["signed_out"])
+        self.assertFalse(state["loading"])
+        self.assertEqual((action, ids), ("download", ["0"]))
 
     def test_r_does_nothing_while_signed_in(self):
         signed_in = []
@@ -855,10 +888,12 @@ class GmailCallSizeTest(unittest.TestCase):
 class UndoAfterDeleteTest(unittest.TestCase):
     """Drives interactive_download_main with a fake Gmail and scripted keys, like s, D, u."""
 
-    def run_session(self, places, steps, failing_untrash=(), failing=(), api=None):
+    def run_session(self, places, steps, failing_untrash=(), failing=(), api=None, down=None):
         """steps: (action, ids); an undo is only pressed when u is offered, as in the list.
 
         api: a fake Gmail API (FakeBatchApi) that the real modify_labels and delete_messages call.
+        down: (n, exception): once n steps are done, every Gmail call raises it (session expired, offline);
+        self.signed_out holds whether the list offered r to sign in again, before each step.
         Returns (fake Gmail, files left in the download folder, undo label offered before each step);
         self.notices holds the notice shown before each step, as plain text lines.
         """
@@ -871,10 +906,14 @@ class UndoAfterDeleteTest(unittest.TestCase):
         gmail = FakeGmail(places, save_dir, failing_untrash, failing)
         if api is not None:
             api.gmail = gmail
-        steps, offered, self.notices = list(steps), [], []
+        steps, offered, self.notices, self.signed_out = list(steps), [], [], []
+        broken = []
 
         def ask(messages, load_more, state, notice, undo_label, *rest):
+            if down is not None and len(offered) == down[0]:
+                broken.append(down[1])
             offered.append(undo_label)
+            self.signed_out.append(state["signed_out"])
             self.notices.append(["".join(text for _, text in line) for line in notice])
             if not steps:
                 return "quit", []
@@ -887,12 +926,20 @@ class UndoAfterDeleteTest(unittest.TestCase):
             "list_candidate_messages", "save_messages", "trash_messages", "untrash_messages",
             "modify_labels", "list_trash_ids", "delete_messages"]
             if api is None or name not in api.real_calls}
+
+        def failing_when_down(call):
+            def wrapper(*args, **kwargs):
+                if broken:
+                    raise broken[0]
+                return call(*args, **kwargs)
+            return wrapper
+        fakes = {name: failing_when_down(call) for name, call in fakes.items()}
         with mock.patch.multiple(
             savegmail, authenticate=lambda: object(), build=lambda *a, **k: api or FakeSessionService(),
             user_labels=lambda *a: {}, ask_user_to_select_messages=ask,
             refresh_messages=lambda *a, **k: ([], set()), refresh_labels=lambda *a: 0,
             sync_playwright=lambda: FakePlaywright(), launch_browser=lambda *a, **k: mock.Mock(),
-            console=Console(file=io.StringIO()), **fakes,
+            open_quietly=lambda url: True, console=Console(file=io.StringIO()), **fakes,
         ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir]):
             savegmail.interactive_download_main()
         return gmail, sorted(os.listdir(save_dir)), offered
@@ -991,6 +1038,33 @@ class UndoAfterDeleteTest(unittest.TestCase):
                 self.assertTrue(self.notices[1][1].startswith(" ✗ Subject A"))
                 self.assertEqual(gmail.places["A"], place)
                 self.assertIsNone(offered[1])
+
+
+    def test_expired_session_or_offline_keeps_the_list(self):
+        # The session expires, or the network drops, after a d: no key closes the list, the undo stays.
+        import httplib2
+        from unittest import mock
+        from google.auth.exceptions import RefreshError
+        failures = [(RefreshError("invalid_grant: Token has been expired or revoked."), " ✗ Gmail session expired"),
+                    (httplib2.ServerNotFoundError("Unable to find the server"), " ✗ Gmail request failed"),
+                    (savegmail.HttpError(mock.Mock(status=503, reason="Backend Error"), b"Backend Error"),
+                     " ✗ Gmail request failed")]
+        actions = [("star", ["B"]), ("unread", ["B"]), ("archive", ["B"]), ("open", ["B"]), ("undo", []),
+                   ("next_view", []), ("prev_view", []), ("trash", ["B"]), ("restore", ["A"])]
+        for error, shown in failures:
+            for action, ids in actions:
+                with self.subTest(error=type(error).__name__, action=action):
+                    gmail, left, offered = self.run_session(
+                        {"A": "inbox", "B": "inbox"}, [("trash", ["A"]), (action, ids), ("undo", [])],
+                        down=(1, error))
+                    self.assertEqual(offered[1:], ["trash (1)"] * 3)
+                    if action == "open":  # o opens Gmail in the browser; failing to mark it read says nothing
+                        continue
+                    # e, ! and * say which emails they could not change; the others that nothing was done.
+                    self.assertTrue(self.notices[2][0].startswith(
+                        " ✗ Could not" if action in {"star", "unread", "archive"} else shown), self.notices[2])
+                    self.assertEqual(self.signed_out[2], isinstance(error, RefreshError))
+                    self.assertEqual(gmail.places, {"A": "trash", "B": "inbox"})
 
 
 class EmptyTrashCommandTest(unittest.TestCase):
