@@ -1802,6 +1802,9 @@ class UndoAfterDeleteTest(unittest.TestCase):
             action, ids = steps.pop(0)
             if action == "undo" and undo_label is None:
                 return ask(messages, load_more, state, notice, undo_label, *rest)
+            if action == "folder":  # ids: the folder typed after f
+                state["folder"] = ids
+                return action, []
             if ids is None:
                 return action, list(messages)
             return action, [gmail.message(msg_id) for msg_id in ids]
@@ -1892,6 +1895,26 @@ class UndoAfterDeleteTest(unittest.TestCase):
         self.assertEqual(offered[1], "archive (1)")
         self.assertEqual(gmail.places, {"A": "inbox", "S": "archive"})
         self.assertEqual(self.notices[2][0], " ↶ 1 email back in the Inbox")
+
+    def test_tilde_download_folders_are_under_home(self):
+        # The default ~/GMail/ and a folder typed after f in ~/... are written under HOME, not in a "~"
+        # folder of the directory savegmail was started from.
+        import tempfile
+        from unittest import mock
+        home, cwd = tempfile.mkdtemp(), tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, home, True)
+        self.addCleanup(__import__("shutil").rmtree, cwd, True)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(cwd)
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            gmail, left, offered = self.run_session(
+                {"A": "inbox", "B": "inbox"},
+                [("download", ["A"]), ("folder", " ~/Archive "), ("download", ["B"])],
+                args=["--download-path", savegmail.DOWNLOAD_PATH])
+        self.assertEqual(sorted(os.listdir(os.path.join(home, "GMail"))), ["A-att.bin", "A.pdf"])
+        self.assertEqual(sorted(os.listdir(os.path.join(home, "Archive"))), ["B-att.bin", "B.pdf"])
+        self.assertEqual(os.listdir(cwd), [])
+        self.assertEqual(self.notices[2][0], " ✓ Download folder: ~/Archive")
 
     def test_partial_delete_keeps_the_deleted_emails_files(self):
         ids = [f"m{i}" for i in range(1500)]
