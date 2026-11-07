@@ -381,6 +381,18 @@ class BadgeTest(unittest.TestCase):
         self.assertEqual(savegmail.badge_text(savegmail.BADGE_COUNT_CAP), "1,000+")
         self.assertEqual(savegmail.count_messages(FakeBadgeService(matches=201), "me", "x"), 201)
 
+    def test_label_counters_beyond_cap_have_no_plus(self):
+        class BigLabels(FakeBadgeService):
+            def get(self, userId, id):
+                unread, total = {"INBOX": (1234, 5000), "DRAFT": (0, 1200), "SPAM": (1500, 1500)}.get(id, (0, 0))
+                return FakeResult({"id": id, "messagesUnread": unread, "messagesTotal": total})
+
+        badges = savegmail.view_badges(BigLabels(matches=1500), "me", self.QUERIES, filtered=False)
+        # Gmail's label counters are exact; only searched views stop at the cap.
+        self.assertEqual(badges, {"Inbox": ("1,234", "unread"), "Drafts": ("1,200", "total"),
+                                  "Spam": ("1,500", "unread"), "All mail": ("1,000+", "unread"),
+                                  "Archived": ("1,000+", "unread")})
+
     def test_filtered_views_use_searches(self):
         service = FakeBadgeService()
         queries = {name: f"(from:x) {query}".strip() for name, query in savegmail.VIEWS}

@@ -1140,7 +1140,9 @@ def view_badges(service, user_id, view_queries, filtered):
             counts[name] = count_messages(service, user_id, query.strip(), in_trash=name in {"Spam", "Trash"})
         except HttpError as exc:
             debug(f"Could not count {name}: {exc}")
-    return {name: (badge_text(count), kinds[name]) for name, count in counts.items() if count}
+    # Label counters are exact: only searched counts can stop at the cap and get a "+".
+    return {name: (badge_text(count) if name in searched else f"{count:,}", kinds[name])
+            for name, count in counts.items() if count}
 
 
 def estimate_total(service, user_id, query="", in_trash=False):
