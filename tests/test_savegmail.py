@@ -3637,6 +3637,36 @@ class DownloadPathOptionTest(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(home)), ["a-file"])
 
 
+class TypedFolderTest(unittest.TestCase):
+    """A folder dropped or pasted between quotes in f is used as is, not created as a quoted tree."""
+
+    def test_quoted_or_dropped_folder_is_unquoted(self):
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as work, \
+                mock.patch.dict(os.environ, {"HOME": home}):
+            archive = os.path.join(work, "My Archive")
+            os.mkdir(archive)
+            previous = os.getcwd()
+            os.chdir(work)
+            try:
+                for typed, expected in ((f"'{archive}' ", archive),  # GNOME Terminal drop
+                                        (f'"{archive}"', archive),
+                                        ("'~/Archives'", os.path.join(home, "Archives")),
+                                        ("$HOME/Archive", os.path.join(home, "Archive")),
+                                        ("~/GMail", os.path.join(home, "GMail")),
+                                        ("plain dir", "plain dir")):
+                    with self.subTest(typed=typed):
+                        self.assertEqual(savegmail.make_download_folder(savegmail.typed_folder(typed)), expected)
+                for typed in ("'unclosed", f"'{archive}' '{archive}'"):
+                    with self.subTest(typed=typed), self.assertRaises(OSError):
+                        savegmail.make_download_folder(savegmail.typed_folder(typed))
+                self.assertEqual(sorted(os.listdir(work)), ["My Archive", "plain dir"])
+            finally:
+                os.chdir(previous)
+
+
 class QueryExclusionTest(unittest.TestCase):
     """--query accepts a lone exclusion term (-in:inbox) instead of stopping with "expected one argument"."""
 

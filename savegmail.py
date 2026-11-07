@@ -20,6 +20,7 @@ import logging
 import re
 import io
 import contextlib
+import shlex
 import shutil
 import time
 import tempfile
@@ -2518,6 +2519,22 @@ def make_download_folder(path):
     return folder
 
 
+def typed_folder(text):
+    """The folder typed in f: a path dropped or pasted between quotes is unquoted, $VARS and ~ expand.
+
+    OSError if the quotes don't hold exactly one path."""
+    text = text.strip()
+    if text[:1] in {"'", '"'}:  # a terminal drops a folder as a quoted shell word
+        try:
+            parts = shlex.split(text)
+        except ValueError as error:
+            raise OSError(str(error).lower()) from None
+        if len(parts) != 1:
+            raise OSError("expected one folder")
+        text = parts[0]
+    return os.path.expanduser(os.path.expandvars(text))
+
+
 def positive_int(value):
     """argparse type for --max: an integer of at least 1."""
     import argparse
@@ -2872,7 +2889,7 @@ def interactive_download_main():
 
             if action == "folder":
                 try:
-                    wanted = make_download_folder((state["folder"] or "").strip())
+                    wanted = make_download_folder(typed_folder(state["folder"] or ""))
                 except OSError as exc:
                     notice = [[("class:error", " ✗ "), ("", "Could not use that folder"),
                                ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
