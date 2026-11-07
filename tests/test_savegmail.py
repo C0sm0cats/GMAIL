@@ -1113,6 +1113,55 @@ class EscapedTextTest(unittest.TestCase):
         self.assertIn("Q&amp;A&amp;para2.txt</a>", footer)
 
 
+class PdfHeaderTest(unittest.TestCase):
+    """The PDF prints the subject, sender, date and attachments in its header and footer, with room for them."""
+
+    def test_header_and_footer_are_printed_with_measured_margins(self):
+        import base64
+        import tempfile
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["Subject"] = "Contrat de bail"
+        msg["From"] = "Alice Martin <alice@example.com>"
+        msg["Date"] = "Mon, 02 Mar 2026 10:15:00 +0000"
+        msg.set_content("alt")
+        msg.add_alternative("<p>Corps du contrat</p>", subtype="html")
+        msg.add_attachment(b"x", maintype="application", subtype="pdf", filename="bail.pdf")
+        options = []
+
+        class MeasuringPage(ContentRecordingPage):
+            def evaluate(self, script, *args, **kwargs):
+                super().evaluate(script, *args, **kwargs)
+                return 100 if "getBoundingClientRect" in script else True  # each template is 100px high
+
+            def pdf(self, path, **kwargs):
+                options.append(kwargs)
+                super().pdf(path, **kwargs)
+
+        class MeasuringBrowser(ContentRecordingBrowser):
+            def new_page(self, **kwargs):
+                page = MeasuringPage()
+                self.pages.append(page)
+                return page
+
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(
+                FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1", save_dir,
+                MeasuringBrowser())
+        self.assertEqual(len(options), 1)
+        printed = options[0]
+        self.assertIs(printed["display_header_footer"], True)
+        header, footer = printed["header_template"], printed["footer_template"]
+        self.assertIn("Contrat de bail", header)
+        self.assertIn("From : Alice Martin alice@example.com", header)
+        self.assertIn(f"Date : {savegmail.get_real_date(msg['Date'])}", header)
+        self.assertIn("bail.pdf", footer)
+        self.assertIn("View in Gmail", footer)
+        # Room for the measured templates plus Chromium's 20px edge padding and an 8px gap.
+        self.assertEqual(printed["margin"]["top"], "128px")
+        self.assertEqual(printed["margin"]["bottom"], "128px")
+
+
 class SplitBodyTest(unittest.TestCase):
     """A body split into several text parts around an attachment is rendered whole, in order."""
 
