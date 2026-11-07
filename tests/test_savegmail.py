@@ -2170,6 +2170,81 @@ class RestoreKeyTest(unittest.TestCase):
         self.assertEqual(self.notices[1][0], " ↶ 1 email restored from trash")
 
 
+class LabelGmail(FakeGmail):
+    """FakeGmail whose emails also carry UNREAD / STARRED: m0 starred, m1 and m2 unread, all in the Inbox."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.labels = {"m0": {"STARRED"}, "m1": {"UNREAD"}, "m2": {"UNREAD"}}
+
+    def message(self, msg_id):
+        message = super().message(msg_id)
+        message["labels"] += sorted(self.labels[msg_id])
+        return message
+
+
+class LabelMailboxApi(FakeMailboxApi):
+    """FakeMailboxApi whose batchModify also adds / removes UNREAD and STARRED on a LabelGmail."""
+
+    def batchModify(self, userId, body):
+        from unittest import mock
+        request = super().batchModify(userId, body)
+
+        def execute():
+            result = request.execute()
+            for msg_id in body["ids"]:
+                labels = self.gmail.labels[msg_id]
+                labels |= set(body["addLabelIds"]) - {"INBOX"}
+                labels -= set(body["removeLabelIds"])
+            return result
+        return mock.Mock(execute=execute)
+
+
+class LabelKeyTargetsTest(unittest.TestCase):
+    """e, !, *, o and p change the chosen email only, never the rest of the view."""
+
+    run_session = UndoAfterDeleteTest.run_session
+
+    def labels_after(self, action):
+        gmail, left, offered = self.run_session({"m0": "inbox", "m1": "inbox", "m2": "inbox"}, [(action, ["m1"])],
+                                                api=LabelMailboxApi(), gmail_class=LabelGmail)
+        return gmail
+
+    def test_archive_moves_only_the_chosen_email(self):
+        gmail = self.labels_after("archive")
+        self.assertEqual(gmail.places, {"m0": "inbox", "m1": "archive", "m2": "inbox"})
+        self.assertEqual(self.notices[1][0], " ✓ 1 email archived · u undo")
+
+    def test_read_state_changes_only_on_the_chosen_email(self):
+        gmail = self.labels_after("unread")
+        self.assertEqual(gmail.labels, {"m0": {"STARRED"}, "m1": set(), "m2": {"UNREAD"}})
+        self.assertEqual(self.notices[1][0], " ○ 1 email marked as read")
+
+    def test_star_changes_only_the_chosen_email(self):
+        gmail = self.labels_after("star")
+        self.assertEqual(gmail.labels, {"m0": {"STARRED"}, "m1": {"UNREAD", "STARRED"}, "m2": {"UNREAD"}})
+        self.assertEqual(self.notices[1][0], " ★ 1 email starred")
+
+    def test_open_marks_only_the_opened_email_read(self):
+        from unittest import mock
+        with mock.patch.object(savegmail, "gmail_url", side_effect=lambda account, msg_id: msg_id) as url:
+            gmail = self.labels_after("open")
+        self.assertEqual([call.args[1] for call in url.call_args_list], ["m1"])
+        self.assertEqual(gmail.labels, {"m0": {"STARRED"}, "m1": set(), "m2": {"UNREAD"}})
+
+    def test_preview_marks_only_the_previewed_email_read(self):
+        from unittest import mock
+        previewed = []
+
+        def preview(service, user_id, messages, browser, preview_dir):
+            previewed.extend(message["id"] for message in messages)
+            return [message["id"] for message in messages], {}
+        with mock.patch.object(savegmail, "preview_messages", preview):
+            gmail = self.labels_after("preview")
+        self.assertEqual(previewed, ["m1"])
+        self.assertEqual(gmail.labels, {"m0": {"STARRED"}, "m1": set(), "m2": {"UNREAD"}})
+
+
 class QueryGmail(FakeGmail):
     """FakeGmail whose search applies "(from:bank)" like Gmail, and records the query of every list call."""
 
