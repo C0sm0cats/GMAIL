@@ -923,6 +923,56 @@ class InlineImageTest(unittest.TestCase):
                 browser.close()
         self.assertEqual(widths, [[["cid", 40], ["lazy", 40]]])
 
+    def test_silent_remote_image_does_not_block_the_save(self):
+        import base64
+        import socket
+        import tempfile
+        import threading
+        import time
+        from unittest import mock
+        from playwright.sync_api import sync_playwright
+        # Local server that accepts connections and never answers, like a dead tracking-pixel host.
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(16)
+        held = []
+
+        def accept():
+            try:
+                while True:
+                    held.append(server.accept()[0])
+            except OSError:
+                pass
+
+        threading.Thread(target=accept, daemon=True).start()
+        port = server.getsockname()[1]
+        body = f'<p>Total 42 EUR</p><img src="http://127.0.0.1:{port}/open.gif" width=1 height=1>'
+        raw = ("Subject: Pixel\r\nFrom: s@example.com\r\nMIME-Version: 1.0\r\n"
+               "Content-Type: text/html; charset=utf-8\r\n\r\n" + body + "\r\n").encode()
+        try:
+            with sync_playwright() as playwright:
+                try:
+                    browser = playwright.chromium.launch(channel="chromium")
+                except Exception as error:  # no Playwright Chromium here; never install it from a test
+                    self.skipTest(f"Chromium unavailable: {error}")
+                try:
+                    with tempfile.TemporaryDirectory() as save_dir, \
+                            mock.patch.object(savegmail, "IMAGE_WAIT_SECONDS", 1, create=True):
+                        start = time.monotonic()
+                        result = savegmail.save_email_and_attachments(
+                            FakeRawService(base64.urlsafe_b64encode(raw).decode()), "me", "id1", save_dir,
+                            browser)
+                        elapsed = time.monotonic() - start
+                        self.assertTrue(os.path.exists(os.path.join(save_dir, result["pdf"])))
+                finally:
+                    browser.close()
+        finally:
+            server.close()
+            for conn in held:
+                conn.close()
+        self.assertTrue(held)  # Chromium did ask for the image
+        self.assertLess(elapsed, 30)  # it used to wait for the 120 s set_content timeout, then fail
+
 
 class HugeHeaderTest(unittest.TestCase):
     """Python parses headers in quadratic time and memory: a sender's huge header is cut before parsing."""

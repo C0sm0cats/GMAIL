@@ -74,6 +74,9 @@ INLINE_IMAGE_URL = "https://cid.savegmail.invalid/{}"
 # in a time quadratic in their number (minutes per email). Real emails stay far below this many pages.
 MAX_PDF_PAGES = 1000
 
+# Longest wait for an email's images and fonts before printing; one that never answers is printed without.
+IMAGE_WAIT_SECONDS = 15
+
 
 def new_email_page(browser, resources=None):
     """Open a page for content written by a sender: its scripts never run, and it never navigates away
@@ -579,7 +582,9 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     on_step("rendering PDF")
     page = new_email_page(browser, inline_images)
     try:
-        page.set_content(html_content, timeout=120000, wait_until="networkidle")
+        # Not "networkidle": a remote image whose server never answers would hold it until the timeout;
+        # images and fonts get their own, shorter, wait below.
+        page.set_content(html_content, timeout=120000, wait_until="domcontentloaded")
         # Emails often defer images; force them in and wait for fonts/images before printing.
         page.evaluate("""() => {
             document.querySelectorAll('img[data-src]').forEach(img => {
@@ -588,7 +593,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
             document.querySelectorAll('img[loading="lazy"]').forEach(img => img.loading = 'eager');
         }""")
         # With scripts disabled, the page runs no timers or load listeners: poll from here instead.
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + IMAGE_WAIT_SECONDS
         while time.monotonic() < deadline and not page.evaluate(
                 "[...document.images].every(img => img.complete) && document.fonts.status === 'loaded'"):
             page.wait_for_timeout(100)
