@@ -108,6 +108,20 @@ class TextHelpersTest(unittest.TestCase):
         self.assertEqual(savegmail.fit("abcdef", 4), "abc…")
         self.assertEqual(savegmail.fit("a\n  b", 3), "a b")
 
+    def test_emoji_sequences_have_one_width_for_list_and_terminal(self):
+        from prompt_toolkit.utils import get_cwidth
+        text = "✈️ ⚠️ 🇫🇷 Météo ☀️ 👨‍👩‍👧 👍🏽 ❤️"
+        savegmail.USER_LABELS["Label_1"] = "Trips ✈️"
+        self.addCleanup(savegmail.USER_LABELS.pop, "Label_1")
+        row = savegmail.message_row({"id": "1", "from": f"{text} <a@b.c>", "subject": text, "snippet": text,
+                                     "labels": ["Label_1"]})
+        shown = [row["sender"], row["subject"], row["snippet"], *(name for _, name in row["tags"])]
+        for value in shown:
+            # prompt_toolkit places the next cells by its own count; Rich's count sizes the columns.
+            self.assertEqual(sum(get_cwidth(char) for char in value), savegmail.cell_len(value), value)
+        self.assertEqual(row["subject"], "✈ ⚠ FR Météo ☀ 👨👩👧 👍 ❤")
+        self.assertIn(text.lower(), row["haystack"])
+
     def test_draft(self):
         detail = {"id": "1", "labelIds": ["DRAFT"], "payload": {"headers": [{"name": "From", "value": "Me <me@x>"}]}}
         row = savegmail.message_row(savegmail.to_candidate(detail))

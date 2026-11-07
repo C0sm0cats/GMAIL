@@ -1185,6 +1185,18 @@ def help_lines(columns):
     return lines
 
 
+# Emoji sequences (variation selectors, ZWJ joins, skin tones, flags) have no agreed width: prompt_toolkit counts
+# each code point, Rich and some terminals count the whole sequence, and the list garbles once they disagree.
+EMOJI_SEQUENCE_PARTS = re.compile("[\ufe0e\ufe0f\u200d\U0001F3FB-\U0001F3FF]")
+REGIONAL_INDICATORS = re.compile("[\U0001F1E6-\U0001F1FF]")
+
+
+def plain_emoji(text):
+    """Display text whose width every terminal counts alike: "⚠️" becomes "⚠", the 🇫🇷 flag "FR"."""
+    text = EMOJI_SEQUENCE_PARTS.sub("", text or "")
+    return REGIONAL_INDICATORS.sub(lambda match: chr(ord(match.group()) - 0x1F1E6 + ord("A")), text)
+
+
 def sender_name(sender):
     name, address = parseaddr(sender or "")
     return name.strip().strip('"') or address or "—"
@@ -1278,14 +1290,15 @@ def message_row(message):
     snippet = html.unescape(message.get("snippet") or "")
     return {
         "date": compact_date(message.get("internalDate")),
-        "sender": sender,
-        "subject": subject,
-        "snippet": snippet,
+        # The display copies only: haystack and party below keep the original text.
+        "sender": plain_emoji(sender),
+        "subject": plain_emoji(subject),
+        "snippet": plain_emoji(snippet),
         "attachment": bool(message.get("attachment")),
         "kind": kind,
         "unread": "UNREAD" in labels,
         "starred": "STARRED" in labels,
-        "tags": tags,
+        "tags": [(kind, plain_emoji(text)) for kind, text in tags],
         "size": human_size(size) if size else "",
         "big": size >= BIG_EMAIL_BYTES,
         # Who the email is from (or to, for sent ones), for "select all from this sender".
