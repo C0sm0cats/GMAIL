@@ -2248,6 +2248,83 @@ class RestoreKeyTest(unittest.TestCase):
         self.assertEqual(self.notices[1][0], " ↶ 1 email restored from trash")
 
 
+class SyncedMailboxApi(FakeService):
+    """Gmail API over {id: labels}: messages.get gives the labels, labels.get and messages.list the counters."""
+
+    def __init__(self, labels):
+        super().__init__()
+        self.mail = labels
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def labels(self):
+        api = self
+
+        class Labels:
+            def get(self, userId, id):
+                tagged = [labels for labels in api.mail.values() if id in labels]
+                return FakeResult({"id": id, "messagesTotal": len(tagged),
+                                   "messagesUnread": sum("UNREAD" in labels for labels in tagged)})
+        return Labels()
+
+    def getProfile(self, userId):
+        return FakeResult({"emailAddress": "me@example.com"})
+
+    def get(self, userId, id, format, fields):
+        return FakeResult({"id": id, "labelIds": list(self.mail[id])})
+
+    def list(self, userId, q="", maxResults=100, pageToken=None, fields=None, **kwargs):
+        ids = [msg_id for msg_id, labels in self.mail.items()
+               if ("is:unread" not in q or "UNREAD" in labels) and ("-in:inbox" not in q or "INBOX" not in labels)]
+        return FakeResult({"messages": [{"id": msg_id} for msg_id in ids], "resultSizeEstimate": len(ids)})
+
+
+class BackgroundSyncSessionTest(unittest.TestCase):
+    """The sync interactive_download_main hands the list re-reads labels and tab counters from Gmail."""
+
+    def test_sync_reads_labels_and_badges_changed_elsewhere(self):
+        import io
+        import tempfile
+        from unittest import mock
+        from rich.console import Console
+        save_dir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, save_dir, True)
+        api = SyncedMailboxApi({msg_id: ["INBOX", "UNREAD"] for msg_id in ["m0", "m1", "m2"]})
+        results = []
+
+        def listed(*args, **kwargs):
+            return [{"id": msg_id, "from": f"S <{msg_id}@example.com>", "subject": f"Subject {msg_id}",
+                     "snippet": "", "internalDate": 1_700_000_000_000, "labels": list(labels)}
+                    for msg_id, labels in api.mail.items()], None
+
+        def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, *rest):
+            if not results:
+                api.mail["m1"] = ["INBOX"]  # read on the phone
+                api.mail["m2"] = ["INBOX", "UNREAD", "STARRED"]  # starred in Gmail web
+                results.append(sync([dict(message) for message in messages]))
+            return "quit", []
+
+        with mock.patch.multiple(
+            savegmail, authenticate=lambda: object(), build=lambda *a, **k: api, user_labels=lambda *a: {},
+            list_candidate_messages=listed, ask_user_to_select_messages=ask,
+            refresh_messages=lambda *a, **k: ([], set()), sync_playwright=lambda: FakePlaywright(),
+            launch_browser=lambda *a, **k: mock.Mock(), open_quietly=lambda url: True,
+            console=Console(file=io.StringIO()),
+        ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir]):
+            savegmail.interactive_download_main()
+        result = results[0]
+        self.assertEqual(result["labels"]["m1"], ["INBOX"])
+        self.assertEqual(result["labels"]["m2"], ["INBOX", "UNREAD", "STARRED"])
+        self.assertEqual(result["labels"]["m0"], ["INBOX", "UNREAD"])
+        self.assertEqual(result["badges"]["Inbox"], ("2", "unread"))
+        self.assertEqual(result["badges"]["Starred"], ("1", "unread"))
+        self.assertEqual(result["badges"]["All mail"], ("2", "unread"))
+
+
 class LabelGmail(FakeGmail):
     """FakeGmail whose emails also carry UNREAD / STARRED: m0 starred, m1 and m2 unread, all in the Inbox."""
 
