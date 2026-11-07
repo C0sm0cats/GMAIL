@@ -3172,6 +3172,30 @@ class LoadMoreSessionTest(unittest.TestCase):
         self.assertEqual(queries[1:], ["before:8001", "before:7001", "before:5001"])
 
 
+class MaxOptionTest(unittest.TestCase):
+    """--max below 1 is refused before sign-in, instead of listing nothing without a word."""
+
+    def test_max_below_one_is_refused_with_a_message(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        for value in ("0", "-1"):
+            with self.subTest(value=value):
+                stderr = io.StringIO()
+                with mock.patch.object(savegmail, "authenticate", side_effect=AssertionError("signed in")), \
+                        mock.patch.object(sys, "argv", ["savegmail", "--max", value]), \
+                        contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as raised:
+                        savegmail.interactive_download_main()
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("argument --max: must be at least 1", stderr.getvalue())
+
+    def test_max_of_one_and_more_is_accepted(self):
+        self.assertEqual(savegmail.positive_int("1"), 1)
+        self.assertEqual(savegmail.positive_int("50"), 50)
+
+
 class LabelGmail(FakeGmail):
     """FakeGmail whose emails also carry UNREAD / STARRED: m0 starred, m1 and m2 unread, all in the Inbox."""
 

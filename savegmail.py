@@ -2393,6 +2393,19 @@ def home_relative(path):
     return path
 
 
+def positive_int(value):
+    """argparse type for --max: an integer of at least 1."""
+    import argparse
+
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return number
+
+
 def interactive_download_main():
     import argparse
 
@@ -2414,7 +2427,7 @@ def interactive_download_main():
     )
     parser.add_argument(
         "--max",
-        type=int,
+        type=positive_int,
         default=50,
         metavar="N",
         help="Emails loaded per page (default: 50); press m in the list for older ones.",
