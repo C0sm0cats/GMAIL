@@ -761,6 +761,32 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(badges, {"Inbox": ("4", "unread")})
         self.assertEqual((action, ids), ("download", ["0"]))
 
+    def test_sync_shows_a_label_created_meanwhile(self):
+        # Label created in Gmail web while the list is open: the sync brings its name, shown and filterable.
+        from unittest import mock
+
+        def sync(loaded):
+            return {"new": [], "gone": set(), "labels": {"1": ["INBOX", "Label_2"]}, "total": None, "badges": {},
+                    "user_labels": {"Label_1": "Work", "Label_2": "Factures"}}
+
+        import threading
+        messages, done = make_messages(3), threading.Event()
+        with mock.patch.object(savegmail, "USER_LABELS", {"Label_1": "Work"}), create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                def send():
+                    # Once the sync ran: filter, save; then esc and q if s found nothing to save.
+                    for key in ("/factures", "\r", "s", "\x1b", "q"):
+                        if done.wait(0.4):
+                            return
+                        pipe.send_text(key)
+                sender = threading.Thread(target=send, daemon=True)
+                sender.start()
+                action, chosen = savegmail.pick_messages(messages, sync=sync)
+                done.set()
+                sender.join()
+            self.assertEqual(savegmail.message_row(messages[1])["tags"], [("label", "Factures")])
+        self.assertEqual((action, [message["id"] for message in chosen]), ("save", ["1"]))
+
     def test_failed_sync_keeps_the_list(self):
         def sync(loaded):
             raise RuntimeError("offline")
@@ -2949,6 +2975,7 @@ class HistoryMailboxApi(SyncedMailboxApi):
     def __init__(self, labels):
         super().__init__(labels)
         self.history_id, self.events, self.gets, self.lists, self.oldest = 100, [], [], 0, 0
+        self.names = {}  # your own labels, {id: name}, as labels.list gives them
 
     def change(self, msg_id, labels):
         self.mail[msg_id] = labels
@@ -3005,7 +3032,7 @@ class HistorySyncSessionTest(unittest.TestCase):
             return "quit", []
 
         with mock.patch.multiple(
-            savegmail, authenticate=lambda: object(), build=lambda *a, **k: api, user_labels=lambda *a: {},
+            savegmail, authenticate=lambda: object(), build=lambda *a, **k: api, user_labels=lambda *a: dict(api.names),
             list_candidate_messages=listed, ask_user_to_select_messages=ask, sync_playwright=lambda: FakePlaywright(),
             launch_browser=lambda *a, **k: mock.Mock(), open_quietly=lambda url: True,
             console=Console(file=io.StringIO()),
@@ -3031,6 +3058,19 @@ class HistorySyncSessionTest(unittest.TestCase):
         self.assertEqual(changed["labels"], {"m7": ["INBOX"]})
         self.assertEqual(after["labels"], {})
         self.assertEqual(api.gets, ["m7", "m7"])  # one messages.get per sync that saw m7, none per loaded email
+
+    def test_sync_brings_labels_created_meanwhile(self):
+        api = HistoryMailboxApi({f"m{index}": ["INBOX"] for index in range(3)})
+        api.names = {"Label_1": "Work"}
+        results = []
+
+        def step(sync):
+            api.names["Label_2"] = "Factures"  # created in Gmail web and put on m1
+            api.change("m1", ["INBOX", "Label_2"])
+            results.append(sync())
+        self.run_session(api, step)
+        self.assertEqual(results[0]["labels"], {"m1": ["INBOX", "Label_2"]})
+        self.assertEqual(results[0]["user_labels"], {"Label_1": "Work", "Label_2": "Factures"})
 
     def test_history_too_old_falls_back_to_the_full_sync(self):
         api = HistoryMailboxApi({f"m{index}": ["INBOX", "UNREAD"] for index in range(3)})

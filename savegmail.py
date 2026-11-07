@@ -1948,6 +1948,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         new = [message for message in result["new"] if message["id"] not in known]
         messages[:] = [message for message in messages if message["id"] not in gone] + new
         messages.sort(key=lambda message: message["internalDate"], reverse=True)
+        # Merged, not replaced: a failed labels.list gives {} and must not hide the labels already known.
+        USER_LABELS.update(result.get("user_labels") or {})
         rows[:] = [message_row(message) for message in messages]
         state["selected"] -= gone
         if badges is not None:
@@ -2643,12 +2645,14 @@ def interactive_download_main():
             def sync_once(loaded):
                 new, gone, relabeled, history = sync_changes(sync_service, user_id, view, loaded)
                 labels = current_labels(sync_service, user_id, relabeled)
+                # Labels created or renamed in Gmail meanwhile: their names, only when an email changed.
+                names = user_labels(sync_service, user_id) if new or labels else {}
                 total = view["total"]
                 if view["more"]:
                     total = estimate_total(sync_service, user_id, view["query"], view["in_trash"])
                     view["total"] = total
                 # The list may drop this result (Tab, q, an action): the history id only moves once it is applied.
-                return {"new": new, "gone": gone, "labels": labels, "total": total,
+                return {"new": new, "gone": gone, "labels": labels, "total": total, "user_labels": names,
                         "badges": view_badges(sync_service, user_id, view_queries, bool(args.query)),
                         "applied": lambda: view.update(history=history)}
             return sync
