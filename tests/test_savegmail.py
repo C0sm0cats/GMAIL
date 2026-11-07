@@ -513,5 +513,98 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick("\r", messages, state=state), ("download", ["1"]))
 
 
+class FakeRawService:
+    def __init__(self, raw):
+        self.raw = raw
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def get(self, **kwargs):
+        return self
+
+    def execute(self):
+        return {"raw": self.raw}
+
+
+class FakePdfPage:
+    def __init__(self, fail):
+        self.fail = fail
+
+    def set_content(self, *args, **kwargs):
+        pass
+
+    def evaluate(self, *args, **kwargs):
+        pass
+
+    def wait_for_timeout(self, *args):
+        pass
+
+    def pdf(self, path, **kwargs):
+        if self.fail:
+            raise ValueError("render failed")
+        with open(path, "wb") as f:
+            f.write(b"%PDF-RENDERED")
+
+    def close(self):
+        pass
+
+
+class FakePdfBrowser:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def new_page(self, **kwargs):
+        return FakePdfPage(self.fail)
+
+
+class PdfFileNameTest(unittest.TestCase):
+    """The rendered PDF never overwrites or deletes a file the program did not create."""
+
+    def save(self, save_dir, subject, attachment=None, fail=False):
+        import base64
+        from email.message import EmailMessage
+        from unittest import mock
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = "Sender <s@example.com>"
+        msg.set_content("hello")
+        if attachment:
+            msg.add_attachment(attachment[1], maintype="application", subtype="pdf", filename=attachment[0])
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        with mock.patch.object(savegmail, "measure_pdf_margins", return_value={}):
+            return savegmail.save_email_and_attachments(
+                FakeRawService(raw), "me", "id1", save_dir, FakePdfBrowser(fail))
+
+    def read(self, path):
+        with open(path, "rb") as f:
+            return f.read()
+
+    def test_pdf_keeps_existing_files(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as save_dir:
+            # Attachment named like the subject: both files must survive.
+            result = self.save(save_dir, "Invoice", attachment=("Invoice.pdf", b"%PDF-ATTACHMENT"))
+            self.assertEqual(self.read(os.path.join(save_dir, "Invoice.pdf")), b"%PDF-ATTACHMENT")
+            self.assertEqual(self.read(os.path.join(save_dir, result["pdf"])), b"%PDF-RENDERED")
+
+            # A file already in the folder survives a successful save...
+            with open(os.path.join(save_dir, "Contract.pdf"), "wb") as f:
+                f.write(b"USER-CONTRACT")
+            self.save(save_dir, "Contract")
+            self.assertEqual(self.read(os.path.join(save_dir, "Contract.pdf")), b"USER-CONTRACT")
+
+            # ...and a failed one, which removes only what it wrote.
+            with open(os.path.join(save_dir, "Report.pdf"), "wb") as f:
+                f.write(b"USER-REPORT")
+            with self.assertRaises(RuntimeError):
+                self.save(save_dir, "Report", fail=True)
+            self.assertEqual(self.read(os.path.join(save_dir, "Report.pdf")), b"USER-REPORT")
+            self.assertFalse([name for name in os.listdir(save_dir) if name.startswith(".")])
+
+
 if __name__ == "__main__":
     unittest.main()

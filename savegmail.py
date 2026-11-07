@@ -21,6 +21,7 @@ import contextlib
 import shutil
 import time
 import tempfile
+import uuid
 import webbrowser
 from urllib.parse import quote
 import html
@@ -452,8 +453,9 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     else:
         attachments_html_footer = "<div>No attachments for this mail</div>"
 
-    # Generate PDF
-    final_pdf_path = os.path.join(save_dir, f"{file_safe_subject}.pdf")
+    # Generate PDF. Render under a name of our own: the subject may match an attachment of this email
+    # or a file already in the folder, which would be overwritten, or removed if the save fails.
+    final_pdf_path = os.path.join(save_dir, f".savegmail-{uuid.uuid4().hex}.pdf")
     written.append(final_pdf_path)
 
     on_step("rendering PDF")
@@ -510,7 +512,12 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     now = datetime.now()
     timestamp = now.strftime("%y%m%d_%H%M%S")
     milliseconds = now.microsecond // 1000
-    new_pdf_path = os.path.join(save_dir, f"{timestamp}{milliseconds}_{file_safe_subject}.pdf")
+    base = f"{timestamp}{milliseconds}_{file_safe_subject}"
+    new_pdf_name, counter = f"{base}.pdf", 1
+    while os.path.exists(os.path.join(save_dir, new_pdf_name)) or new_pdf_name in used_filenames:
+        new_pdf_name = f"{base}({counter}).pdf"
+        counter += 1
+    new_pdf_path = os.path.join(save_dir, new_pdf_name)
     os.rename(final_pdf_path, new_pdf_path)
     written[-1] = new_pdf_path
     debug(f"Saved {os.path.basename(new_pdf_path)}")
