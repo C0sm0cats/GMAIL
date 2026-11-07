@@ -635,6 +635,62 @@ class PdfFileNameTest(unittest.TestCase):
             self.assertEqual(attachments, {"invoice.pdf": b"march", "invoice(1).pdf": b"april"})
 
 
+class FakeSaveService(FakeService):
+    """Serves one raw email and records the ids moved to the trash (when the batch runs)."""
+
+    def __init__(self, raw):
+        super().__init__()
+        self.raw, self.trashed = raw, []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def get(self, **kwargs):
+        return FakeRawService(self.raw)
+
+    def trash(self, userId, id):
+        service = self
+
+        class Request:
+            def execute(self):
+                service.trashed.append(id)
+                return {"id": id}
+        return Request()
+
+
+class SaveMessagesAttachmentTest(unittest.TestCase):
+    def test_enter_writes_attachment_before_trashing(self):
+        import base64
+        import io
+        import tempfile
+        from email.message import EmailMessage
+        from unittest import mock
+        content = b"%PDF-1.4 contract\x00\xff"
+        msg = EmailMessage()
+        msg["Subject"] = "Invoice"
+        msg["From"] = "Sender <s@example.com>"
+        msg.set_content("hello")
+        msg.add_attachment(content, maintype="application", subtype="pdf", filename="contract.pdf")
+        service = FakeSaveService(base64.urlsafe_b64encode(msg.as_bytes()).decode())
+        message = {"id": "m1", "from": "Sender <s@example.com>", "subject": "Invoice",
+                   "snippet": "", "internalDate": 1_700_000_000_000}
+        with tempfile.TemporaryDirectory() as save_dir, \
+                mock.patch.object(savegmail, "measure_pdf_margins", return_value={}), \
+                mock.patch.object(savegmail, "console", savegmail.Console(file=io.StringIO())):
+            saved, count, failed, files = savegmail.save_messages(
+                service, "me", [message], save_dir, FakePdfBrowser(), True)
+            path = os.path.join(save_dir, "contract.pdf")
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), content)
+            self.assertIn(path, files["m1"])
+        self.assertEqual([m["id"] for m in saved], ["m1"])
+        self.assertEqual((count, failed), (1, {}))
+        self.assertEqual(service.trashed, ["m1"])
+
+
 class FakeGmail:
     """Where each email is in a fake Gmail: inbox, archive, trash or gone (permanently deleted)."""
 
