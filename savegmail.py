@@ -230,10 +230,14 @@ def sign_in(reason):
             return open_quietly(url)
 
     webbrowser.register("savegmail", None, QuietBrowser("savegmail"))
-    with console.status("[dim]Waiting for sign-in…[/]"):
-        creds = flow.run_local_server(
-            port=0, browser="savegmail", authorization_prompt_message="", success_message=SIGN_IN_SUCCESS_PAGE
-        )
+    try:
+        with console.status("[dim]Waiting for sign-in…[/]"):
+            creds = flow.run_local_server(
+                port=0, browser="savegmail", authorization_prompt_message="", success_message=SIGN_IN_SUCCESS_PAGE
+            )
+    except KeyboardInterrupt:
+        console.print("[yellow]![/] Sign-in cancelled.")
+        sys.exit(1)
     if not VERBOSE and console.is_terminal:
         console.file.write("\x1b[2F\x1b[J")  # erase the two prompt lines
     debug(f"Token expires {convert_expiry_to_local_time(creds.expiry)}")
@@ -256,6 +260,12 @@ def sign_in_quietly(timeout=300):
     return creds
 
 
+def exit_unreachable(error):
+    """Gmail could not be reached at launch: say so with the cause, then quit."""
+    console.print(f"[red]✗[/] Gmail unreachable, check your connection.\n  [dim]{escape(str(error))}[/]")
+    sys.exit(1)
+
+
 def authenticate():
     creds = None
     if os.path.exists(TOKEN_PATH):
@@ -265,6 +275,9 @@ def authenticate():
             try:
                 creds.refresh(Request())
                 debug(f"Token refreshed, expires {convert_expiry_to_local_time(creds.expiry)}")
+            except NETWORK_ERRORS as e:
+                # Offline, the session is still good: signing in again could not load either.
+                exit_unreachable(e)
             except Exception as e:
                 debug(f"Could not refresh token: {e}")
                 if "invalid_grant" in str(e):
@@ -766,7 +779,8 @@ def refresh_labels(service, user_id, messages):
 
 # What a Gmail call raises besides HttpError: session expired or revoked (RefreshError), network down
 # (httplib2's ServerNotFoundError, google-auth's TransportError, OSError such as timeouts and resets).
-GMAIL_ERRORS = (HttpError, RefreshError, TransportError, httplib2.HttpLib2Error, OSError)
+NETWORK_ERRORS = (TransportError, httplib2.HttpLib2Error, OSError)
+GMAIL_ERRORS = (HttpError, RefreshError) + NETWORK_ERRORS
 
 
 def mark_read(service, user_id, messages):
@@ -2168,7 +2182,10 @@ def interactive_download_main():
         os.makedirs(save_dir, exist_ok=True)
         shown_dir = save_dir.replace(os.path.expanduser("~"), "~", 1)
 
-        account = service.users().getProfile(userId=user_id).execute().get("emailAddress", user_id)
+        try:
+            account = service.users().getProfile(userId=user_id).execute().get("emailAddress", user_id)
+        except NETWORK_ERRORS as error:
+            exit_unreachable(error)
         def make_banner():
             return (
                 f" [bold]savegmail[/]  [dim]·[/]  {escape(account)}  [dim]·  query:[/] "

@@ -2426,5 +2426,88 @@ class LauncherVenvTest(unittest.TestCase):
         self.assertTrue(calls[-1].endswith("savegmail.py --help"))
 
 
+class AuthenticateTest(unittest.TestCase):
+    """Launch sign-in: only a refused refresh asks to sign in again; offline says so and quits."""
+
+    real_sign_in = staticmethod(savegmail.sign_in)
+
+    def setUp(self):
+        import io
+        import json
+        import tempfile
+        from unittest import mock
+        from rich.console import Console
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        self.token_path = os.path.join(tmp, "token.json")
+        with open(self.token_path, "w") as token:  # expired access token, fake values
+            json.dump({"token": "old", "refresh_token": "fake-refresh", "client_id": "id", "client_secret": "secret",
+                       "token_uri": "https://oauth2.example.invalid/token", "expiry": "2000-01-01T00:00:00Z"}, token)
+        self.output = io.StringIO()
+        self.new = mock.Mock()
+        self.new.to_json.return_value = json.dumps({"token": "fresh"})
+        self.sign_in = mock.Mock(return_value=self.new)
+        for patcher in [mock.patch.object(savegmail, "TOKEN_PATH", self.token_path),
+                        mock.patch.object(savegmail, "CREDENTIALS_PATH", os.path.join(tmp, "credentials.json")),
+                        mock.patch.object(savegmail, "sign_in", self.sign_in),
+                        mock.patch.object(savegmail, "console", Console(file=self.output, width=200))]:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def refresh_raising(self, error):
+        from unittest import mock
+        return mock.patch.object(savegmail.Credentials, "refresh", side_effect=error)
+
+    def saved_token(self):
+        import json
+        with open(self.token_path) as token:
+            return json.load(token)
+
+    def test_revoked_token_signs_in_again_and_saves(self):
+        with self.refresh_raising(savegmail.RefreshError("invalid_grant: Token has been expired or revoked.")):
+            self.assertIs(savegmail.authenticate(), self.new)
+        self.assertIn("expired", self.sign_in.call_args[0][0])
+        self.assertEqual(self.saved_token(), {"token": "fresh"})
+
+    def test_offline_refresh_says_unreachable_without_sign_in(self):
+        with self.refresh_raising(savegmail.TransportError("Failed to resolve 'oauth2.googleapis.com'")):
+            with self.assertRaises(SystemExit) as raised:
+                savegmail.authenticate()
+        self.assertEqual(raised.exception.code, 1)
+        self.sign_in.assert_not_called()
+        self.assertIn("Gmail unreachable", self.output.getvalue())
+        self.assertIn("Failed to resolve", self.output.getvalue())
+        self.assertEqual(self.saved_token()["token"], "old")
+
+    def test_offline_profile_at_launch_says_unreachable(self):
+        import tempfile
+        from unittest import mock
+        save_dir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, save_dir, True)
+        service = mock.Mock()
+        service.users().getProfile().execute.side_effect = savegmail.httplib2.ServerNotFoundError(
+            "Unable to find the server at gmail.googleapis.com")
+        with mock.patch.multiple(savegmail, authenticate=lambda: object(), build=lambda *a, **k: service), \
+                mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir]):
+            with self.assertRaises(SystemExit) as raised:
+                savegmail.interactive_download_main()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("Gmail unreachable", self.output.getvalue())
+
+    def test_ctrl_c_while_waiting_for_sign_in_quits_cleanly(self):
+        from unittest import mock
+        flow = mock.Mock()
+        flow.run_local_server.side_effect = KeyboardInterrupt
+        with mock.patch.object(savegmail, "oauth_flow", return_value=flow), \
+                mock.patch.object(savegmail.webbrowser, "register"):
+            with self.assertRaises(SystemExit) as raised:
+                try:
+                    self.real_sign_in("Sign in to Gmail in your browser.")
+                except KeyboardInterrupt:
+                    self.fail("Ctrl+C escaped sign_in as a traceback")
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("Sign-in cancelled", self.output.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
