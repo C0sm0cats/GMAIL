@@ -43,6 +43,46 @@ def pick_later(keys, messages, delay=0.5, **kwargs):
     return action, [message["id"] for message in chosen]
 
 
+def screen_after(keys, columns, rows, messages=None, **kwargs):
+    """The picker's screen text, columns × rows, once keys are handled; then esc and q close it."""
+    import io
+    import threading
+    import time
+    from unittest import mock
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.output.vt100 import Vt100_Output
+    from prompt_toolkit.renderer import Renderer
+    render, shown = Renderer.render, {}
+
+    def record(self, app, layout, is_done=False):
+        render(self, app, layout, is_done)
+        if not is_done:
+            buffer = self._last_screen.data_buffer
+            shown["text"] = "\n".join(
+                "".join(buffer[y][x].char for x in range(max(buffer[y], default=-1) + 1)).rstrip()
+                for y in range(rows))
+
+    output = Vt100_Output(io.StringIO(), lambda: Size(rows, columns), term="xterm")
+    result, done = {}, threading.Event()
+    with mock.patch.object(Renderer, "render", record), create_pipe_input() as pipe:
+        with create_app_session(input=pipe, output=output):
+            def send():
+                time.sleep(0.3)
+                pipe.send_text(keys)
+                time.sleep(0.5)
+                result["text"] = shown.get("text")
+                # esc closes a prompt (or the list), q the list; nothing is sent once it is closed.
+                for key in ("\x1b", "q"):
+                    if not done.wait(0.3):
+                        pipe.send_text(key)
+            sender = threading.Thread(target=send, daemon=True)
+            sender.start()
+            savegmail.pick_messages(make_messages(3) if messages is None else messages, **kwargs)
+            done.set()
+            sender.join()
+    return result["text"]
+
+
 class ParseSelectionTest(unittest.TestCase):
     def test_numbers_ranges_and_all(self):
         self.assertEqual(savegmail.parse_selection("1, 3 5-4", 5), [0, 2, 3, 4])
@@ -422,6 +462,56 @@ class PickerTest(unittest.TestCase):
     def test_help_closes_on_any_key(self):
         self.assertEqual(pick("?q\r"), ("download", ["0"]))
         self.assertEqual(pick("?\x1bq"), ("quit", []))
+
+    def test_help_scrolls_when_taller_than_the_screen(self):
+        # DummyOutput is 80×40: the wrapped help is taller. The arrows scroll it, any other key closes it.
+        state = savegmail.new_picker_state()
+        self.assertEqual(pick("?jq\r", state=state), ("download", ["0"]))
+        self.assertEqual(state["help_top"], 1)
+        pick("?\x1b[F\x1bq", state=state)  # End: down to the last row
+        rows = savegmail.help_lines(80)
+        self.assertEqual(rows[state["help_top"]:][-1], [("class:key", "  q esc   "), ("", "quit")])
+        for row in rows:
+            self.assertLessEqual(sum(savegmail.cell_len(text) for _, text in row), 79, row)
+
+    def test_narrow_footer_keeps_main_keys_and_typed_input(self):
+        # 80×24 (the default terminal) and below: every footer line fits, the save, view, help and
+        # quit keys keep their label, and what is typed (D, T, f, /) stays visible with its cursor.
+        def footer(keys, columns, **kwargs):
+            lines = screen_after(keys, columns, 24, **kwargs).rstrip("\n").split("\n")[-3:]
+            for line in lines:
+                self.assertLessEqual(savegmail.cell_len(line), columns - 1, (columns, line))
+            return "\n".join(lines)
+
+        for columns in (60, 80, 100):
+            text = footer("", columns)
+            for part in ("enter save+trash", "s save+keep", "? help", "q quit", "d trash"):
+                self.assertIn(part, text, (columns, text))
+        text = footer("", 80, views=("All mail", "Trash"), view=1, undo_label="trash (3)")
+        for part in ("R restore", "s save+keep", "u undo trash (3)"):
+            self.assertIn(part, text)
+        self.assertIn("R not spam", footer("", 80, views=("All mail", "Spam"), view=1))
+        signed_out = savegmail.new_picker_state()
+        signed_out["signed_out"] = True
+        text = footer("", 100, state=signed_out, sign_in=lambda: None, load_more=lambda: [])
+        for part in ("r sign in", "m more", "enter save+trash", "s save+keep", "q quit"):
+            self.assertIn(part, text)
+        self.assertIn("Type empty: em▏", footer("Tem", 80))
+        self.assertIn("Type delete: del▏", footer("aDdel", 80, messages=make_messages(40)))
+        # A path longer than the line: its end, where one types, shows after …
+        path = "~/Documents/Archives/Correspondance-administrative/2026/Fournisseurs-et-prestataires/Novembre-a-trier/"
+        self.assertRegex(footer("f\x15" + path, 80), r"\n …[^\n]*/Novembre-a-trier/▏\n")
+        self.assertRegex(footer("/" + "news" * 30, 80), r" / …w?s?(news)+▏\n enter apply · esc clear")
+
+    def test_long_notice_wraps_instead_of_being_cut(self):
+        cause = "Call log: navigating to https://mail.google.com/mail/u/0/#inbox/abcdef, waiting until load"
+        notice = [[("class:checked", " ✓ "), ("", "1 saved"), ("class:dim", " · u undo")],
+                  [("class:error", " ✗ "), ("", "Subject 0: " + cause)]]
+        text = screen_after("", 80, 24, notice=notice)
+        self.assertIn("waiting until load", text)
+        self.assertIn("1 saved · u undo", text)
+        self.assertIn("Subject 0", text)  # the list still shows below the wrapped notice
+        self.assertEqual(savegmail.screen_rows(notice[1], 80), 2)
 
     def test_trash_selection(self):
         self.assertEqual(pick("ady"), ("trash", ["0", "1", "2"]))

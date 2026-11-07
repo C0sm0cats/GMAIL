@@ -1072,6 +1072,94 @@ def header_line(tabs, view, infos, tail, status, columns):
     return parts
 
 
+def clip_line(parts, columns):
+    """Cut a line of formatted fragments to columns - 1 cells, ending it with … when cut."""
+    width = columns - 1
+    if sum(cell_len(text) for _, text in parts) <= width:
+        return list(parts)
+    kept, used = [], 0
+    for style, text in parts:
+        chars = []
+        for char in text:
+            if used + cell_len(char) > width - 1:
+                break
+            chars.append(char)
+            used += cell_len(char)
+        else:
+            kept.append((style, text))
+            continue
+        kept.append((style, "".join(chars)))
+        break
+    return kept + [("class:dim", "…")]
+
+
+def fit_end(value, width):
+    """The end of value in at most width cells, after … when its start is cut (typed input)."""
+    if cell_len(value) <= width:
+        return value
+    kept, used = [], 1
+    for char in reversed(value):
+        if used + cell_len(char) > width:
+            break
+        kept.append(char)
+        used += cell_len(char)
+    return "…" + "".join(reversed(kept)) if width > 0 else ""
+
+
+def screen_rows(parts, columns):
+    """Rows a line of formatted fragments takes in a window of columns that wraps lines."""
+    rows, used = 1, 0
+    for _, text in parts:
+        for char in text:
+            if used + cell_len(char) > columns:
+                rows, used = rows + 1, 0
+            used += cell_len(char)
+    return rows
+
+
+def footer_keys(name, keys, columns):
+    """One footer line: a key group, fitted to columns.
+
+    keys are (key, label, keep). When the line is too long, the keys without keep lose their label,
+    from the last one, then they go, from the last one; the keep keys (main actions, help, quit)
+    stay with their label, and the line is cut (…) only if they alone do not fit.
+    """
+    def line(shown):
+        parts = [(f"class:group.{name}", f" {name:<7}")]
+        for position, (key, label) in enumerate(shown):
+            parts += [("class:dim", " · " if position else " "), ("class:key", key)]
+            if label:
+                parts.append(("class:dim", f" {label}"))
+        return parts
+
+    secondary = [position for position, (_, _, keep) in enumerate(keys) if not keep]
+    shown = [(key, label) for key, label, _ in keys]
+    candidates = [list(shown)]
+    for position in reversed(secondary):
+        shown[position] = (shown[position][0], None)
+        candidates.append(list(shown))
+    for position in reversed(secondary):
+        shown[position] = None
+        candidates.append([key for key in shown if key])
+    for shown in candidates:
+        parts = line(shown)
+        if sum(cell_len(text) for _, text in parts) <= columns - 1:
+            return parts
+    return clip_line(parts, columns)
+
+
+def help_lines(columns):
+    """The ? help, wrapped to columns: one list of formatted fragments per screen row."""
+    import textwrap
+    width = max(20, columns - 1)
+    lines = [[("class:dim", "  " + text)] for paragraph in KEY_HELP_NOTE.split("\n")
+             for text in textwrap.wrap(paragraph.strip(), width - 2)] + [[]]
+    for key, description in KEY_HELP:
+        for position, text in enumerate(textwrap.wrap(description, max(10, width - 10))):
+            lines.append([("class:key", f"  {key:<8}" if not position else " " * 10), ("", text)])
+    return lines
+
+
 def sender_name(sender):
     name, address = parseaddr(sender or "")
     return name.strip().strip('"') or address or "—"
@@ -1296,9 +1384,12 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     def list_height():
         # Leave room for the startup line above the picker, its own header/footer and the notice.
-        wanted = len(KEY_HELP) + KEY_HELP_NOTE.count("\n") + 2 if state["help"] else len(rows)
+        wanted = len(help_lines(size().columns)) if state["help"] else len(rows)
         # (header, blank, column titles, list, blank, footer)
-        return max(1, min(wanted, size().rows - 7 - (FOOTER_LINES - 1) - len(notice)))
+        return max(1, min(wanted, size().rows - 7 - (FOOTER_LINES - 1) - notice_rows()))
+
+    def notice_rows():
+        return sum(screen_rows(line, size().columns) for line in notice)
 
     def clamp():
         indexes = visible()
@@ -1371,11 +1462,16 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             parts += line
         return parts
 
+    def help_scroll():
+        """(first help row shown, rows shown, all rows), the first row kept in range."""
+        lines, height = help_lines(size().columns), list_height()
+        state["help_top"] = max(0, min(state.get("help_top", 0), len(lines) - height))
+        return state["help_top"], height, lines
+
     def render_help():
-        lines = [("class:dim", "  " + KEY_HELP_NOTE), ("", "\n")]
-        for key, description in KEY_HELP:
-            lines += [("", "\n"), ("class:key", f"  {key:<8}"), ("", description)]
-        return lines
+        top, height, lines = help_scroll()
+        return [part for position, line in enumerate(lines[top:top + height])
+                for part in ([("", "\n")] if position else []) + line]
 
     def render_columns():
         """Column titles above the list, aligned with render_list."""
@@ -1459,18 +1555,30 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         return [(("class:draft" if row["kind"] == "draft" else "class:sender") + bold, text)]
 
     def render_footer():
-        rest = []  # footer lines below the first one (key groups only), as lists of fragments
+        # Every line fits the width: inputs show their end and cursor, key groups drop secondary
+        # labels before the main actions, and a line still too long ends with … (see footer_keys).
+        columns = size().columns
+        rest = []  # footer lines below the first one, as lists of fragments
         if state["help"]:
-            hint = [("class:dim", " any key to close help")]
+            top, height, lines = help_scroll()
+            if height < len(lines):
+                hint = [("class:dim", f" rows {top + 1}-{top + height} of {len(lines)} · "),
+                        ("class:key", "↑↓"), ("class:dim", " "), ("class:key", "PgUp PgDn"),
+                        ("class:dim", " scroll · any other key closes help")]
+            else:
+                hint = [("class:dim", " any key to close help")]
         elif state["confirm"] and state["confirm"]["action"] in TYPED_CONFIRM:
             action = state["confirm"]["action"]
             n = len(state["confirm"]["ids"])
             question = (f" Permanently delete {n} email{'s' * (n != 1)}{hidden_note()}?" if action == "delete"
                         else " Permanently delete everything in the Gmail trash?")
-            hint = [("class:error", question + " Cannot be undone."),
-                    ("class:dim", " Type "), ("class:key", TYPED_CONFIRM[action]), ("class:dim", ": "),
-                    ("", state["confirm"]["typed"]), ("class:accent", "▏")]
-            rest = [[("class:dim", " enter confirm · esc cancel")]]
+            # The word to type, what is typed and the cursor start the second line: always visible.
+            prompt = [("class:error", " Cannot be undone."), ("class:dim", " Type "),
+                      ("class:key", TYPED_CONFIRM[action]), ("class:dim", ": ")]
+            room = columns - 2 - sum(cell_len(text) for _, text in prompt)
+            hint = [("class:error", question)]
+            rest = [prompt + [("", fit_end(state["confirm"]["typed"], room)), ("class:accent", "▏")],
+                    [("class:dim", " enter confirm · esc cancel")]]
         elif state["confirm"]:
             n = len(state["confirm"]["ids"])
             question = (f" Open {n} PDF previews?" if state["confirm"]["action"] == "preview"
@@ -1478,43 +1586,47 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             hint = [("class:warn", question)]
             rest = [[("class:dim", " "), ("class:key", "y"), ("class:dim", " confirm · any other key cancel")]]
         elif state["folder"] is not None:
-            hint = [("class:accent", " Download folder: "), ("", state["folder"]), ("class:accent", "▏")]
-            rest = [[("class:dim", " enter apply (created if missing) · ctrl+u clear · esc cancel · "
-                                   "for this session; --download-path sets it at launch")]]
+            # The path on a line of its own, its end (where one types) shown when it is too long.
+            hint = [("class:accent", " Download folder"),
+                    ("class:dim", " for this session (--download-path sets it at launch):")]
+            rest = [[("", " " + fit_end(state["folder"], columns - 3)), ("class:accent", "▏")],
+                    [("class:dim", " enter apply (created if missing) · ctrl+u clear · esc cancel")]]
         elif state["filtering"]:
-            hint = [("class:accent", " / "), ("", state["query"]), ("class:accent", "▏"),
-                    ("class:dim", "   enter apply · esc clear")]
+            keys = [("class:dim", "   enter apply · esc clear")]
+            room = columns - 5 - cell_len(keys[0][1])
+            if cell_len(state["query"]) > room:
+                rest, room = [[("class:dim", " enter apply · esc clear")]], columns - 5
+                keys = []
+            hint = [("class:accent", " / "), ("", fit_end(state["query"], room)), ("class:accent", "▏")] + keys
         else:
-            # ↑↓ left out: obvious, and the line is full.
-            browse = [("space", "select"), ("a", "all"), ("A", "sender"), ("/", "filter"),
-                      ("z", "by date" if state["sort"] == "size" else "by size")]
+            # ↑↓ left out: obvious, and the line is full. keep: the label stays when the line is short.
+            browse = [("space", "select", False), ("a", "all", False), ("A", "sender", False),
+                      ("/", "filter", False), ("z", "by date" if state["sort"] == "size" else "by size", False)]
             if not state["exhausted"]:
-                browse.append(("m", "loading…" if state["loading"] else "more"))
+                browse.append(("m", "loading…" if state["loading"] else "more", True))
             if state["signed_out"] and sign_in is not None:
-                browse.append(("r", "signing in…" if state["signing_in"] else "sign in"))
-            browse += [("Tab", "views"), ("?", "help"), ("q", "quit")]
-            delete = ([] if in_trash else [("d", "trash")]) + [("D", "delete permanently"), ("T", "empty trash")]
+                browse.append(("r", "signing in…" if state["signing_in"] else "sign in", True))
+            browse += [("Tab", "views", False), ("?", "help", True), ("q", "quit", True)]
+            delete = ([] if in_trash else [("d", "trash", True)]) + [("D", "delete permanently", False),
+                                                                     ("T", "empty trash", False)]
             if undo_label:
-                delete.append(("u", f"undo {undo_label}"))
-            email = [("p", "preview"), ("o", "open in Gmail"), ("*", "star"), ("!", "unread"), ("f", "folder")]
+                delete.append(("u", f"undo {undo_label}", True))
+            # The view's own action (R), then the save keys lead: they are what the list is for.
             if in_trash:
-                email += [("s", "save+keep"), ("R", "restore")]
+                email = [("R", "restore", True), ("s", "save+keep", True)]
             elif in_spam:
-                email += [("enter", "save+trash"), ("s", "save+keep"), ("R", "not spam")]
+                email = [("R", "not spam", True), ("enter", "save+trash", True), ("s", "save+keep", True)]
             elif in_archived:
-                email += [("enter", "save+trash"), ("s", "save+keep"), ("R", "move to Inbox")]
+                email = [("R", "move to Inbox", True), ("enter", "save+trash", True), ("s", "save+keep", True)]
             else:
-                email += [("e", "archive"), ("enter", "save+trash"), ("s", "save+keep")]
+                email = [("enter", "save+trash", True), ("s", "save+keep", True), ("e", "archive", True)]
+            email += [("p", "preview", False), ("o", "open in Gmail", False), ("*", "star", False),
+                      ("!", "unread", False), ("f", "folder", False)]
             groups = [("browse", browse), ("email", email), ("delete", delete)]
-            lines = []
-            for name, keys in groups:
-                line = [(f"class:group.{name}", f" {name:<7}")]
-                for position, (key, label) in enumerate(keys):
-                    line += [("class:dim", " · " if position else " "), ("class:key", key), ("class:dim", f" {label}")]
-                lines.append(line)
+            lines = [footer_keys(name, keys, columns) for name, keys in groups]
             hint = lines[0]
             rest = lines[1:]
-        lines = [hint] + rest
+        lines = [clip_line(line, columns) for line in [hint] + rest]
         return [part for position, line in enumerate(lines) for part in ([("", "\n")] if position else []) + line]
 
     filtering = Condition(lambda: state["filtering"])
@@ -1618,11 +1730,22 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     @bindings.add("?", filter=browsing)
     def _(event):
-        state["help"] = True
+        state["help"], state["help_top"] = True, 0
 
     @bindings.add("<any>", filter=helping)
     def _(event):
         state["help"] = False
+
+    def scroll_help(delta):
+        state["help_top"] = state.get("help_top", 0) + delta
+        help_scroll()
+
+    # The help can be taller than the screen: the arrows scroll it, any other key closes it.
+    for keys, delta in ((("up",), lambda: -1), (("k",), lambda: -1), (("down",), lambda: 1), (("j",), lambda: 1),
+                        (("pageup",), lambda: -list_height()), (("pagedown",), lambda: list_height()),
+                        (("home",), lambda: -len(help_lines(size().columns))),
+                        (("end",), lambda: len(help_lines(size().columns)))):
+        bindings.add(*keys, filter=helping)(lambda event, delta=delta: scroll_help(delta()))
 
     bindings.add("y", filter=confirming_yes)(
         lambda event: submit(event, state["confirm"]["action"], state["confirm"]["ids"]))
@@ -1855,7 +1978,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     })
     windows = [Window(FormattedTextControl(render_header), height=1)]
     if notice:
-        windows.append(Window(FormattedTextControl(render_notice), height=len(notice)))
+        # Wrapped, not cut: the cause of a failure is often longer than the line.
+        windows.append(Window(FormattedTextControl(render_notice), wrap_lines=True,
+                              height=lambda: Dimension.exact(notice_rows())))
     windows += [
         Window(height=1),
         Window(FormattedTextControl(render_columns), height=1),
