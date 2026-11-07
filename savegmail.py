@@ -51,15 +51,27 @@ def debug(message):
 def warn(message):
     console.print(f"[yellow]![/] {escape(message)}")
 
-def new_email_page(browser):
+# Inline images are served at these URLs, once each, instead of being pasted into the HTML as data: URLs:
+# an email referencing one image a thousand times would otherwise make a HTML a thousand times its size.
+INLINE_IMAGE_URL = "https://cid.savegmail.invalid/{}"
+
+
+def new_email_page(browser, resources=None):
     """Open a page for content written by a sender: its scripts never run, and it never navigates away
-    (a meta refresh would otherwise replace the email with a page of the sender's choice, or an error page)."""
+    (a meta refresh would otherwise replace the email with a page of the sender's choice, or an error page).
+
+    resources maps URLs to (content_type, body) served by the page itself (the email's inline images).
+    """
     page = browser.new_page(java_script_enabled=False)
+    resources = resources or {}
 
     def handle(route):
         request = route.request
         if request.is_navigation_request() and request.frame == page.main_frame:
             route.fulfill(status=204)  # 204 keeps the current document; abort() would show an error page
+        elif request.url in resources:
+            content_type, body = resources[request.url]
+            route.fulfill(status=200, content_type=content_type, body=body)
         else:
             route.continue_()
 
@@ -463,25 +475,29 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
 
         # Handle images (inline or otherwise): Always embed if image and has CID
         if content_type.startswith('image/'):
-            payload = part.get_payload(decode=True)
-            base64_data = base64.b64encode(payload).decode('utf-8')
-            data_url = f"data:{content_type};base64,{base64_data}"
+            image = (content_type, part.get_payload(decode=True))
             if content_id:
                 content_id = content_id.strip('<>')
-                cid_map[content_id] = data_url
-                debug(f"Mapped CID {content_id} to data URL: {data_url[:50]}...")
+                cid_map[content_id] = image
+                debug(f"Mapped CID {content_id} to an inline {content_type} image")
             elif not filename:  # Generate CID only for true inline without filename
                 generated_cid = f"generated_cid_{counter}"
-                cid_map[generated_cid] = data_url
-                debug(f"Generated CID {generated_cid} for inline image without Content-ID: {data_url[:50]}...")
+                cid_map[generated_cid] = image
+                debug(f"Generated CID {generated_cid} for inline {content_type} image without Content-ID")
                 counter += 1
 
-    # Replace cid: in HTML with data: URLs
+    # Point each cid: at one URL per image, served by the page (see INLINE_IMAGE_URL).
+    inline_images = {}
+    cid_urls = {}
+
     def replace_cid(match):
         cid_value = match.group(1)
         if cid_value in cid_map:
-            debug(f"Replacing CID: {cid_value} with data URL: {cid_map[cid_value][:50]}...")
-            return f'src="{cid_map[cid_value]}"'
+            if cid_value not in cid_urls:
+                cid_urls[cid_value] = INLINE_IMAGE_URL.format(len(cid_urls))
+                inline_images[cid_urls[cid_value]] = cid_map[cid_value]
+            debug(f"Replacing CID: {cid_value} with {cid_urls[cid_value]}")
+            return f'src="{cid_urls[cid_value]}"'
         debug(f"No mapping found for CID: {cid_value}")
         return match.group(0)
 
@@ -509,7 +525,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     written.append(final_pdf_path)
 
     on_step("rendering PDF")
-    page = new_email_page(browser)
+    page = new_email_page(browser, inline_images)
     try:
         page.set_content(html_content, timeout=120000, wait_until="networkidle")
         # Emails often defer images; force them in and wait for fonts/images before printing.

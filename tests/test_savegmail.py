@@ -724,8 +724,8 @@ class FakeRoute:
 
 
 class FakeNavRequest:
-    def __init__(self, navigation, frame):
-        self.navigation, self.frame = navigation, frame
+    def __init__(self, navigation, frame, url="https://example.com/x"):
+        self.navigation, self.frame, self.url = navigation, frame, url
 
     def is_navigation_request(self):
         return self.navigation
@@ -789,6 +789,122 @@ class SenderContentPageTest(unittest.TestCase):
                 outcomes[name] = route.result
             self.assertEqual(outcomes, {"main navigation": ("fulfill", 204),
                                         "iframe navigation": ("continue",), "image": ("continue",)})
+
+
+def png_image(width, height):
+    """A valid opaque PNG of the given size."""
+    import struct
+    import zlib
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    rows = b"".join(b"\x00" + b"\xff\x00\x00" * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+def inline_image_email(body_html, image):
+    """Raw (base64url) multipart/related email whose HTML body may reference the image as cid:logo123."""
+    import base64
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["Subject"] = "Inline image"
+    msg["From"] = "s@example.com"
+    msg.set_content("alt")
+    msg.add_alternative(body_html, subtype="html")
+    msg.get_payload()[1].add_related(image, "image", "png", cid="<logo123>")
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+
+class FulfillRoute:
+    def __init__(self, request):
+        self.request = request
+        self.result = None
+
+    def fulfill(self, **kwargs):
+        self.result = ("fulfill", kwargs)
+
+    def continue_(self):
+        self.result = ("continue",)
+
+
+class ContentRecordingPage(RecordingPage):
+    def set_content(self, html, **kwargs):
+        self.html = html
+
+    def evaluate(self, script, *args, **kwargs):
+        self.scripts = getattr(self, "scripts", []) + [script]
+        return True
+
+
+class ContentRecordingBrowser(RecordingBrowser):
+    def new_page(self, **kwargs):
+        page = ContentRecordingPage()
+        self.pages.append(page)
+        return page
+
+
+class InlineImageTest(unittest.TestCase):
+    """Inline (cid:) and deferred (data-src) images of an email end up in its PDF."""
+
+    def test_cid_image_is_served_once_instead_of_copied_per_reference(self):
+        import tempfile
+        image = png_image(40, 20) + b"\x00" * 50_000  # trailing bytes: a large image, still a valid PNG
+        raw = inline_image_email("<p>Logo</p>" + '<img src="cid:logo123">' * 200, image)
+        browser = ContentRecordingBrowser()
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(FakeRawService(raw), "me", "id1", save_dir, browser)
+        page = browser.pages[0]  # the email page; the second one measures the header and footer
+        url = savegmail.INLINE_IMAGE_URL.format(0)
+        self.assertNotIn("cid:", page.html)
+        self.assertEqual(page.html.count(f'src="{url}"'), 200)
+        # The HTML does not grow with each reference to the image (it used to embed it 200 times).
+        self.assertLess(len(page.html), len(image))
+        route = FulfillRoute(FakeNavRequest(False, page.main_frame, url))
+        page.routes[0](route)
+        self.assertEqual(route.result, ("fulfill", {"status": 200, "content_type": "image/png", "body": image}))
+        # Deferred images are given their real source before printing.
+        self.assertTrue(any("img.src = img.dataset.src" in script for script in page.scripts))
+
+    def test_images_are_loaded_in_chromium_before_printing(self):
+        import base64
+        import tempfile
+        from playwright.sync_api import sync_playwright
+        image = png_image(40, 20)
+        data_url = "data:image/png;base64," + base64.b64encode(image).decode()
+        raw = inline_image_email(f'<img id="cid" src="cid:logo123"><img id="lazy" data-src="{data_url}">', image)
+        widths = []
+
+        class SpyBrowser:
+            """Real Chromium; notes the width of each image of the email page when it is printed."""
+            def __init__(self, browser):
+                self.browser = browser
+
+            def new_page(self, **kwargs):
+                page = self.browser.new_page(**kwargs)
+                pdf = page.pdf
+
+                def spy_pdf(**pdf_kwargs):
+                    widths.append(page.evaluate("[...document.images].map(img => [img.id, img.naturalWidth])"))
+                    return pdf(**pdf_kwargs)
+
+                page.pdf = spy_pdf
+                return page
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(channel="chromium")
+            except Exception as error:  # no Playwright Chromium here; never install it from a test
+                self.skipTest(f"Chromium unavailable: {error}")
+            try:
+                with tempfile.TemporaryDirectory() as save_dir:
+                    savegmail.save_email_and_attachments(FakeRawService(raw), "me", "id1", save_dir,
+                                                         SpyBrowser(browser))
+                    self.assertTrue(browser.is_connected())
+            finally:
+                browser.close()
+        self.assertEqual(widths, [[["cid", 40], ["lazy", 40]]])
 
 
 class PdfFileNameTest(unittest.TestCase):
