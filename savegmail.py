@@ -386,34 +386,63 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     cc = format_addresses(msg['Cc'])
     date = html.escape(get_real_date(msg['Date'] or 'No Date'))
 
+    def plain_to_html(text):
+        plain_text = html.escape(text)  # `<` and `&` are text, not HTML
+        plain_text = re.sub(r'(>>?|>)', r'\1', plain_text)
+        plain_text = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'\n\n\1', plain_text)
+        date_regex = r'((Le|The) \d{1,2} (janv\.|févr\.|mars\.|avr\.|mai\.|juin\.|juil\.|août\.|sept\.|oct\.|nov\.|déc\.|Jan\.|Feb\.|Mar\.|Apr\.|May\.|Jun\.|Jul\.|Aug\.|Sep\.|Oct\.|Nov\.|Dec\.) \d{4}( (à|at) \d{1,2}:\d{2})?)'
+        plain_text = re.sub(date_regex, r'\n\n\1', plain_text)
+        # The text is escaped: an URL stops at an escaped `<`, `>` or `"`, as it did before escaping.
+        url_regex = r'((?:https?://|www\.)(?:(?!&lt;|&gt;|&quot;)\S)+)'
+        plain_text = re.sub(url_regex, r'<a href="\1" target="_blank">\1</a>', plain_text)
+        # pre-wrap keeps line breaks and the spaces that align columns, and still wraps long lines;
+        # a monospace font keeps those columns aligned, as mail clients show plain text.
+        return f'<div style="font-family: monospace;font-size: 10px;white-space: pre-wrap">{plain_text}</div>'
+
+    def body_parts(part):
+        # The text parts a reader sees, in order. get_body() returns only one, but a body can be split
+        # around an attachment (Apple Mail) or end with a footer in its own part (mailing lists).
+        if part.get_content_maintype() != 'multipart':
+            if (part.get_content_type() in ('text/html', 'text/plain') and not part.get_filename()
+                    and part.get_content_disposition() != 'attachment'):
+                return [part]
+            return []
+        subparts = part.get_payload()
+        subtype = part.get_content_subtype()
+        if subtype == 'alternative':  # one rendering of the same text: the HTML one, or else the last
+            choices = [parts for parts in map(body_parts, subparts) if parts]
+            with_html = [parts for parts in choices if any(p.get_content_subtype() == 'html' for p in parts)]
+            return (with_html or choices or [[]])[-1]
+        if subtype == 'related':  # the root, the other parts are its images
+            return body_parts(subparts[0]) if subparts else []
+        return [p for sub in subparts for p in body_parts(sub)]
+
     # Extract HTML or plain text
-    html_part = msg.get_body(preferencelist=('html',))
-    if html_part:
-        debug("Email body selected: HTML")
-        html_content = html_part.get_content()
-    else:
-        plain_part = msg.get_body(preferencelist=('plain',))
-        if plain_part:
+    body = msg.get_body(preferencelist=('html',)) or msg.get_body(preferencelist=('plain',))
+    parts = body_parts(msg) if body else []
+    if body is not None and not any(p is body for p in parts):
+        parts = [body]  # a body we would not pick ourselves (e.g. named inline text): keep get_body's
+    if len(parts) > 1:
+        debug(f"Email body selected: {len(parts)} text parts")
+    if parts:
+        segments = [p.get_content() if p.get_content_subtype() == 'html' else plain_to_html(p.get_content())
+                    for p in parts]
+        if parts[0].get_content_subtype() == 'html':
+            debug("Email body selected: HTML")
+            # Chromium merges the <html> and <body> of the later parts into the first document.
+            html_content = "\n".join(segments)
+        else:
             debug("Email body selected: plain text")
-            plain_text = html.escape(plain_part.get_content())  # `<` and `&` are text, not HTML
-            plain_text = re.sub(r'(>>?|>)', r'\1', plain_text)
-            plain_text = re.sub(r'(On \d{2}/\d{2}/\d{4})', r'\n\n\1', plain_text)
-            date_regex = r'((Le|The) \d{1,2} (janv\.|févr\.|mars\.|avr\.|mai\.|juin\.|juil\.|août\.|sept\.|oct\.|nov\.|déc\.|Jan\.|Feb\.|Mar\.|Apr\.|May\.|Jun\.|Jul\.|Aug\.|Sep\.|Oct\.|Nov\.|Dec\.) \d{4}( (à|at) \d{1,2}:\d{2})?)'
-            plain_text = re.sub(date_regex, r'\n\n\1', plain_text)
-            # The text is escaped: an URL stops at an escaped `<`, `>` or `"`, as it did before escaping.
-            url_regex = r'((?:https?://|www\.)(?:(?!&lt;|&gt;|&quot;)\S)+)'
-            plain_text = re.sub(url_regex, r'<a href="\1" target="_blank">\1</a>', plain_text)
-            # pre-wrap keeps line breaks and the spaces that align columns, and still wraps long lines;
-            # a monospace font keeps those columns aligned, as mail clients show plain text.
+            joined = "\n".join(segments)
             html_content = f"""<html>
             <body>
-                <div style="font-family: monospace;font-size: 10px;white-space: pre-wrap">{plain_text}</div>
+                {joined}
             </body>
             </html>
             """
-        else:
-            warn("No HTML or plain text body found in email.")
-            html_content = "No content found in email."
+    else:
+        warn("No HTML or plain text body found in email.")
+        html_content = "No content found in email."
 
     # Extract attachments and inline images
     attachments_files = []

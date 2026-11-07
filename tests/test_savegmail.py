@@ -1053,6 +1053,70 @@ class EscapedTextTest(unittest.TestCase):
         self.assertIn("Q&amp;A&amp;para2.txt</a>", footer)
 
 
+class SplitBodyTest(unittest.TestCase):
+    """A body split into several text parts around an attachment is rendered whole, in order."""
+
+    def render(self, msg):
+        import base64
+        import tempfile
+        browser = ContentRecordingBrowser()
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(
+                FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1", save_dir,
+                browser)
+            saved = sorted(os.listdir(save_dir))
+        return browser.pages[0].html, saved
+
+    def test_every_inline_text_part_is_rendered(self):
+        from email.message import EmailMessage, MIMEPart
+        # Apple Mail, a file placed inside the text: alternative { plain, mixed { html, pdf, html } }.
+        msg = EmailMessage()
+        msg["Subject"] = "Devis"
+        msg["From"] = "Alice <alice@example.com>"
+        plain, mixed = MIMEPart(), MIMEPart()
+        plain.set_content("Bonjour, voici le devis.\nMerci de signer avant vendredi.\n")
+        first, last = MIMEPart(), MIMEPart()
+        first.set_content("<html><body><p>Bonjour, voici le devis.</p></body></html>", subtype="html")
+        last.set_content("<html><body><p>Merci de signer avant vendredi, montant 4 200 EUR.</p></body></html>",
+                         subtype="html")
+        mixed.make_mixed()
+        mixed.attach(first)
+        mixed.add_attachment(b"%PDF-1.4", maintype="application", subtype="pdf", filename="devis.pdf")
+        mixed.attach(last)
+        msg.make_alternative()
+        msg.attach(plain)
+        msg.attach(mixed)
+        body, saved = self.render(msg)
+        self.assertLess(body.index("voici le devis"), body.index("avant vendredi, montant 4 200 EUR"))
+        self.assertNotIn("Merci de signer avant vendredi.\n", body)  # the plain alternative is not added
+        self.assertIn("devis.pdf", saved)
+
+        # Mailing list footer in its own part: mixed { plain, plain }.
+        msg = EmailMessage()
+        msg["Subject"] = "Release"
+        msg.set_content("The release is out.\n")
+        footer = MIMEPart()
+        footer.set_content("dev mailing list\nUnsubscribe: https://lists.example.org/u\n")
+        msg.make_mixed()
+        msg.attach(footer)
+        body, saved = self.render(msg)
+        self.assertLess(body.index("The release is out."), body.index("Unsubscribe:"))
+        self.assertEqual(body.count("white-space: pre-wrap"), 2)
+
+    def test_named_text_part_stays_an_attachment(self):
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["Subject"] = "Notes"
+        msg.set_content("See the notes.\n")
+        msg.add_attachment("secret notes\n", filename="notes.txt")
+        msg.add_attachment("inline but named\n", filename="inline.txt", disposition="inline")
+        body, saved = self.render(msg)
+        self.assertIn("See the notes.", body)
+        self.assertNotIn("secret notes", body)
+        self.assertNotIn("inline but named", body)
+        self.assertEqual(saved[-2:], ["inline.txt", "notes.txt"])
+
+
 class PdfFileNameTest(unittest.TestCase):
     """The rendered PDF never overwrites or deletes a file the program did not create."""
 
