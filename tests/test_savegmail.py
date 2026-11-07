@@ -108,6 +108,10 @@ class TextHelpersTest(unittest.TestCase):
         self.assertEqual(savegmail.fit("abcdef", 4), "abc…")
         self.assertEqual(savegmail.fit("a\n  b", 3), "a b")
 
+    def test_fit_counts_wide_characters_as_two_cells(self):
+        for text in ["請求書のお知らせ 2026年11月分", "🎉 Black Friday -50% 🎉 sur tout", "🎉🎉 Promo"]:
+            self.assertEqual(savegmail.cell_len(savegmail.fit(text, 20)), 20, text)
+
     def test_sender_text_writes_no_terminal_sequence(self):
         """Subject, sender and --verbose lines never pass a sender's raw escape sequences to the terminal."""
         import io
