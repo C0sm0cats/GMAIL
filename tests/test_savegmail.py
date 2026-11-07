@@ -2187,8 +2187,8 @@ class UndoAfterDeleteTest(unittest.TestCase):
             action, ids = steps.pop(0)
             if action == "undo" and undo_label is None:
                 return ask(messages, load_more, state, notice, undo_label, *rest)
-            if action == "folder":  # ids: the folder typed after f
-                state["folder"] = ids
+            if action == "folder":  # ids: the folder typed after f; None: f then enter on the folder shown
+                state["folder"] = rest[4] if ids is None else ids
                 return action, []
             if ids is None:
                 return action, list(messages)
@@ -2311,6 +2311,27 @@ class UndoAfterDeleteTest(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(os.path.join(home, "Archive"))), ["B-att.bin", "B.pdf"])
         self.assertEqual(os.listdir(cwd), [])
         self.assertEqual(self.notices[2][0], " ✓ Download folder: ~/Archive")
+
+    def test_folder_next_to_home_is_shown_and_kept_as_is(self):
+        # HOME=.../home and a folder .../home-backup: not shown as ~-backup, and f then enter keeps it,
+        # instead of switching to a "~-backup" folder in the directory savegmail was started from.
+        import tempfile
+        from unittest import mock
+        root, cwd = tempfile.mkdtemp(), tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, root, True)
+        self.addCleanup(__import__("shutil").rmtree, cwd, True)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(cwd)
+        home, backup = os.path.join(root, "home"), os.path.join(root, "home-backup")
+        os.makedirs(home)
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            gmail, left, offered = self.run_session(
+                {"A": "inbox"}, [("folder", None), ("download", ["A"])], args=["--download-path", backup])
+            self.assertEqual(self.notices[1][0], " ✓ Download folder: " + backup)
+            self.assertEqual(sorted(os.listdir(backup)), ["A-att.bin", "A.pdf"])
+            self.assertEqual(os.listdir(cwd), [])
+            self.assertEqual(savegmail.home_relative(home), "~")
+            self.assertEqual(savegmail.home_relative(os.path.join(home, "GMail")), os.path.join("~", "GMail"))
 
     def test_partial_delete_keeps_the_deleted_emails_files(self):
         ids = [f"m{i}" for i in range(1500)]

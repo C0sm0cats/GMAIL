@@ -2339,6 +2339,17 @@ def failure_notice(messages, failed, limit=3):
     return lines
 
 
+def home_relative(path):
+    """path with the home folder written ~, only when path is the home folder or inside it."""
+    home = os.path.expanduser("~")
+    if path == home:
+        return "~"
+    prefix = os.path.join(home, "")
+    if home != "~" and path.startswith(prefix):
+        return os.path.join("~", path[len(prefix):])
+    return path
+
+
 def interactive_download_main():
     import argparse
 
@@ -2432,7 +2443,7 @@ def interactive_download_main():
         user_id = "me"
         save_dir = os.path.expanduser(args.download_path)
         os.makedirs(save_dir, exist_ok=True)
-        shown_dir = save_dir.replace(os.path.expanduser("~"), "~", 1)
+        shown_dir = home_relative(save_dir)
 
         try:
             account = service.users().getProfile(userId=user_id).execute().get("emailAddress", user_id)
@@ -2648,7 +2659,7 @@ def interactive_download_main():
                                ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
                 else:
                     save_dir = os.path.abspath(wanted)
-                    shown_dir = save_dir.replace(os.path.expanduser("~"), "~", 1)
+                    shown_dir = home_relative(save_dir)
                     banner = make_banner()
                     notice = [[("class:checked", " ✓ "), ("", "Download folder: "), ("class:dim", shown_dir)]]
                 console.clear()
