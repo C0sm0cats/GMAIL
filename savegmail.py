@@ -51,9 +51,24 @@ def debug(message):
 def warn(message):
     console.print(f"[yellow]![/] {escape(message)}")
 
+def new_email_page(browser):
+    """Open a page for content written by a sender: its scripts never run, and it never navigates away
+    (a meta refresh would otherwise replace the email with a page of the sender's choice, or an error page)."""
+    page = browser.new_page(java_script_enabled=False)
+
+    def handle(route):
+        request = route.request
+        if request.is_navigation_request() and request.frame == page.main_frame:
+            route.fulfill(status=204)  # 204 keeps the current document; abort() would show an error page
+        else:
+            route.continue_()
+
+    page.route("**/*", handle)
+    return page
+
 def measure_pdf_margins(browser, header_template, footer_template):
     """Measure isolated print templates at A4 width, including wrapped lines."""
-    measurement_page = browser.new_page()
+    measurement_page = new_email_page(browser)
     try:
         measurement_page.emulate_media(media="print")
         heights = []
@@ -487,20 +502,21 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     written.append(final_pdf_path)
 
     on_step("rendering PDF")
-    page = browser.new_page()
+    page = new_email_page(browser)
     try:
         page.set_content(html_content, timeout=120000, wait_until="networkidle")
         # Emails often defer images; force them in and wait for fonts/images before printing.
-        page.evaluate("""async () => {
+        page.evaluate("""() => {
             document.querySelectorAll('img[data-src]').forEach(img => {
                 if (!img.getAttribute('src')) img.src = img.dataset.src;
             });
             document.querySelectorAll('img[loading="lazy"]').forEach(img => img.loading = 'eager');
-            const pending = [...document.images].filter(img => !img.complete)
-                .map(img => new Promise(resolve => { img.onload = img.onerror = resolve; }));
-            const timeout = new Promise(resolve => setTimeout(resolve, 15000));
-            await Promise.race([Promise.all([document.fonts.ready, ...pending]), timeout]);
         }""")
+        # With scripts disabled, the page runs no timers or load listeners: poll from here instead.
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not page.evaluate(
+                "[...document.images].every(img => img.complete) && document.fonts.status === 'loaded'"):
+            page.wait_for_timeout(100)
         page.wait_for_timeout(300)
 
         header_template = """

@@ -661,6 +661,9 @@ class FakePdfPage:
         pass
 
     def evaluate(self, *args, **kwargs):
+        return True
+
+    def route(self, *args):
         pass
 
     def wait_for_timeout(self, *args):
@@ -682,6 +685,86 @@ class FakePdfBrowser:
 
     def new_page(self, **kwargs):
         return FakePdfPage(self.fail)
+
+
+class FakeRoute:
+    def __init__(self, request):
+        self.request = request
+        self.result = None
+
+    def fulfill(self, status):
+        self.result = ("fulfill", status)
+
+    def continue_(self):
+        self.result = ("continue",)
+
+
+class FakeNavRequest:
+    def __init__(self, navigation, frame):
+        self.navigation, self.frame = navigation, frame
+
+    def is_navigation_request(self):
+        return self.navigation
+
+
+class RecordingPage(FakePdfPage):
+    def __init__(self):
+        super().__init__(False)
+        self.main_frame = object()
+        self.routes = []
+
+    def route(self, pattern, handler):
+        self.routes.append(handler)
+
+    def emulate_media(self, **kwargs):
+        pass
+
+
+class RecordingBrowser:
+    def __init__(self):
+        self.pages = []
+
+    def new_page(self, **kwargs):
+        page = RecordingPage()
+        page.kwargs = kwargs
+        self.pages.append(page)
+        return page
+
+
+class SenderContentPageTest(unittest.TestCase):
+    """Email pages run no sender script and never navigate away from the email."""
+
+    def test_email_pages_disable_scripts_and_block_navigation(self):
+        import base64
+        import tempfile
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["Subject"] = "Hello <img src=x onerror=alert(1)>"
+        msg["From"] = "s@example.com"
+        msg.set_content("alt")
+        msg.add_alternative('<meta http-equiv="refresh" content="0;url=http://127.0.0.1:9/"><p>Body</p>'
+                            '<script>for(;;){}</script>', subtype="html")
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        browser = RecordingBrowser()
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(FakeRawService(raw), "me", "id1", save_dir, browser)
+        # The email page and the header/footer measurement page.
+        self.assertEqual(len(browser.pages), 2)
+        for page in browser.pages:
+            self.assertEqual(page.kwargs.get("java_script_enabled"), False)
+            self.assertEqual(len(page.routes), 1)
+            handler = page.routes[0]
+            outcomes = {}
+            for name, request in {
+                "main navigation": FakeNavRequest(True, page.main_frame),
+                "iframe navigation": FakeNavRequest(True, object()),
+                "image": FakeNavRequest(False, page.main_frame),
+            }.items():
+                route = FakeRoute(request)
+                handler(route)
+                outcomes[name] = route.result
+            self.assertEqual(outcomes, {"main navigation": ("fulfill", 204),
+                                        "iframe navigation": ("continue",), "image": ("continue",)})
 
 
 class PdfFileNameTest(unittest.TestCase):
