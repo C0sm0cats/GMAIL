@@ -3592,6 +3592,29 @@ class LabelKeyTargetsTest(unittest.TestCase):
         self.assertEqual(gmail.labels, {"m0": {"STARRED"}, "m1": {"UNREAD", "STARRED"}, "m2": {"UNREAD"}})
         self.assertEqual(self.notices[1][0], " ★ 1 email starred")
 
+    def bodies_on_mixed_then_uniform(self, action):
+        """action on m0 (read, starred) and m1 (unread): first a mixed selection, then the same two, now alike."""
+        bodies = []
+
+        class RecordingApi(LabelMailboxApi):
+            def batchModify(self, userId, body):
+                bodies.append((sorted(body["ids"]), sorted(body["addLabelIds"]), sorted(body["removeLabelIds"])))
+                return super().batchModify(userId, body)
+        gmail, left, offered = self.run_session({"m0": "inbox", "m1": "inbox", "m2": "inbox"},
+                                                [(action, ["m0", "m1"]), (action, ["m0", "m1"])],
+                                                api=RecordingApi(), gmail_class=LabelGmail)
+        return gmail, bodies
+
+    def test_unread_on_a_mixed_selection_marks_all_unread_then_all_read(self):
+        gmail, bodies = self.bodies_on_mixed_then_uniform("unread")
+        self.assertEqual(bodies, [(["m0", "m1"], ["UNREAD"], []), (["m0", "m1"], [], ["UNREAD"])])
+        self.assertEqual(gmail.labels, {"m0": {"STARRED"}, "m1": set(), "m2": {"UNREAD"}})
+
+    def test_star_on_a_mixed_selection_stars_all_then_unstars_all(self):
+        gmail, bodies = self.bodies_on_mixed_then_uniform("star")
+        self.assertEqual(bodies, [(["m0", "m1"], ["STARRED"], []), (["m0", "m1"], [], ["STARRED"])])
+        self.assertEqual(gmail.labels, {"m0": set(), "m1": {"UNREAD"}, "m2": {"UNREAD"}})
+
     def test_open_marks_only_the_opened_email_read(self):
         from unittest import mock
         with mock.patch.object(savegmail, "gmail_url", side_effect=lambda account, msg_id: msg_id) as url:
