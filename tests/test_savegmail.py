@@ -907,6 +907,36 @@ class InlineImageTest(unittest.TestCase):
         self.assertEqual(widths, [[["cid", 40], ["lazy", 40]]])
 
 
+class HugeHeaderTest(unittest.TestCase):
+    """Python parses headers in quadratic time and memory: a sender's huge header is cut before parsing."""
+
+    def test_encoded_word_headers_are_cut_before_parsing(self):
+        import base64
+        import tempfile
+        words = " ".join(["=?utf-8?q?ab?="] * 5000)  # 75 KB; a few hundred KB took several GB
+        raw = (f"Subject: {words}\r\nFrom: {words}\r\nMIME-Version: 1.0\r\n"
+               "Content-Type: text/html; charset=utf-8\r\n\r\n<p>Body</p>\r\n").encode()
+        headers = []
+
+        class HeaderRecordingPage(ContentRecordingPage):
+            def pdf(self, path, **kwargs):
+                headers.append(kwargs["header_template"])
+                super().pdf(path, **kwargs)
+
+        class HeaderRecordingBrowser(ContentRecordingBrowser):
+            def new_page(self, **kwargs):
+                page = HeaderRecordingPage()
+                self.pages.append(page)
+                return page
+
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(
+                FakeRawService(base64.urlsafe_b64encode(raw).decode()), "me", "id1", save_dir,
+                HeaderRecordingBrowser())
+        self.assertIn("ab" * 1000, headers[0])  # the start of the subject and sender is still shown
+        self.assertNotIn("ab" * 5000, headers[0])  # but not all 75 KB of them
+
+
 class PdfFileNameTest(unittest.TestCase):
     """The rendered PDF never overwrites or deletes a file the program did not create."""
 

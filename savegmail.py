@@ -51,6 +51,21 @@ def debug(message):
 def warn(message):
     console.print(f"[yellow]![/] {escape(message)}")
 
+# Python's header parser takes time and memory quadratic in a header's length: a sender's few hundred KB
+# of encoded-words in a subject, address or attachment name would take several GB. Longer headers are cut
+# before parsing; 32 KB is already far more than the PDF header can show.
+MAX_HEADER_CHARS = 32 * 1024
+
+
+class CappedHeaderPolicy(type(policy_default)):
+    def header_fetch_parse(self, name, value):
+        if isinstance(value, str):
+            value = value[:MAX_HEADER_CHARS]
+        return super().header_fetch_parse(name, value)
+
+
+capped_header_policy = CappedHeaderPolicy()
+
 # Inline images are served at these URLs, once each, instead of being pasted into the HTML as data: URLs:
 # an email referencing one image a thousand times would otherwise make a HTML a thousand times its size.
 INLINE_IMAGE_URL = "https://cid.savegmail.invalid/{}"
@@ -347,7 +362,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     message = service.users().messages().get(userId=user_id, id=msg_id, format='raw').execute()
     raw = message['raw']
     email_bytes = base64.urlsafe_b64decode(raw)
-    msg = BytesParser(policy=policy_default).parse(io.BytesIO(email_bytes))
+    msg = BytesParser(policy=capped_header_policy).parse(io.BytesIO(email_bytes))
 
     # Extract headers
     subject = msg['Subject'] or ""
