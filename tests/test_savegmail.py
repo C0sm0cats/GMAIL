@@ -436,6 +436,16 @@ class PickerTest(unittest.TestCase):
         self.assertEqual([message["id"] for message in messages], ["0", "1", "old"])
         self.assertEqual(ids, ["0"])
 
+    def test_load_more_keeps_the_cursor_on_its_email_when_sorted_by_size(self):
+        messages = make_messages(3)
+        for message, size in zip(messages, (10, 30, 20)):
+            message["size"] = size
+        # z puts "0" last with the cursor on it, k moves to "2"; the older email goes above "2".
+        older = [{**make_messages(1)[0], "id": "old", "internalDate": 1, "size": 25}]
+        action, ids = pick_later("zkm\r", messages, delay=0.2, load_more=lambda: (older, False))
+        self.assertEqual([message["id"] for message in messages], ["0", "1", "2", "old"])
+        self.assertEqual((action, ids), ("download", ["2"]))
+
     def test_star_and_open_keys(self):
         self.assertEqual(pick(" j *"), ("star", ["0", "2"]))
         self.assertEqual(pick(" o"), ("open", ["1"]))  # o: the email under the cursor

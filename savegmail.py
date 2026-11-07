@@ -1740,9 +1740,14 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                     state["sync_note"] = ("class:error", "m loading failed, m to try again", time.monotonic())
             else:
                 state["exhausted"] = not more
-                # Older emails go at the bottom, so the cursor stays where it is.
+                # Older emails go at the bottom by date, but not by size: keep the cursor on its email.
+                current = current_id()
                 messages.extend(older)
                 rows.extend(message_row(message) for message in older)
+                if current:
+                    state["cursor"] = next((position for position, index in enumerate(visible())
+                                            if messages[index]["id"] == current), state["cursor"])
+                    clamp()
                 for done in loaded:
                     done()
             finally:
