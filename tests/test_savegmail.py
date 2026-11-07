@@ -2896,6 +2896,19 @@ class UndoAfterDeleteTest(unittest.TestCase):
         authenticate.assert_not_called()
         self.assertIn("--headed needs a graphical display", stderr.getvalue())
 
+    def test_headed_reaches_chromium(self):
+        # --headed is the README's fallback for an email that renders badly: it must reach chromium.launch.
+        from unittest import mock
+        launch_browser = savegmail.launch_browser  # run_session replaces it by launch
+        for args, headless in [((), True), (("--headed",), False)]:
+            with self.subTest(args=args):
+                fake = mock.Mock()
+                with mock.patch.dict(os.environ, {"DISPLAY": ":0"}):
+                    self.run_session({"A": "inbox"}, [("save", ["A"])], args=args,
+                                     launch=lambda playwright, headed=False: launch_browser(fake, headed))
+                self.assertEqual([call.kwargs["headless"] for call in fake.chromium.launch.call_args_list],
+                                 [headless])
+
 
 class SaveMarksTest(unittest.TestCase):
     """s keeps the emails in Gmail, marked ✓ in every view and no longer selected; u takes back only its own ✓."""
