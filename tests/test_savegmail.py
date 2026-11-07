@@ -1596,12 +1596,13 @@ class GmailCallSizeTest(unittest.TestCase):
 class UndoAfterDeleteTest(unittest.TestCase):
     """Drives interactive_download_main with a fake Gmail and scripted keys, like s, D, u."""
 
-    def run_session(self, places, steps, failing_untrash=(), failing=(), api=None, down=None):
+    def run_session(self, places, steps, failing_untrash=(), failing=(), api=None, down=None, launch=None):
         """steps: (action, ids); an undo is only pressed when u is offered, as in the list.
 
         api: a fake Gmail API (FakeBatchApi) that the real modify_labels and delete_messages call.
         down: (n, exception): once n steps are done, every Gmail call raises it (session expired, offline);
         self.signed_out holds whether the list offered r to sign in again, before each step.
+        launch: replaces launch_browser (default: a new mock browser each time).
         Returns (fake Gmail, files left in the download folder, undo label offered before each step);
         self.notices holds the notice shown before each step, as plain text lines.
         """
@@ -1646,7 +1647,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
             savegmail, authenticate=lambda: object(), build=lambda *a, **k: api or FakeSessionService(),
             user_labels=lambda *a: {}, ask_user_to_select_messages=ask,
             refresh_messages=lambda *a, **k: ([], set()), refresh_labels=lambda *a: 0,
-            sync_playwright=lambda: FakePlaywright(), launch_browser=lambda *a, **k: mock.Mock(),
+            sync_playwright=lambda: FakePlaywright(), launch_browser=launch or (lambda *a, **k: mock.Mock()),
             open_quietly=lambda url: True, console=Console(file=io.StringIO()), **fakes,
         ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir]):
             savegmail.interactive_download_main()
@@ -1669,6 +1670,23 @@ class UndoAfterDeleteTest(unittest.TestCase):
         self.assertEqual(gmail.places["A"], "trash")
         self.assertEqual(left, ["A-att.bin", "A.pdf"])
         self.assertEqual(offered[-1], "save+trash (1)")
+
+    def test_crashed_chromium_is_started_again(self):
+        from unittest import mock
+        launched = []
+
+        def launch(*args, **kwargs):
+            browser = mock.Mock()
+            if not launched:
+                # Killed between two saves: is_connected() still says True until the next round trip.
+                browser.is_connected.return_value = True
+                browser.new_browser_cdp_session.side_effect = savegmail.PlaywrightError("Target closed")
+            launched.append(browser)
+            return browser
+
+        self.run_session({"A": "inbox", "B": "inbox", "C": "inbox"},
+                         [("save", ["A"]), ("save", ["B"]), ("save", ["C"])], launch=launch)
+        self.assertEqual(len(launched), 2)
 
     def test_undo_save_trash(self):
         gmail, left, offered = self.run_session({"A": "inbox"}, [("download", ["A"]), ("undo", [])])

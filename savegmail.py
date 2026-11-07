@@ -1,7 +1,7 @@
 import os
 import pathlib
 import base64
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 import asyncio
 from datetime import datetime, timezone
 from google.auth.exceptions import RefreshError, TransportError
@@ -2115,11 +2115,21 @@ def interactive_download_main():
     creds = authenticate()
     playwright = browser = preview_dir = None
 
+    def browser_alive():
+        """Whether the kept Chromium still answers; is_connected() alone lags behind a crash."""
+        if not browser.is_connected():
+            return False
+        try:
+            browser.new_browser_cdp_session().detach()
+            return True
+        except PlaywrightError:
+            return False
+
     def get_browser():
-        """Start Chromium on first use and keep it for the rest of the session."""
+        """Start Chromium on first use and keep it; start it again if it was closed or crashed."""
         nonlocal playwright, browser
-        if browser is None:
-            playwright = sync_playwright().start()
+        if browser is None or not browser_alive():
+            playwright = playwright or sync_playwright().start()
             with console.status("[dim]Preparing Chromium…[/]"):
                 browser = launch_browser(playwright, headed=args.headed)
         return browser
