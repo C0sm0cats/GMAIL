@@ -2359,7 +2359,7 @@ def interactive_download_main():
             trashed = [message for message in undo["trashed"] if message["id"] not in deleted]
             archived = [message for message in undo.get("archived", []) if message["id"] not in deleted]
             kept = {msg_id: files for msg_id, files in undo["files"].items() if msg_id not in deleted}
-            return ({"label": undo["label"], "trashed": trashed, "archived": archived, "files": kept}
+            return (dict(undo, trashed=trashed, archived=archived, files=kept)
                     if trashed or archived or kept else None)
 
         def sign_out_if_expired(*errors):
@@ -2436,8 +2436,9 @@ def interactive_download_main():
                     removed = [path for files in unsaved.values() for path in files]
                     remove_files(removed)
                     totals["saved"] -= len(unsaved)
+                    # Only the ✓ this s added: one from an earlier s stays, its files are still there.
                     for each in views:
-                        each["state"]["saved"] -= set(unsaved)
+                        each["state"]["saved"] -= set(unsaved) & undo.get("marked", set())
                     unarchived = []
                     if undo.get("archived"):
                         done, error = batch_outcome(lambda: modify_labels(
@@ -2617,9 +2618,12 @@ def interactive_download_main():
                         summary += " · moved to trash"
                     else:
                         state["selected"] -= saved_ids
-                        state["saved"] |= saved_ids
+                        marked = saved_ids - set().union(*(each["state"]["saved"] for each in views))
+                        # Every view shows the email ✓, like u takes it back from every view.
+                        for each in views:
+                            each["state"]["saved"] |= saved_ids
                         if saved:
-                            undo = {"label": "save+keep", "trashed": [], "files": files}
+                            undo = {"label": "save+keep", "trashed": [], "files": files, "marked": marked}
                         summary += " · kept in Gmail"
                     notice = [[("class:checked", " ✓ "), ("", summary), ("class:dim", f" → {shown_dir}"),
                                ("class:dim class:keyhint", " · u undo")]

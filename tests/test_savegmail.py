@@ -1835,8 +1835,12 @@ class UndoAfterDeleteTest(unittest.TestCase):
         down: (n, exception): once n steps are done, every Gmail call raises it (session expired, offline);
         self.signed_out holds whether the list offered r to sign in again, before each step.
         launch: replaces launch_browser (default: a new mock browser each time).
+        ids {"select": [...], "cursor": id}: space on those emails, then the key, which acts on the
+        selection, or on the email under the cursor when nothing is selected (like chosen() in the list).
         Returns (fake Gmail, files left in the download folder, undo label offered before each step);
-        self.notices holds the notice shown before each step, as plain text lines.
+        self.notices holds the notice shown before each step, as plain text lines; self.marked the ids
+        shown ✓, and self.selected those selected, before each step; self.saved the ids passed to each
+        save_messages call.
         """
         import io
         import tempfile
@@ -1848,6 +1852,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
         if api is not None:
             api.gmail = gmail
         steps, offered, self.notices, self.signed_out = list(steps), [], [], []
+        self.marked, self.selected, self.saved = [], [], []
         broken = []
 
         def ask(messages, load_more, state, notice, undo_label, *rest):
@@ -1856,6 +1861,8 @@ class UndoAfterDeleteTest(unittest.TestCase):
             offered.append(undo_label)
             self.signed_out.append(state["signed_out"])
             self.notices.append(["".join(text for _, text in line) for line in notice])
+            self.marked.append(sorted(state["saved"]))
+            self.selected.append(sorted(state["selected"]))
             if not steps:
                 return "quit", []
             action, ids = steps.pop(0)
@@ -1866,12 +1873,23 @@ class UndoAfterDeleteTest(unittest.TestCase):
                 return action, []
             if ids is None:
                 return action, list(messages)
+            if isinstance(ids, dict):
+                state["selected"] |= set(ids.get("select", ()))
+                ids = sorted(state["selected"]) or [ids["cursor"]]
             return action, [gmail.message(msg_id) for msg_id in ids]
 
         fakes = {name: getattr(gmail, name) for name in [
             "list_candidate_messages", "save_messages", "trash_messages", "untrash_messages",
             "modify_labels", "list_trash_ids", "delete_messages"]
             if api is None or name not in api.real_calls}
+
+        def recorded(call, calls, ids_of):
+            def wrapper(*args, **kwargs):
+                calls.append(ids_of(*args))
+                return call(*args, **kwargs)
+            return wrapper
+        fakes["save_messages"] = recorded(fakes["save_messages"], self.saved,
+                                          lambda service, user_id, messages, *rest: [m["id"] for m in messages])
 
         def failing_when_down(call):
             def wrapper(*args, **kwargs):
@@ -2056,6 +2074,39 @@ class UndoAfterDeleteTest(unittest.TestCase):
                         " ✗ Could not" if action in {"star", "unread", "archive"} else shown), self.notices[2])
                     self.assertEqual(self.signed_out[2], isinstance(error, RefreshError))
                     self.assertEqual(gmail.places, {"A": "trash", "B": "inbox"})
+
+
+class SaveMarksTest(unittest.TestCase):
+    """s keeps the emails in Gmail, marked ✓ in every view and no longer selected; u takes back only its own ✓."""
+
+    run_session = UndoAfterDeleteTest.run_session
+
+    def test_save_clears_the_selection_so_enter_acts_on_the_cursor(self):
+        gmail, left, offered = self.run_session(
+            {"A": "inbox", "B": "inbox", "X": "inbox"},
+            [("save", {"select": ["A", "B"], "cursor": "A"}), ("download", {"cursor": "X"})])
+        self.assertEqual(self.selected[1], [])
+        self.assertEqual(self.saved, [["A", "B"], ["X"]])
+        self.assertEqual(gmail.places, {"A": "inbox", "B": "inbox", "X": "trash"})
+
+    def test_save_marks_the_email_in_every_view(self):
+        self.run_session({"A": "inbox"}, [("save", ["A"]), ("next_view", []), ("next_view", [])])
+        # All mail, where s was pressed, then Inbox and Archived.
+        self.assertEqual(self.marked[1:], [["A"], ["A"], ["A"]])
+
+    def test_undo_of_save_removes_the_mark_in_every_view(self):
+        self.run_session({"A": "inbox"}, [("save", ["A"]), ("undo", []), ("next_view", [])])
+        self.assertEqual(self.marked[1:], [["A"], [], []])
+
+    def test_undo_keeps_the_mark_of_an_earlier_save(self):
+        cases = {"enter": ([("save", ["A"]), ("download", ["A"]), ("undo", [])], ["A"]),
+                 "s again": ([("save", ["A"]), ("save", ["A"]), ("undo", [])], ["A"]),
+                 "D on another email": ([("save", ["A"]), ("delete", ["B"]), ("undo", [])], [])}
+        for name, (steps, marked) in cases.items():
+            with self.subTest(name):
+                gmail, left, offered = self.run_session({"A": "inbox", "B": "inbox"}, steps)
+                self.assertEqual(offered[3], None)  # u was pressed
+                self.assertEqual(self.marked[3], marked)
 
 
 class EmptyTrashCommandTest(unittest.TestCase):
