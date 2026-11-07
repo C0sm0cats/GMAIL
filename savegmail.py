@@ -655,8 +655,14 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
 
     html_content = re.sub(r'src=["\']cid:([^"\']+)["\']', replace_cid, html_content)
 
-    # Handle external URLs (keep intact)
-    # The regex already skips them since it looks for cid:
+    # set_content leaves the page on about:blank, where a protocol-relative //host/x resolves to nothing:
+    # the image, style or link would silently be missing from the PDF. Give those URLs https.
+    html_content = re.sub(r'''(<[^>]*?\b(?:src|href|background|poster)\s*=\s*["']?\s*)//''', r'\1https://',
+                          html_content, flags=re.I)
+    html_content = re.sub(r'''(<[^>]*?\bsrcset\s*=\s*)(["'])(.*?)\2''',
+                          lambda m: m.group(1) + m.group(2) + re.sub(r'(^|,)(\s*)//', r'\1\2https://', m.group(3))
+                          + m.group(2), html_content, flags=re.I | re.S)
+    html_content = re.sub(r'''(\burl\(\s*["']?\s*|@import\s+["'])//''', r'\1https://', html_content, flags=re.I)
 
     # The attachment list is printed once, at the end of the email, in the 10px text of the header:
     # in the footer template, Chromium would repeat it on every page and take that room from the body.

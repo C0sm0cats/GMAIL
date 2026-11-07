@@ -1293,6 +1293,50 @@ class InlineImageTest(unittest.TestCase):
         self.assertTrue(held)  # Chromium did ask for the image
         self.assertLess(elapsed, 30)  # it used to wait for the 120 s set_content timeout, then fail
 
+    def test_protocol_relative_urls_are_loaded_and_linked(self):
+        import base64
+        import tempfile
+        from unittest import mock
+        from playwright.sync_api import sync_playwright
+        requested = []
+
+        class SpyBrowser:
+            """Real Chromium; notes every URL the email page asks for."""
+            def __init__(self, browser):
+                self.browser = browser
+
+            def new_page(self, **kwargs):
+                page = self.browser.new_page(**kwargs)
+                page.on("request", lambda request: requested.append(request.url))
+                return page
+
+        host = "127.0.0.1:9"  # nothing listens there: the request is enough
+        body = (f'<link rel="stylesheet" href="//{host}/s.css"><a href="//example.invalid/u">U</a>'
+                f'<img src=//{host}/i.png><img srcset="//{host}/a.png 1x, //{host}/b.png 2x">'
+                f'<div style="background-image:url(\'//{host}/bg.png\')">x</div>'
+                '<p>Plain //text stays</p>')
+        raw = ("Subject: Relative\r\nFrom: s@example.com\r\nMIME-Version: 1.0\r\n"
+               "Content-Type: text/html; charset=utf-8\r\n\r\n" + body + "\r\n").encode()
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(channel="chromium")
+            except Exception as error:  # no Playwright Chromium here; never install it from a test
+                self.skipTest(f"Chromium unavailable: {error}")
+            try:
+                with tempfile.TemporaryDirectory() as save_dir, \
+                        mock.patch.object(savegmail, "IMAGE_WAIT_SECONDS", 1):
+                    result = savegmail.save_email_and_attachments(
+                        FakeRawService(base64.urlsafe_b64encode(raw).decode()), "me", "id1", save_dir,
+                        SpyBrowser(browser))
+                    with open(os.path.join(save_dir, result["pdf"]), "rb") as pdf_file:
+                        pdf = pdf_file.read()
+            finally:
+                browser.close()
+        for name in ("s.css", "i.png", "bg.png"):
+            self.assertIn(f"https://{host}/{name}", requested)
+        self.assertTrue({f"https://{host}/a.png", f"https://{host}/b.png"} & set(requested))
+        self.assertIn(b"https://example.invalid/u", pdf)  # the link is kept, clickable
+
 
 class HugeHeaderTest(unittest.TestCase):
     """Python parses headers in quadratic time and memory: a sender's huge header is cut before parsing."""
