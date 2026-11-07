@@ -2093,8 +2093,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     @bindings.add("<any>", filter=filtering)
     def _(event):
-        if event.data.isprintable():
-            state["query"] += event.data
+        text = event.data.strip("\r\n")  # a paste often ends with a line break
+        if text.isprintable():
+            state["query"] += text
             state["cursor"] = 0
 
     @bindings.add("f", filter=browsing)
@@ -2119,8 +2120,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     @bindings.add("<any>", filter=editing_folder)
     def _(event):
-        if event.data.isprintable():
-            state["folder"] += event.data
+        text = event.data.strip("\r\n")  # a paste often ends with a line break
+        if text.isprintable():
+            state["folder"] += text
 
     # Grays are absolute, not ANSI bright black: some palettes (Solarized dark) make that the background.
     # The cursor row has an absolute background, so it sets its text color too, readable on light themes.

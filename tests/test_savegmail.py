@@ -788,6 +788,14 @@ class PickerTest(unittest.TestCase):
         pick("f\x15~/Archive\r", state=state, folder="~/GMail/")  # ctrl+u clears
         self.assertEqual(state["folder"], "~/Archive")
 
+    def test_paste_ending_with_a_line_break_is_kept(self):
+        # A terminal sends a paste between ESC[200~ and ESC[201~; `pwd | xclip` keeps its final \n.
+        for end in ("\n", "\r\n", "\r"):
+            state = savegmail.new_picker_state()
+            pick(f"f\x15\x1b[200~/tmp/Archive{end}\x1b[201~\r", state=state, folder="~/GMail/")
+            self.assertEqual(state["folder"], "/tmp/Archive", repr(end))
+            self.assertEqual(pick(f"/\x1b[200~Subject 2{end}\x1b[201~\r\r"), ("download", ["2"]), repr(end))
+
     def test_background_sync(self):
         # When the list shows, it syncs on its own: a new email appears, a deleted one goes,
         # labels change, counters fill in, and the cursor stays on the same email.
