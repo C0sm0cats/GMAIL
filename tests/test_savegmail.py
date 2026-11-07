@@ -1394,6 +1394,43 @@ class EscapedTextTest(unittest.TestCase):
         self.assertIn("Alice alice@example.com, Dev list dev@lists.example.org", header)
         self.assertIn("Q&amp;A&amp;para2.txt</a>", browser.pages[0].appended)
 
+    def test_plain_text_links_open_the_written_address(self):
+        import base64
+        import glob
+        import re
+        import tempfile
+        from email.message import EmailMessage
+        from playwright.sync_api import sync_playwright
+        msg = EmailMessage()
+        msg["Subject"] = "Links"
+        msg.set_content("Suivi : www.laposte.fr/outils/suivre-vos-envois?code=6A123\n"
+                        "Votre facture (https://client.example.com/factures/2024-001).\n"
+                        "Voir https://example.com/doc.\n"
+                        "Wiki: https://en.wikipedia.org/wiki/Mercury_(planet), then 'https://example.org/q?a=1&b=2'\n")
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(channel="chromium")
+            except Exception as error:  # no Playwright Chromium here; never install it from a test
+                self.skipTest(f"Chromium unavailable: {error}")
+            try:
+                with tempfile.TemporaryDirectory() as save_dir:
+                    savegmail.save_email_and_attachments(
+                        FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1",
+                        save_dir, browser)
+                    [pdf] = glob.glob(os.path.join(save_dir, "**", "*.pdf"), recursive=True)
+                    with open(pdf, "rb") as f:
+                        data = f.read()
+            finally:
+                browser.close()
+        uris = [re.sub(rb"\\(.)", rb"\1", uri).decode() for uri in re.findall(rb"/URI \(((?:\\.|[^\\)])*)\)", data)]
+        self.assertEqual(sorted(uri for uri in uris if "mail.google.com" not in uri), [
+            "http://www.laposte.fr/outils/suivre-vos-envois?code=6A123",
+            "https://client.example.com/factures/2024-001",
+            "https://en.wikipedia.org/wiki/Mercury_(planet)",
+            "https://example.com/doc",
+            "https://example.org/q?a=1&b=2",
+        ])
+
 
 class PdfHeaderTest(unittest.TestCase):
     """The PDF prints the subject, sender, date and attachments in its header and footer, with room for them."""

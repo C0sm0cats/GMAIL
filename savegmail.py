@@ -460,6 +460,16 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     cc = format_addresses(msg['Cc'])
     date = html.escape(get_real_date(msg['Date'] or 'No Date'))
 
+    def link_url(match):
+        # Punctuation that ends the sentence is not part of the URL; a `)` is, when it closes a `(`
+        # of the URL. A `www.` address has no scheme: alone, Chromium resolves it against about:blank.
+        url = html.unescape(match.group(1))
+        while url and (url[-1] in ".,;:!?]'\"" or (url[-1] == ")" and url.count(")") > url.count("("))):
+            url = url[:-1]
+        rest = html.unescape(match.group(1))[len(url):]
+        href = url if url.lower().startswith(("http://", "https://")) else "http://" + url
+        return f'<a href="{html.escape(href)}" target="_blank">{html.escape(url)}</a>{html.escape(rest)}'
+
     def plain_to_html(text):
         plain_text = html.escape(text)  # `<` and `&` are text, not HTML
         plain_text = re.sub(r'(>>?|>)', r'\1', plain_text)
@@ -468,7 +478,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         plain_text = re.sub(date_regex, r'\n\n\1', plain_text)
         # The text is escaped: an URL stops at an escaped `<`, `>` or `"`, as it did before escaping.
         url_regex = r'((?:https?://|www\.)(?:(?!&lt;|&gt;|&quot;)\S)+)'
-        plain_text = re.sub(url_regex, r'<a href="\1" target="_blank">\1</a>', plain_text)
+        plain_text = re.sub(url_regex, link_url, plain_text)
         # pre-wrap keeps line breaks and the spaces that align columns, and still wraps long lines;
         # a monospace font keeps those columns aligned, as mail clients show plain text. overflow-wrap
         # breaks a link or token wider than the page, which Chromium would shrink the page for, then cut.
