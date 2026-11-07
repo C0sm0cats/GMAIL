@@ -2427,6 +2427,21 @@ def positive_int(value):
     return number
 
 
+def glue_query_value(argv):
+    """Join `--query -term` into `--query=-term`: argparse would read a lone exclusion as an option."""
+    argv = list(argv)
+    position = 0
+    while position < len(argv) - 1:
+        value = argv[position]
+        if value == "--":
+            break
+        following = argv[position + 1]
+        if value == "--query" and following.startswith("-") and not following.startswith("--"):
+            argv[position:position + 2] = [f"--query={following}"]
+        position += 1
+    return argv
+
+
 def interactive_download_main():
     import argparse
 
@@ -2444,7 +2459,7 @@ def interactive_download_main():
     parser.add_argument(
         "--query",
         default="",
-        help="Gmail search query (default: all emails), e.g. 'newer_than:30d', 'from:foo', 'has:attachment'.",
+        help="Gmail search query (default: all emails), e.g. 'newer_than:30d', 'from:foo', 'has:attachment', '-in:inbox'.",
     )
     parser.add_argument(
         "--max",
@@ -2474,7 +2489,7 @@ def interactive_download_main():
         action="store_true",
         help="Show sign-in, token, Chromium, MIME and PDF rendering details.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(glue_query_value(sys.argv[1:]))
     global VERBOSE
     VERBOSE = args.verbose
 

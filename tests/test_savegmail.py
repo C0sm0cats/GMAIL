@@ -3241,6 +3241,37 @@ class MaxOptionTest(unittest.TestCase):
         self.assertEqual(savegmail.positive_int("50"), 50)
 
 
+class QueryExclusionTest(unittest.TestCase):
+    """--query accepts a lone exclusion term (-in:inbox) instead of stopping with "expected one argument"."""
+
+    def test_query_starting_with_a_dash_reaches_sign_in(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        class SignedIn(Exception):
+            pass
+
+        for value in ("-in:inbox", "-category:promotions"):
+            with self.subTest(value=value):
+                stderr = io.StringIO()
+                with mock.patch.object(savegmail, "authenticate", side_effect=SignedIn), \
+                        mock.patch.object(savegmail.console, "clear"), \
+                        mock.patch.object(sys, "argv", ["savegmail", "--query", value, "--max", "5"]), \
+                        contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SignedIn):
+                        savegmail.interactive_download_main()
+                self.assertEqual(stderr.getvalue(), "")
+
+    def test_glue_query_value_leaves_other_arguments_alone(self):
+        glue = savegmail.glue_query_value
+        self.assertEqual(glue(["--query", "-in:inbox", "--max", "5"]), ["--query=-in:inbox", "--max", "5"])
+        self.assertEqual(glue(["--query", "from:foo"]), ["--query", "from:foo"])
+        self.assertEqual(glue(["--query", "--max", "5"]), ["--query", "--max", "5"])
+        self.assertEqual(glue(["--max", "-1"]), ["--max", "-1"])
+        self.assertEqual(glue(["--query"]), ["--query"])
+
+
 class LabelGmail(FakeGmail):
     """FakeGmail whose emails also carry UNREAD / STARRED: m0 starred, m1 and m2 unread, all in the Inbox."""
 
