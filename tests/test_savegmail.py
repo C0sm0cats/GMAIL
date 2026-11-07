@@ -1062,6 +1062,36 @@ class PdfFileNameTest(unittest.TestCase):
                            for name in os.listdir(save_dir) if name.startswith("invoice")}
             self.assertEqual(attachments, {"invoice.pdf": b"march", "invoice(1).pdf": b"april"})
 
+    def test_attached_email_saved_as_eml(self):
+        import base64
+        import tempfile
+        from email import message_from_bytes, policy
+        from email.message import EmailMessage
+        from unittest import mock
+        inner = EmailMessage()
+        inner["Subject"] = "Original"
+        inner["From"] = "Bob <bob@example.com>"
+        inner.set_content("inner body")
+        inner.add_attachment(b"%PDF-INNER", maintype="application", subtype="pdf", filename="inner.pdf")
+        msg = EmailMessage()
+        msg["Subject"] = "Fwd"
+        msg["From"] = "Sender <s@example.com>"
+        msg.set_content("see attached")
+        msg.add_attachment(inner, filename="Original.eml")  # Gmail's "Forward as attachment"
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        with tempfile.TemporaryDirectory() as save_dir, \
+                mock.patch.object(savegmail, "measure_pdf_margins", return_value={}):
+            result = savegmail.save_email_and_attachments(
+                FakeRawService(raw), "me", "id1", save_dir, FakePdfBrowser())
+            # The attached email is one file; its own parts stay inside it.
+            self.assertEqual(result["attachments"], 1)
+            self.assertEqual(sorted(os.listdir(save_dir)), sorted([result["pdf"], "Original.eml"]))
+            saved = message_from_bytes(self.read(os.path.join(save_dir, "Original.eml")), policy=policy.default)
+            self.assertEqual(saved["Subject"], "Original")
+            self.assertEqual(saved.get_body(("plain",)).get_content().strip(), "inner body")
+            inner_pdf = next(part for part in saved.iter_attachments())
+            self.assertEqual(inner_pdf.get_content(), b"%PDF-INNER")
+
 
 class FakeSaveService(FakeService):
     """Serves one raw email and records the ids moved to the trash (when the batch runs)."""

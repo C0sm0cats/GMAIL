@@ -471,7 +471,20 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         used_filenames.add(candidate)
         return candidate
 
-    for part in msg.walk():
+    def walk(part):
+        # Like msg.walk(), but an attached email (message/rfc822 with a name) is one attachment: its own
+        # parts belong to it, not to this email.
+        yield part
+        if part.is_multipart() and not (part.get_content_maintype() == 'message' and part.get_filename()):
+            for sub in part.get_payload():
+                yield from walk(sub)
+
+    def attachment_bytes(part):
+        if part.is_multipart():  # message/rfc822 and other message/* types: get_payload(decode=True) is None
+            return b"".join(sub.as_bytes() for sub in part.get_payload())
+        return part.get_payload(decode=True)
+
+    for part in walk(msg):
         debug(f"Part: Content-Type={part.get_content_type()}, Content-ID={part.get('Content-ID')}, Filename={part.get_filename()}, Disposition={part.get_content_disposition()}")
         if part.get_content_maintype() == 'multipart':
             continue
@@ -485,7 +498,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         if filename and (content_disposition == 'attachment' or not content_id):
             attachments_files.append(filename)
             if save_attachments:
-                payload = part.get_payload(decode=True)
+                payload = attachment_bytes(part)
                 path = os.path.join(save_dir, filename)
                 written.append(path)
                 with open(path, 'wb') as f:
