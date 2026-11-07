@@ -571,6 +571,24 @@ class PickerTest(unittest.TestCase):
         for row in rows:
             self.assertLessEqual(sum(savegmail.cell_len(text) for _, text in row), 79, row)
 
+    def test_cli_help_keys_wrap_under_descriptions_at_80_columns(self):
+        # --help in an 80-column terminal: each key line fits, and a long description continues under
+        # the descriptions column rather than being folded by the terminal at column 0.
+        import contextlib
+        import io
+        from unittest import mock
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"COLUMNS": "80", "LINES": "24"}), \
+                mock.patch.object(sys, "argv", ["savegmail", "--help"]), contextlib.redirect_stdout(out), \
+                self.assertRaises(SystemExit):
+            savegmail.interactive_download_main()
+        keys = out.getvalue().split("keys (in the list):\n", 1)[1].split("\n")
+        for line in keys:
+            self.assertLessEqual(savegmail.cell_len(line), 79, line)
+        self.assertIn("  A       select / unselect all visible emails from the current email's sender", keys)
+        self.assertIn("          (recipient, for sent ones)", keys)
+        self.assertIn("  q esc   quit", keys)
+
     def test_narrow_footer_keeps_main_keys_and_typed_input(self):
         # 80×24 (the default terminal) and below: every footer line fits, the save, view, help and
         # quit keys keep their label, and what is typed (D, T, f, /) stays visible with its cursor.

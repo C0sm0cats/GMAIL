@@ -1381,16 +1381,34 @@ def footer_keys(name, keys, columns):
     return clip_line(parts, columns)
 
 
-def help_lines(columns):
-    """The ? help, wrapped to columns: one list of formatted fragments per screen row."""
+def help_note_lines(columns):
+    """KEY_HELP_NOTE wrapped to columns: one list of formatted fragments per screen row."""
     import textwrap
     width = max(20, columns - 1)
-    lines = [[("class:dim", "  " + text)] for paragraph in KEY_HELP_NOTE.split("\n")
-             for text in textwrap.wrap(paragraph.strip(), width - 2)] + [[]]
+    return [[("class:dim", "  " + text)] for paragraph in KEY_HELP_NOTE.split("\n")
+            for text in textwrap.wrap(paragraph.strip(), width - 2)]
+
+
+def help_key_lines(columns):
+    """KEY_HELP wrapped to columns, continuations under the descriptions: fragments per screen row."""
+    import textwrap
+    width = max(20, columns - 1)
+    lines = []
     for key, description in KEY_HELP:
         for position, text in enumerate(textwrap.wrap(description, max(10, width - 10))):
             lines.append([("class:key", f"  {key:<8}" if not position else " " * 10), ("", text)])
     return lines
+
+
+def help_lines(columns):
+    """The ? help, wrapped to columns: one list of formatted fragments per screen row."""
+    return help_note_lines(columns) + [[]] + help_key_lines(columns)
+
+
+def help_epilog(columns):
+    """The keys section of --help, as plain text wrapped to columns like the options above it."""
+    rows = help_key_lines(columns) + [[]] + help_note_lines(columns)
+    return "keys (in the list):\n" + "\n".join("".join(text for _, text in row) for row in rows)
 
 
 # Emoji sequences (variation selectors, ZWJ joins, skin tones, flags) have no agreed width: prompt_toolkit counts
@@ -2651,9 +2669,7 @@ def interactive_download_main():
             "Browse Gmail in the terminal: save emails as PDFs (with attachments), move them\n"
             "to the trash, or delete them permanently. The list comes back after each action."
         ),
-        epilog="keys (in the list):\n" + "\n".join(
-            [f"  {key:<8}{description}" for key, description in KEY_HELP] + ["", "  " + KEY_HELP_NOTE]
-        ),
+        epilog=help_epilog(shutil.get_terminal_size().columns),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
