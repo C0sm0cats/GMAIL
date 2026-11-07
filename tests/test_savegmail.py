@@ -2048,6 +2048,42 @@ class ActionTargetsTest(unittest.TestCase):
         self.assertIn("1 message(s) permanently deleted from trash.", output.getvalue())
 
 
+class SpamMailboxApi(FakeMailboxApi):
+    """FakeMailboxApi where an email only leaves the Spam when SPAM is removed, as in Gmail's Spam view."""
+
+    def batchModify(self, userId, body):
+        def place(msg_id):
+            if self.gmail.places[msg_id] == "spam" and "SPAM" not in body["removeLabelIds"]:
+                return "spam"
+            if "INBOX" in body["addLabelIds"]:
+                return "inbox"
+            return "archive" if "INBOX" in body["removeLabelIds"] else self.gmail.places[msg_id]
+        return self.request("batchModify", body["ids"], place)
+
+
+class RestoreKeyTest(unittest.TestCase):
+    """R in Spam, Archived and Trash puts the chosen email back in the Inbox, and only that one."""
+
+    run_session = UndoAfterDeleteTest.run_session
+
+    def test_not_spam_moves_the_email_out_of_spam_to_the_inbox(self):
+        gmail, left, offered = self.run_session({"s0": "spam", "s1": "spam"}, [("not_spam", ["s1"])],
+                                                api=SpamMailboxApi())
+        self.assertEqual(gmail.places, {"s0": "spam", "s1": "inbox"})
+        self.assertEqual(self.notices[1][0], " ✓ 1 email moved to the Inbox")
+
+    def test_unarchive_moves_the_email_to_the_inbox(self):
+        gmail, left, offered = self.run_session({"a0": "archive", "a1": "archive"}, [("unarchive", ["a1"])],
+                                                api=SpamMailboxApi())
+        self.assertEqual(gmail.places, {"a0": "archive", "a1": "inbox"})
+        self.assertEqual(self.notices[1][0], " ✓ 1 email moved to the Inbox")
+
+    def test_restore_takes_the_email_out_of_the_trash(self):
+        gmail, left, offered = self.run_session({"t0": "trash", "t1": "trash"}, [("restore", ["t1"])])
+        self.assertEqual(gmail.places, {"t0": "trash", "t1": "inbox"})
+        self.assertEqual(self.notices[1][0], " ↶ 1 email restored from trash")
+
+
 class TypedSelectionTest(unittest.TestCase):
     """ask_user_to_select_messages when stdin / stdout are not a terminal (pipe, CI)."""
 
