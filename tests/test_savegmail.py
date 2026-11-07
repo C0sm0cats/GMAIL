@@ -605,6 +605,25 @@ class PdfFileNameTest(unittest.TestCase):
             self.assertEqual(self.read(os.path.join(save_dir, "Report.pdf")), b"USER-REPORT")
             self.assertFalse([name for name in os.listdir(save_dir) if name.startswith(".")])
 
+    def test_slashes_in_names_stay_in_save_dir(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as outer:
+            save_dir = os.path.join(outer, "a", "b")
+            os.makedirs(save_dir)
+            absolute = os.path.join(outer, "absolute-escape.pdf")
+            results = [
+                self.save(save_dir, "Hello", attachment=("../../attach-escape.pdf", b"A")),
+                self.save(save_dir, "Hello", attachment=(absolute, b"B")),
+                self.save(save_dir, "../../subject-escape"),
+            ]
+            root = os.path.realpath(save_dir)
+            for result in results:
+                for path in result["files"]:
+                    self.assertEqual(os.path.dirname(os.path.realpath(path)), root, path)
+            found = [os.path.relpath(os.path.join(d, f), outer) for d, _, files in os.walk(outer) for f in files]
+            self.assertTrue(all(path.startswith(os.path.join("a", "b") + os.sep) for path in found), found)
+            self.assertEqual(len(found), 5)  # 3 PDFs + 2 attachments
+
 
 class FakeGmail:
     """Where each email is in a fake Gmail: inbox, archive, trash or gone (permanently deleted)."""
