@@ -729,7 +729,7 @@ VIEWS = [("All mail", ""), ("Inbox", "in:inbox"), ("Archived", "-in:inbox -in:se
 # Each view's color, for its tab and the header info, so you see at a glance where you are.
 # Sent and Drafts match their sender colors in the list.
 VIEW_COLORS = {"All mail": "ansicyan", "Inbox": "ansiblue", "Archived": "ansigreen", "Starred": "ansiyellow",
-               "Sent": "ansimagenta", "Drafts": "ansired", "Spam": "#ff8700", "Trash": "ansibrightblack"}
+               "Sent": "ansimagenta", "Drafts": "ansired", "Spam": "#ff8700", "Trash": "#8a8a8a"}
 # Gmail category labels, shown as a short tag (Primary has no tag, like in Gmail).
 CATEGORIES = {"CATEGORY_PROMOTIONS": "Promotions", "CATEGORY_SOCIAL": "Social",
               "CATEGORY_UPDATES": "Updates", "CATEGORY_FORUMS": "Forums"}
@@ -1649,15 +1649,17 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         if event.data.isprintable():
             state["folder"] += event.data
 
+    # Grays are absolute, not ANSI bright black: some palettes (Solarized dark) make that the background.
+    # The cursor row has an absolute background, so it sets its text color too, readable on light themes.
     style = Style.from_dict({
         "title": "bold",
-        "columns": "fg:ansibrightblack underline",
-        "tab": "fg:ansibrightblack",
+        "columns": "fg:#8a8a8a underline",
+        "tab": "fg:#8a8a8a",
         # Current view: its tab filled with the view color, the header info written in it.
         "tab.current": f"reverse bold fg:{VIEW_COLORS.get(views[view], 'ansicyan')}",
         "view": f"fg:{VIEW_COLORS.get(views[view], 'ansicyan')}",
         "tab.badge": "fg:default bold",
-        "dim": "fg:ansibrightblack",
+        "dim": "fg:#8a8a8a",
         "accent": "fg:ansicyan bold",
         "cursor": "fg:ansicyan bold",
         "checked": "fg:ansigreen bold",
@@ -1671,7 +1673,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         "tag.size": "fg:ansiyellow",
         "tag.category": "fg:ansiblue",
         "tag.label": "fg:ansigreen",
-        "row.current": "bg:#303030",
+        "row.current": "fg:#e4e4e4 bg:#303030",
         "unread.dot": "fg:ansiblue bold",
         "key": "bold",
         "group.browse": "fg:ansicyan bold",

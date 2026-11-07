@@ -468,6 +468,31 @@ class PickerTest(unittest.TestCase):
         self.assertIn(" Inbox (1,000+) ", line)
         self.assertIn("newest first", line)
 
+    def test_colors_readable_on_any_terminal_theme(self):
+        # Rendered in the Trash view: no text in ANSI bright black (the background of Solarized dark),
+        # and the cursor row, whose background is fixed, also fixes its text color (light themes).
+        import io
+        import re
+        from prompt_toolkit.data_structures import Size
+        from prompt_toolkit.output.color_depth import ColorDepth
+        from prompt_toolkit.output.vt100 import Vt100_Output
+        buffer = io.StringIO()
+        output = Vt100_Output(buffer, lambda: Size(24, 120), term="xterm-256color",
+                              default_color_depth=ColorDepth.DEPTH_8_BIT)
+        with create_pipe_input() as pipe:
+            pipe.send_text("q")
+            with create_app_session(input=pipe, output=output):
+                savegmail.pick_messages(make_messages(3), views=[name for name, _ in savegmail.VIEWS], view=7)
+        codes = re.findall(r"\x1b\[([0-9;]*)m", buffer.getvalue())
+        self.assertTrue(codes)
+        # 90 is bright black text, once 256-color parameters (38;5;N, 48;5;N) are set aside.
+        plain = [re.sub(r"[34]8;5;\d+", "", sgr).split(";") for sgr in codes]
+        self.assertFalse([sgr for sgr, rest in zip(codes, plain) if "90" in rest], "text in ANSI bright black")
+        cursor_row = [sgr for sgr in codes if re.search(r"(^|;)48;5;236(;|$)", sgr)]
+        self.assertTrue(cursor_row)
+        for sgr in cursor_row:
+            self.assertRegex(sgr, r"(^|;)38;5;\d+;48;5;236(;|$)", "cursor row without a text color")
+
     def test_sort_by_size(self):
         messages = make_messages(3)
         for message, size in zip(messages, (10, 30, 20)):
