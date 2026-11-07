@@ -415,6 +415,16 @@ class PickerTest(unittest.TestCase):
         # Selected emails hidden by a filter stay selected (the footer and confirmations say so).
         self.assertEqual(pick("a/Subject 1\rdy"), ("trash", ["0", "1", "2"]))
 
+    def test_select_all_only_visible(self):
+        # Under a filter, a and A only take the emails shown, not the hidden ones.
+        messages = make_messages(4)
+        messages[3]["from"], messages[3]["subject"] = messages[1]["from"], "Other"
+        self.assertEqual(pick("/Subject 1\ra\r", messages), ("download", ["1"]))
+        self.assertEqual(pick("/Subject 1\rA\r", messages), ("download", ["1"]))
+        self.assertEqual(pick("/Subject 1\raDdelete\r", messages), ("delete", ["1"]))
+        # Without the filter, A takes both emails of the sender.
+        self.assertEqual(pick("jA\r", messages), ("download", ["1", "3"]))
+
     def test_undo_only_when_available(self):
         self.assertEqual(pick("uq"), ("quit", []))
         self.assertEqual(pick("u", undo_label="trash (1)"), ("undo", []))
