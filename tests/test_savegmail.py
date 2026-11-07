@@ -1509,5 +1509,72 @@ class TypedSelectionTest(unittest.TestCase):
         self.assertIn(subject, shown["2"])
 
 
+FAKE_PYTHON = """#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_LOG"
+if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then
+    exit "${FAKE_PIP_RC:-0}"
+fi
+exit 0
+"""
+
+
+class LauncherUpgradeTest(unittest.TestCase):
+    """run-savegmail.sh upgrades an existing .venv weekly, including indirect deps."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        if shutil.which("sh") is None or shutil.which("find") is None:
+            self.skipTest("sh and find are required")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = self.tmp.name
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        shutil.copy(os.path.join(repo, "run-savegmail.sh"), root)
+        os.makedirs(os.path.join(root, ".venv", "bin"))
+        python = os.path.join(root, ".venv", "bin", "python")
+        with open(python, "w") as handle:
+            handle.write(FAKE_PYTHON)
+        os.chmod(python, 0o755)
+        self.root = root
+        self.log = os.path.join(root, "calls.log")
+        self.stamp = os.path.join(root, ".venv", ".savegmail-upgraded")
+
+    def launch(self, pip_rc=0):
+        import subprocess
+        env = dict(os.environ, FAKE_LOG=self.log, FAKE_PIP_RC=str(pip_rc))
+        result = subprocess.run(["sh", os.path.join(self.root, "run-savegmail.sh"), "--help"],
+                                env=env, capture_output=True, text=True, timeout=30)
+        calls = []
+        if os.path.exists(self.log):
+            with open(self.log) as handle:
+                calls = handle.read().splitlines()
+            os.remove(self.log)
+        return result.returncode, [call for call in calls if call.startswith("-m pip")], calls
+
+    def test_existing_venv_upgrades_dependencies_eagerly(self):
+        rc, pip_calls, _ = self.launch()
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(pip_calls), 1)
+        args = pip_calls[0].split()
+        self.assertIn("--upgrade", args)
+        self.assertIn("eager", args)
+        self.assertIn("certifi", args)
+        self.assertTrue(os.path.exists(self.stamp))
+        rc, pip_calls, _ = self.launch()
+        self.assertEqual((rc, pip_calls), (0, []))
+
+    def test_stale_stamp_offline_keeps_launching(self):
+        open(self.stamp, "w").close()
+        old = 8 * 24 * 3600
+        os.utime(self.stamp, (os.path.getmtime(self.stamp) - old,) * 2)
+        rc, pip_calls, calls = self.launch(pip_rc=1)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(pip_calls), 1)
+        self.assertTrue(calls[-1].endswith("savegmail.py --help"))
+        rc, pip_calls, _ = self.launch(pip_rc=0)
+        self.assertEqual(len(pip_calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

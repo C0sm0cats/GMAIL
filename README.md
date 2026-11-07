@@ -49,7 +49,7 @@ SaveGmail is a Python script for archiving Gmail messages as PDFs and saving the
    ./run-savegmail.sh --help
    ```
 
-   The launcher creates a local `.venv` when it is missing, installs the Python dependencies, and installs the Playwright Chromium browser binaries inside that virtual environment.
+   The launcher creates a local `.venv` when it is missing, installs the Python dependencies, and installs the Playwright Chromium browser binaries inside that virtual environment. After that, it upgrades the Python dependencies at most once a week; a launch without network access keeps the installed versions.
 
 ## Configuration
 
