@@ -1538,6 +1538,11 @@ def new_picker_state():
 SYNC_INTERVAL = 60  # seconds between automatic syncs while the list is shown
 
 
+def drop_last_word(text):
+    """Alt+backspace: remove the last word, and the spaces or / after it."""
+    return re.sub(r"[^\s/]*[\s/]*$", "", text, count=1)
+
+
 def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
                   views=("All mail",), view=0, badges=None, folder="", sync=None, sign_in=None):
     """Interactive multi-select list over messages (extended in place when older emails load).
@@ -2118,6 +2123,11 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
         event.app.create_background_task(load())
 
+    # Alt+arrow, Alt+letter and Alt+backspace arrive as escape then the key: they must not count as esc.
+    bindings.add("escape", "<any>", filter=browsing)(lambda event: None)
+    for key in ("up", "down", "left", "right"):
+        bindings.add("escape", key, filter=filtering | editing_folder)(lambda event: None)
+
     @bindings.add("q", filter=browsing)
     @bindings.add("escape", filter=browsing)
     @bindings.add("c-c")
@@ -2136,6 +2146,11 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     @bindings.add("backspace", filter=filtering)
     def _(event):
         state["query"] = state["query"][:-1]
+        state["cursor"] = 0
+
+    @bindings.add("escape", "backspace", filter=filtering)
+    def _(event):
+        state["query"] = drop_last_word(state["query"])
         state["cursor"] = 0
 
     @bindings.add("<any>", filter=filtering)
@@ -2160,6 +2175,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     @bindings.add("backspace", filter=editing_folder)
     def _(event):
         state["folder"] = state["folder"][:-1]
+
+    @bindings.add("escape", "backspace", filter=editing_folder)
+    def _(event):
+        state["folder"] = drop_last_word(state["folder"])
 
     @bindings.add("c-u", filter=editing_folder)
     def _(event):
@@ -2216,6 +2235,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     ]
     app = Application(layout=Layout(HSplit(windows)), key_bindings=bindings, style=style, erase_when_done=True)
     app.ttimeoutlen = 0.05
+    app.timeoutlen = 0.05  # esc is also the start of Alt+key: wait for a second key this long only
     # Emails may be added above the cursor between runs (refresh): put it back on the same email.
     positions = [position for position, index in enumerate(visible()) if messages[index]["id"] == state["cursor_id"]]
     if positions:

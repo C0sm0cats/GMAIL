@@ -792,6 +792,18 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick("A\r", messages), ("download", ["0", "2"]))
         self.assertEqual(pick("jA\r", messages), ("download", ["1"]))
 
+    def test_alt_keys_are_not_esc(self):
+        # Terminals send Alt+arrow, Alt+letter and Alt+backspace as escape then the key.
+        for alt in ("\x1b[1;3B", "\x1b[1;3D", "\x1bj", "\x1bd"):
+            self.assertEqual(pick(f"  {alt}\r"), ("download", ["0", "1"]), repr(alt))  # the list stays open
+        self.assertEqual(pick("\x1b"), ("quit", []))  # esc alone still quits
+        state = savegmail.new_picker_state()
+        self.assertEqual(pick("/Subject 3\x1b\x7f\r\r", state=state), ("download", ["0"]))
+        self.assertEqual(state["query"], "Subject ")  # Alt+backspace drops a word, the filter stays
+        state = savegmail.new_picker_state()
+        self.assertEqual(pick("f\x1b\x7f\r", state=state, folder="~/GMail/2026"), ("folder", []))
+        self.assertEqual(state["folder"], "~/GMail/")
+
     def test_folder_key(self):
         state = savegmail.new_picker_state()
         # f starts from the current folder; backspace / typing edit it; enter applies.
