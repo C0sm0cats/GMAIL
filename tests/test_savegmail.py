@@ -1618,6 +1618,21 @@ class PdfFileNameTest(unittest.TestCase):
             self.assertEqual(self.read(os.path.join(save_dir, "Report.pdf")), b"USER-REPORT")
             self.assertFalse([name for name in os.listdir(save_dir) if name.startswith(".")])
 
+    def test_pdf_name_pads_milliseconds(self):
+        import tempfile
+        from datetime import datetime
+        from unittest import mock
+
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 6, 16, 51, 6, 98000, tzinfo=tz)
+
+        with tempfile.TemporaryDirectory() as save_dir, \
+                mock.patch.object(savegmail, "datetime", FixedDatetime):
+            result = self.save(save_dir, "Ms")
+        self.assertEqual(result["pdf"], "261106_165106098_Ms.pdf")
+
     def test_slashes_in_names_stay_in_save_dir(self):
         import tempfile
         with tempfile.TemporaryDirectory() as outer:

@@ -715,7 +715,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     now = datetime.now()
     timestamp = now.strftime("%y%m%d_%H%M%S")
     milliseconds = now.microsecond // 1000
-    base = f"{timestamp}{milliseconds}_{file_safe_subject}"
+    base = f"{timestamp}{milliseconds:03d}_{file_safe_subject}"
     new_pdf_name, counter = f"{base}.pdf", 1
     while os.path.exists(os.path.join(save_dir, new_pdf_name)) or new_pdf_name in used_filenames:
         new_pdf_name = f"{base}({counter}).pdf"
