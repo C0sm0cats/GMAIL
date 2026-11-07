@@ -2136,6 +2136,37 @@ class SaveMarksTest(unittest.TestCase):
                 self.assertEqual(self.marked[3], marked)
 
 
+class SelectionAfterActionTest(unittest.TestCase):
+    """d, D, enter and e take the emails they handled out of the selection: the next key acts on the cursor."""
+
+    run_session = UndoAfterDeleteTest.run_session
+    places = {"A": "inbox", "B": "inbox", "X": "inbox"}
+    batch = {"select": ["A", "B"], "cursor": "A"}
+
+    def test_trash_then_undo_then_delete_deletes_only_the_cursor_email(self):
+        gmail, left, offered = self.run_session(
+            self.places, [("trash", self.batch), ("undo", []), ("delete", {"cursor": "X"})])
+        self.assertEqual(self.selected[1:], [[], [], []])
+        self.assertEqual(gmail.places, {"A": "inbox", "B": "inbox", "X": "gone"})
+
+    def test_archive_then_undo_then_trash_trashes_only_the_cursor_email(self):
+        gmail, left, offered = self.run_session(
+            self.places, [("next_view", []), ("archive", self.batch), ("undo", []), ("trash", {"cursor": "X"})])
+        self.assertEqual(self.selected[2:], [[], [], []])
+        self.assertEqual(gmail.places, {"A": "inbox", "B": "inbox", "X": "trash"})
+
+    def test_delete_then_trash_trashes_the_cursor_email(self):
+        gmail, left, offered = self.run_session(self.places, [("delete", self.batch), ("trash", {"cursor": "X"})])
+        self.assertEqual(self.selected[1], [])
+        self.assertEqual(gmail.places, {"A": "gone", "B": "gone", "X": "trash"})
+
+    def test_save_and_trash_then_archive_archives_the_cursor_email(self):
+        gmail, left, offered = self.run_session(self.places, [("download", self.batch), ("archive", {"cursor": "X"})])
+        self.assertEqual(self.selected[1], [])
+        self.assertEqual(self.saved, [["A", "B"]])
+        self.assertEqual(gmail.places, {"A": "trash", "B": "trash", "X": "archive"})
+
+
 class EmptyTrashCommandTest(unittest.TestCase):
     def test_partial_failure_reports_deleted_emails(self):
         import io
