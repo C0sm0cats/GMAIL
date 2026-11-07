@@ -430,6 +430,15 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir, browser, on_s
         raise
 
 
+def header_text(msg, name):
+    """A header's value as text, or its raw value: Python's address parser raises on some malformed
+    addresses (`x@`, an unclosed `[`, `(c):`), which would make the email impossible to save."""
+    try:
+        return str(msg[name] or "")
+    except (IndexError, AttributeError, TypeError, ValueError):
+        return next((str(value)[:MAX_HEADER_CHARS] for key, value in msg.raw_items() if key.lower() == name.lower()), "")
+
+
 def format_addresses(value):
     """An address header as escaped HTML text: every `Name address`, or the raw value if it does not parse."""
     value = str(value or "")
@@ -461,13 +470,13 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     msg = BytesParser(policy=capped_header_policy).parse(io.BytesIO(email_bytes))
 
     # Extract headers
-    subject = msg['Subject'] or ""
+    subject = header_text(msg, 'Subject')
     file_safe_subject = sanitize_subject_for_filename(subject)
     # Every header value is the sender's text: escape it, or a `<` in it is read as HTML by Chromium.
-    fro = format_addresses(msg['From'])
-    reply = format_addresses(msg['Reply-To'])
-    to = format_addresses(msg['To'])
-    cc = format_addresses(msg['Cc'])
+    fro = format_addresses(header_text(msg, 'From'))
+    reply = format_addresses(header_text(msg, 'Reply-To'))
+    to = format_addresses(header_text(msg, 'To'))
+    cc = format_addresses(header_text(msg, 'Cc'))
     date = html.escape(get_real_date(msg['Date'] or 'No Date'))
 
     def link_url(match):

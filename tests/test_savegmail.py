@@ -1475,6 +1475,39 @@ class LongLineTest(unittest.TestCase):
         self.assertLessEqual(widths["html"], 794)
 
 
+class MalformedAddressTest(unittest.TestCase):
+    """Python's address parser raises on some malformed addresses: the email is still saved, with the raw value."""
+
+    def test_email_with_malformed_recipients_is_saved(self):
+        import base64
+        import tempfile
+        # Each one raised in the parser: "(c):" on 3.11 to 3.15, the others on 3.11 or 3.12.
+        for value in ("me@example.com, undisclosed@", "Ops <ops@[10.0.0.1>", "(c):", "(c).<"):
+            for name in ("From", "Reply-To", "To", "Cc"):
+                with self.subTest(header=name, value=value):
+                    raw = (f"Subject: Invoice\r\n{name}: {value}\r\nMIME-Version: 1.0\r\n"
+                           "Content-Type: text/html; charset=utf-8\r\n\r\n<p>Body</p>\r\n").encode()
+                    headers = []
+
+                    class HeaderRecordingPage(ContentRecordingPage):
+                        def pdf(self, path, **kwargs):
+                            headers.append(kwargs["header_template"])
+                            super().pdf(path, **kwargs)
+
+                    class HeaderRecordingBrowser(ContentRecordingBrowser):
+                        def new_page(self, **kwargs):
+                            page = HeaderRecordingPage()
+                            self.pages.append(page)
+                            return page
+
+                    with tempfile.TemporaryDirectory() as save_dir:
+                        savegmail.save_email_and_attachments(
+                            FakeRawService(base64.urlsafe_b64encode(raw).decode()), "me", "id1", save_dir,
+                            HeaderRecordingBrowser())
+                        self.assertTrue(any(f.endswith(".pdf") for f in os.listdir(save_dir)))
+                    self.assertIn("Invoice", headers[0])
+
+
 class EscapedTextTest(unittest.TestCase):
     """Plain text and header values are text: a `<` or `&` in them is shown, never read as HTML."""
 
