@@ -345,7 +345,7 @@ def save_email_and_attachments(service, user_id, msg_id, save_dir, browser, on_s
     written = []
     try:
         return write_email_files(service, user_id, msg_id, save_dir, browser, on_step, written, save_attachments)
-    except Exception:
+    except BaseException:  # Ctrl+C too: no partial file of this email is left behind
         remove_files(written)
         raise
 
@@ -1982,9 +1982,10 @@ def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(),
 def preview_messages(service, user_id, messages, browser, preview_dir):
     """Render emails exactly as a download would (attachments not written) and open each in the PDF viewer.
 
-    Returns {id: error text} for the ones that failed.
+    Returns (ids opened, {id: error text} for the ones that failed). Ctrl+C stops after the current one:
+    the emails not rendered are in neither.
     """
-    failed = {}
+    opened, failed = [], {}
     with console.status("[dim]Rendering preview…[/]") as status:
         for number, message in enumerate(messages, start=1):
             counter = f" {number}/{len(messages)}" if len(messages) > 1 else ""
@@ -1996,18 +1997,23 @@ def preview_messages(service, user_id, messages, browser, preview_dir):
                 result = save_email_and_attachments(
                     service, user_id, message["id"], preview_dir, browser, on_step, save_attachments=False
                 )
+            except KeyboardInterrupt:
+                break
             except Exception as exc:
                 failed[message["id"]] = str(exc)
             else:
                 # Open each one as soon as it is ready instead of waiting for the whole selection.
                 open_quietly(os.path.join(preview_dir, result["pdf"]))
-    return failed
+                opened.append(message["id"])
+    return opened, failed
 
 
 def save_messages(service, user_id, messages, save_dir, browser, trash_after):
     """Save emails as PDFs + attachments, then (optionally) trash the saved ones in one batch.
 
     Returns (saved messages, attachment count, {id: error text}, {id: written file paths}).
+    Ctrl+C stops after the emails already saved (still trashed if asked): the email being saved and the
+    ones after it are in neither saved nor failed, and stay in Gmail.
     """
     sender_w = min(max(cell_len(message_row(m)["sender"]) for m in messages), 22)
     results, failed = {}, {}
@@ -2029,6 +2035,8 @@ def save_messages(service, user_id, messages, save_dir, browser, trash_after):
 
             try:
                 result = save_email_and_attachments(service, user_id, message["id"], save_dir, browser, on_step)
+            except KeyboardInterrupt:
+                break
             except Exception as exc:
                 failed[message["id"]] = str(exc)
                 print_message_line("[red]✗[/]", message, "failed", sender_w)
@@ -2054,6 +2062,11 @@ def save_messages(service, user_id, messages, save_dir, browser, trash_after):
 
 def plural(count, word):
     return f"{count} {word}{'s' * (count != 1)}"
+
+
+def stopped_notice(done, total):
+    """Notice line after Ctrl+C stopped a save or preview: the emails not done stay in Gmail and selected."""
+    return [("class:error", " ✗ "), ("", f"Stopped after {done} of {total}"), ("class:dim", " · Ctrl+C")]
 
 
 def failure_notice(messages, failed, limit=3):
@@ -2383,11 +2396,16 @@ def interactive_download_main():
                 elif action == "preview":
                     # Previews live in a session temp dir (never in the download folder), removed on quit.
                     preview_dir = preview_dir or tempfile.mkdtemp(prefix="savegmail-preview-")
-                    failed = preview_messages(service, user_id, chosen, get_browser(), preview_dir)
-                    mark_read(service, user_id, [message for message in chosen if message["id"] not in failed])
+                    opened, failed = preview_messages(service, user_id, chosen, get_browser(), preview_dir)
+                    mark_read(service, user_id, [message for message in chosen if message["id"] in opened])
+                    lines = []
+                    if len(opened) + len(failed) < len(chosen):
+                        lines.append(stopped_notice(len(opened) + len(failed), len(chosen)))
                     if failed:
-                        notice = [[("class:error", " ✗ "), ("", f"Preview failed for {plural(len(failed), 'email')}")]]
-                        notice += failure_notice(chosen, failed)
+                        lines.append([("class:error", " ✗ "), ("", f"Preview failed for {plural(len(failed), 'email')}")])
+                        lines += failure_notice(chosen, failed)
+                    if lines:
+                        notice = lines
 
                 elif action == "undo":
                     errors = {}
@@ -2589,6 +2607,8 @@ def interactive_download_main():
                     notice = [[("class:checked", " ✓ "), ("", summary), ("class:dim", f" → {shown_dir}"),
                                ("class:dim class:keyhint", " · u undo")]
                               if saved else [("class:error", " ✗ "), ("", "Nothing saved")]]
+                    if len(saved) + len(failed) < len(chosen):
+                        notice.append(stopped_notice(len(saved) + len(failed), len(chosen)))
                     notice += failure_notice(chosen, failed)
             except GMAIL_ERRORS as exc:
                 # Session expired or Gmail unreachable midway: back to the list, the undo kept as it was.

@@ -1503,6 +1503,105 @@ class BatchCallFailureTest(unittest.TestCase):
         self.assertEqual(service.trashed, ["tried x"])
 
 
+class SaveCleanupTest(unittest.TestCase):
+    """A failed or interrupted save leaves no file of that email, and only saved emails go to the trash."""
+
+    messages = [{"id": msg_id, "from": "S <s@example.com>", "subject": msg_id, "snippet": "",
+                 "internalDate": 1_700_000_000_000} for msg_id in ("a", "b", "c", "d")]
+
+    @staticmethod
+    def fake_save(error_for):
+        def save(service, user_id, msg_id, save_dir, browser, on_step, **kwargs):
+            if msg_id in error_for:
+                raise error_for[msg_id]
+            path = os.path.join(save_dir, f"{msg_id}.pdf")
+            open(path, "w").close()
+            return {"pdf": f"{msg_id}.pdf", "files": [path], "attachments": 0}
+        return save
+
+    def save_messages(self, error_for, save_dir):
+        import io
+        from unittest import mock
+        service = FakeSaveService(raw="")
+        with mock.patch.object(savegmail, "save_email_and_attachments", self.fake_save(error_for)), \
+                mock.patch.object(savegmail, "console", savegmail.Console(file=io.StringIO())):
+            try:
+                return service, savegmail.save_messages(service, "me", self.messages, save_dir, None, True)
+            except KeyboardInterrupt:  # escaping, it would stop the whole test run
+                self.fail("Ctrl+C escaped save_messages")
+
+    def save_one(self, save_dir, page_error):
+        import base64
+        from email.message import EmailMessage
+        from unittest import mock
+
+        class FailingPage(FakePdfPage):
+            def pdf(self, path, **kwargs):
+                open(path, "wb").close()
+                raise page_error
+
+        class FailingBrowser:
+            def new_page(self, **kwargs):
+                return FailingPage(False)
+
+        msg = EmailMessage()
+        msg["Subject"] = "Invoice"
+        msg["From"] = "Sender <s@example.com>"
+        msg.set_content("hello")
+        msg.add_attachment(b"data", maintype="application", subtype="octet-stream", filename="data.bin")
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        with mock.patch.object(savegmail, "measure_pdf_margins", return_value={}):
+            savegmail.save_email_and_attachments(FakeRawService(raw), "me", "id1", save_dir, FailingBrowser())
+
+    def test_failed_save_is_not_trashed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as save_dir:
+            service, (saved, _, failed, files) = self.save_messages({"b": RuntimeError("timeout")}, save_dir)
+            self.assertEqual(sorted(os.listdir(save_dir)), ["a.pdf", "c.pdf", "d.pdf"])
+        self.assertEqual(service.trashed, ["a", "c", "d"])
+        self.assertEqual([message["id"] for message in saved], ["a", "c", "d"])
+        self.assertEqual(list(failed), ["b"])
+
+    def test_failed_render_removes_attachments(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as save_dir:
+            with self.assertRaises(Exception):
+                self.save_one(save_dir, ValueError("render failed"))
+            self.assertEqual(os.listdir(save_dir), [])
+
+    def test_ctrl_c_during_render_removes_partial_files(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as save_dir:
+            with self.assertRaises(KeyboardInterrupt):
+                self.save_one(save_dir, KeyboardInterrupt())
+            self.assertEqual(os.listdir(save_dir), [])
+
+    def test_ctrl_c_stops_and_trashes_the_saved_ones(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as save_dir:
+            service, (saved, _, failed, files) = self.save_messages({"c": KeyboardInterrupt()}, save_dir)
+            self.assertEqual(sorted(os.listdir(save_dir)), ["a.pdf", "b.pdf"])
+        self.assertEqual(service.trashed, ["a", "b"])  # c (interrupted) and d stay in Gmail
+        self.assertEqual([message["id"] for message in saved], ["a", "b"])
+        self.assertEqual((failed, sorted(files)), ({}, ["a", "b"]))
+
+    def test_ctrl_c_stops_the_preview(self):
+        import io
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as preview_dir, \
+                mock.patch.object(savegmail, "save_email_and_attachments",
+                                  self.fake_save({"b": RuntimeError("timeout"), "c": KeyboardInterrupt()})), \
+                mock.patch.object(savegmail, "open_quietly") as opened_files, \
+                mock.patch.object(savegmail, "console", savegmail.Console(file=io.StringIO())):
+            try:
+                opened, failed = savegmail.preview_messages(None, "me", self.messages, None, preview_dir)
+            except KeyboardInterrupt:  # escaping, it would stop the whole test run
+                self.fail("Ctrl+C escaped preview_messages")
+        self.assertEqual((opened, list(failed)), (["a"], ["b"]))
+        self.assertEqual(opened_files.call_count, 1)
+
+
 class FakeGmail:
     """Where each email is in a fake Gmail: inbox, archive, trash or gone (permanently deleted)."""
 
