@@ -536,6 +536,23 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick("A\r", messages), ("download", ["0", "2"]))
         self.assertEqual(pick("AA\r", messages), ("download", ["0"]))  # A again unselects them
 
+    def test_select_same_recipient_with_comma_in_name(self):
+        messages = make_messages(3)
+        for message, to in zip(messages, ['"Doe, John" <john@example.com>', '"Doe, Jane" <jane@example.com>',
+                                          "Bob <bob@example.com>"]):
+            message.update(to=to, labels=["SENT"])
+        row = savegmail.message_row(messages[0])
+        self.assertEqual((row["sender"], row["party"]), ("Sent · Doe, John", "john@example.com"))
+        self.assertEqual(pick("A\r", messages), ("download", ["0"]))
+
+    def test_select_same_sender_keeps_direction(self):
+        messages = make_messages(4)
+        for i in (0, 2):
+            messages[i]["from"] = "Bob <bob@example.com>"
+        messages[1].update(to="Bob <bob@example.com>", labels=["SENT"])
+        self.assertEqual(pick("A\r", messages), ("download", ["0", "2"]))
+        self.assertEqual(pick("jA\r", messages), ("download", ["1"]))
+
     def test_folder_key(self):
         state = savegmail.new_picker_state()
         # f starts from the current folder; backspace / typing edit it; enter applies.

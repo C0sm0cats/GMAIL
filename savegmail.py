@@ -1058,12 +1058,13 @@ def message_row(message):
     labels = message.get("labels", [])
     # Like Gmail: for drafts and sent emails the sender is you, so show what matters instead.
     kind = "draft" if "DRAFT" in labels else "sent" if "SENT" in labels else None
+    # First recipient; getaddresses keeps a quoted "Doe, John" in one piece.
+    to_name, to_address = (getaddresses([message.get("to") or ""]) or [("", "")])[0]
     if kind == "draft":
         sender = "Draft"
     elif kind == "sent":
-        recipient = (message.get("to") or "").split(",")[0]
-        is_me = ACCOUNT and parseaddr(recipient)[1].lower() == ACCOUNT.lower()
-        sender = "Sent · " + ("me" if is_me else sender_name(recipient))
+        is_me = ACCOUNT and to_address.lower() == ACCOUNT.lower()
+        sender = "Sent · " + ("me" if is_me else to_name.strip() or to_address or "—")
     else:
         sender = sender_name(message.get("from"))
     category = next((name for label, name in CATEGORIES.items() if label in labels), "")
@@ -1085,8 +1086,7 @@ def message_row(message):
         "size": human_size(size) if size else "",
         "big": size >= BIG_EMAIL_BYTES,
         # Who the email is from (or to, for sent ones), for "select all from this sender".
-        "party": parseaddr(((message.get("to") or "").split(",")[0]) if kind == "sent"
-                           else message.get("from") or "")[1].lower(),
+        "party": (to_address if kind == "sent" else parseaddr(message.get("from") or "")[1]).lower(),
         "haystack": " ".join([sender, message.get("from", ""), subject, category, *user_labels]).lower(),
     }
 
@@ -1474,8 +1474,11 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         indexes = visible()
         if not indexes:
             return
-        party = rows[indexes[state["cursor"]]]["party"]
-        ids = {messages[index]["id"] for index in indexes if party and rows[index]["party"] == party}
+        # Same correspondent and same direction: received with received, sent with sent.
+        current = rows[indexes[state["cursor"]]]
+        party, sent = current["party"], current["kind"] == "sent"
+        ids = {messages[index]["id"] for index in indexes
+               if party and rows[index]["party"] == party and (rows[index]["kind"] == "sent") == sent}
         if ids <= state["selected"]:
             state["selected"] -= ids
         else:
