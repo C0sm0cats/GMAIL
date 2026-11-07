@@ -1,7 +1,18 @@
 #!/usr/bin/env sh
 set -eu
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Follow symlinks (e.g. ~/.local/bin/savegmail) to the real script, so the
+# .venv and savegmail.py are those of the project. Plain readlink, not -f:
+# macOS's readlink has no -f before macOS 12.3.
+script=$0
+while [ -L "$script" ]; do
+    target=$(readlink -- "$script")
+    case $target in
+        /*) script=$target ;;
+        *) script=$(dirname -- "$script")/$target ;;
+    esac
+done
+script_dir=$(CDPATH= cd -- "$(dirname -- "$script")" && pwd)
 
 # Python 3.9 and 3.10 are end-of-life: their dependencies (requests, urllib3,
 # google-api-core) no longer get security fixes there.

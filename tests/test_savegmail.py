@@ -3540,6 +3540,33 @@ class LauncherUpgradeTest(unittest.TestCase):
         rc, pip_calls, _ = self.launch(pip_rc=0)
         self.assertEqual(len(pip_calls), 1)
 
+    def test_symlinked_launcher_uses_project_venv(self):
+        import subprocess
+        # ~/.local/bin/savegmail -> ../link/savegmail -> <project>/run-savegmail.sh
+        userbin = os.path.join(self.root, "userbin")
+        linkdir = os.path.join(self.root, "link")
+        os.makedirs(userbin)
+        os.makedirs(linkdir)
+        os.symlink(os.path.join(self.root, "run-savegmail.sh"), os.path.join(linkdir, "savegmail"))
+        os.symlink(os.path.join("..", "link", "savegmail"), os.path.join(userbin, "savegmail"))
+        # A launcher that misses the project .venv must not build a real one.
+        fakebin = os.path.join(self.root, "fakebin")
+        os.makedirs(fakebin)
+        for name in ("python3", "python"):
+            with open(os.path.join(fakebin, name), "w") as handle:
+                handle.write(BROKEN_VENV_PYTHON)
+            os.chmod(os.path.join(fakebin, name), 0o755)
+        env = dict(os.environ, FAKE_LOG=self.log, FAKE_PIP_RC="0",
+                   PATH=fakebin + os.pathsep + os.environ.get("PATH", ""))
+        result = subprocess.run(["sh", os.path.join(userbin, "savegmail"), "--help"],
+                                cwd=userbin, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sorted(os.listdir(userbin)), ["savegmail"])
+        self.assertEqual(sorted(os.listdir(linkdir)), ["savegmail"])
+        with open(self.log) as handle:
+            calls = handle.read().splitlines()
+        self.assertEqual(calls[-1], f"{self.root}/savegmail.py --help")
+
 
 class LauncherVenvTest(unittest.TestCase):
     """run-savegmail.sh finds python3 and rebuilds a .venv that has no pip."""
