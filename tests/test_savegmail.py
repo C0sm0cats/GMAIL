@@ -346,6 +346,30 @@ class CompactDateTest(unittest.TestCase):
             self.assertEqual(savegmail.compact_date(ms(earlier)), f"{earlier.day} {earlier.strftime('%b %H:%M')}")
 
 
+class RealDateTest(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        from zoneinfo import ZoneInfo
+        patcher = mock.patch.object(savegmail, "get_localzone", return_value=ZoneInfo("Europe/Paris"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_out_of_range_dates_are_invalid(self):
+        for header in ("Fri, 31 Dec 9999 23:59:59 -2359", "0001.01.01-00.00.00", "9999.12.31-23.59.59"):
+            self.assertEqual(savegmail.get_real_date(header), "Invalid Date", header)
+
+    def test_minus_zero_offset_is_utc(self):
+        self.assertEqual(savegmail.get_real_date("Mon, 02 Nov 2026 10:00:00 -0000"), "2026-11-02 11:00:00 CET")
+        self.assertEqual(savegmail.get_real_date("Mon, 02 Nov 2026 10:00:00 +0000"), "2026-11-02 11:00:00 CET")
+
+    def test_python39_type_error_is_invalid(self):
+        from unittest import mock
+        # Python < 3.10 raises TypeError instead of ValueError on an unparseable date.
+        with mock.patch.object(savegmail, "parsedate_to_datetime",
+                               side_effect=TypeError("cannot unpack non-iterable NoneType object")):
+            self.assertEqual(savegmail.get_real_date("2024-02-05 10:00:00"), "Invalid Date")
+
+
 class PickerTest(unittest.TestCase):
     def test_enter_downloads_current(self):
         self.assertEqual(pick("\r"), ("download", ["0"]))

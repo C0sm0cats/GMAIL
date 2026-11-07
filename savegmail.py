@@ -125,15 +125,22 @@ def get_real_date(date_string):
     except ValueError:
         try:
             parsed_date = parsedate_to_datetime(date_string)
-        except ValueError:
+        except (TypeError, ValueError):
+            # Python < 3.10 raises TypeError on an unparseable date.
             parsed_date = None
-    if parsed_date:
-        local_tz = get_localzone()
-        local_date = parsed_date.astimezone(local_tz)
-        formatted_date = local_date.strftime("%Y-%m-%d %H:%M:%S %Z")
-        return formatted_date
-    else:
+        else:
+            # "-0000" (or an unknown zone name) means UTC, sender zone unknown
+            # (RFC 5322 §3.3, §4.3); Python returns it without tzinfo.
+            if parsed_date.tzinfo is None:
+                parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+    if not parsed_date:
         return 'Invalid Date'
+    try:
+        local_date = parsed_date.astimezone(get_localzone())
+    except (OverflowError, ValueError):
+        # A year at the edge of 1..9999 cannot be shifted to the local zone.
+        return 'Invalid Date'
+    return local_date.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def convert_expiry_to_local_time(expiry_utc):
