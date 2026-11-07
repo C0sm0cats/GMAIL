@@ -906,6 +906,85 @@ class EmptyTrashCommandTest(unittest.TestCase):
         self.assertIn("1000 message(s) permanently deleted from trash, then: ", output.getvalue())
         self.assertIn("Backend Error", output.getvalue())
 
+    def run_empty_trash(self, answer):
+        import io
+        from unittest import mock
+        from rich.console import Console
+        api = FakeBatchApi()
+        output = io.StringIO()
+        test_console = Console(file=output, width=200)
+        test_console.input = lambda prompt: answer
+        with mock.patch.multiple(savegmail, console=test_console, list_trash_ids=lambda *a: ["1", "2"]):
+            savegmail.empty_trash(api)
+        return api.calls, output.getvalue()
+
+    def test_declined_confirmation_deletes_nothing(self):
+        for answer in ("n", "", "no", "maybe"):
+            with self.subTest(answer=answer):
+                calls, output = self.run_empty_trash(answer)
+                self.assertEqual(calls, [])
+                self.assertIn("Cancelled.", output)
+
+    def test_accepted_confirmation_deletes_trash(self):
+        for answer in ("y", "yes", " Y "):
+            with self.subTest(answer=answer):
+                calls, output = self.run_empty_trash(answer)
+                self.assertEqual(calls, [("batchDelete", 2)])
+                self.assertIn("2 message(s) permanently deleted from trash.", output)
+
+
+class TypedSelectionTest(unittest.TestCase):
+    """ask_user_to_select_messages when stdin / stdout are not a terminal (pipe, CI)."""
+
+    def select(self, answers, messages=None):
+        import builtins
+        from unittest import mock
+        messages = make_messages(3) if messages is None else messages
+        prompts = []
+
+        def fake_input(prompt=""):
+            prompts.append(prompt)
+            if not answers:
+                raise EOFError
+            return answers.pop(0)
+
+        stdin = mock.Mock(isatty=lambda: False)
+        with savegmail.console.capture() as out, mock.patch.object(builtins, "input", fake_input), \
+                mock.patch.object(savegmail.sys, "stdin", stdin):
+            action, chosen = savegmail.ask_user_to_select_messages(messages)
+        return action, [message["id"] for message in chosen], prompts, out.get()
+
+    def test_permanent_delete_needs_typed_delete(self):
+        for confirm in ("no", "y", "", "Delete"):
+            with self.subTest(confirm=confirm):
+                action, chosen, prompts, _ = self.select(["D 1", confirm, "q"])
+                self.assertEqual((action, chosen), ("quit", []))
+                self.assertIn("Type delete:", prompts[1])
+        action, chosen, _, _ = self.select(["D 1", "delete"])
+        self.assertEqual((action, chosen), ("delete", ["0"]))
+
+    def test_trash_needs_yes(self):
+        for confirm in ("n", "", "no"):
+            with self.subTest(confirm=confirm):
+                action, chosen, prompts, _ = self.select(["d 1", confirm, "q"])
+                self.assertEqual((action, chosen), ("quit", []))
+                self.assertIn("[y/N]", prompts[1])
+        action, chosen, _, _ = self.select(["d 1", "y"])
+        self.assertEqual((action, chosen), ("trash", ["0"]))
+
+    def test_end_of_input_during_confirmation_quits(self):
+        for command in ("D 1", "d 1"):
+            with self.subTest(command=command):
+                self.assertEqual(self.select([command])[:2], ("quit", []))
+
+    def test_number_shown_is_email_chosen(self):
+        messages = make_messages(3)
+        action, chosen, _, output = self.select(["D 2", "delete"], messages)
+        self.assertEqual(action, "delete")
+        shown = {line.split()[0]: line for line in output.splitlines() if line.strip()}
+        subject = next(m["subject"] for m in messages if m["id"] == chosen[0])
+        self.assertIn(subject, shown["2"])
+
 
 if __name__ == "__main__":
     unittest.main()
