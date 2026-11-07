@@ -1696,10 +1696,32 @@ class TypedSelectionTest(unittest.TestCase):
 
 FAKE_PYTHON = """#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_LOG"
-if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then
+if [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" != "--version" ]; then
     exit "${FAKE_PIP_RC:-0}"
 fi
 exit 0
+"""
+
+# A system interpreter: `-m venv --clear <dir>` makes <dir> a working fake .venv.
+FAKE_SYSTEM_PYTHON = """#!/bin/sh
+printf 'system %s\\n' "$*" >> "$FAKE_LOG"
+if [ "$1" = "-c" ]; then
+    exit "${FAKE_TOO_OLD:-0}"
+fi
+if [ "$1" = "-m" ] && [ "$2" = "venv" ] && [ "$3" = "--clear" ]; then
+    rm -rf "$4"
+    mkdir -p "$4/bin"
+    cp "$FAKE_VENV_PYTHON" "$4/bin/python"
+    chmod 755 "$4/bin/python"
+    exit 0
+fi
+exit 1
+"""
+
+# A .venv left without pip: every call fails as `No module named pip` would.
+BROKEN_VENV_PYTHON = """#!/bin/sh
+printf 'broken %s\\n' "$*" >> "$FAKE_LOG"
+exit 1
 """
 
 
@@ -1735,7 +1757,7 @@ class LauncherUpgradeTest(unittest.TestCase):
             with open(self.log) as handle:
                 calls = handle.read().splitlines()
             os.remove(self.log)
-        return result.returncode, [call for call in calls if call.startswith("-m pip")], calls
+        return result.returncode, [call for call in calls if call.startswith("-m pip install")], calls
 
     def test_existing_venv_upgrades_dependencies_eagerly(self):
         rc, pip_calls, _ = self.launch()
@@ -1759,6 +1781,85 @@ class LauncherUpgradeTest(unittest.TestCase):
         self.assertTrue(calls[-1].endswith("savegmail.py --help"))
         rc, pip_calls, _ = self.launch(pip_rc=0)
         self.assertEqual(len(pip_calls), 1)
+
+
+class LauncherVenvTest(unittest.TestCase):
+    """run-savegmail.sh finds python3 and rebuilds a .venv that has no pip."""
+
+    TOOLS = ("sh", "dirname", "find", "touch", "rm", "mkdir", "cp", "chmod")
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        if any(shutil.which(tool) is None for tool in self.TOOLS):
+            self.skipTest("POSIX tools are required")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = self.tmp.name
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        shutil.copy(os.path.join(repo, "run-savegmail.sh"), root)
+        self.bin = os.path.join(root, "bin")
+        os.makedirs(self.bin)
+        for tool in self.TOOLS:
+            os.symlink(shutil.which(tool), os.path.join(self.bin, tool))
+        self.venv_python = self.write(os.path.join(root, "venv-python"), FAKE_PYTHON)
+        self.system_python = self.write(os.path.join(root, "system-python"), FAKE_SYSTEM_PYTHON)
+        self.root = root
+        self.log = os.path.join(root, "calls.log")
+
+    @staticmethod
+    def write(path, text):
+        with open(path, "w") as handle:
+            handle.write(text)
+        os.chmod(path, 0o755)
+        return path
+
+    def provide(self, name):
+        os.symlink(self.system_python, os.path.join(self.bin, name))
+
+    def launch(self, **extra):
+        import subprocess
+        env = {"PATH": self.bin, "FAKE_LOG": self.log, "FAKE_VENV_PYTHON": self.venv_python, **extra}
+        result = subprocess.run(["sh", os.path.join(self.root, "run-savegmail.sh"), "--help"],
+                                env=env, capture_output=True, text=True, timeout=30)
+        calls = []
+        if os.path.exists(self.log):
+            with open(self.log) as handle:
+                calls = handle.read().splitlines()
+        return result, calls
+
+    def test_only_python3_creates_venv(self):
+        self.provide("python3")
+        result, calls = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"system -m venv --clear {self.root}/.venv", calls)
+        self.assertTrue(calls[-1].endswith("savegmail.py --help"))
+
+    def test_only_python_still_works(self):
+        self.provide("python")
+        result, calls = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(calls[-1].endswith("savegmail.py --help"))
+
+    def test_no_python_or_too_old_says_so(self):
+        result, _ = self.launch()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Python 3.9 or newer is required", result.stderr)
+        self.provide("python3")
+        result, calls = self.launch(FAKE_TOO_OLD="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Python 3.9 or newer is required", result.stderr)
+        self.assertFalse(any("venv" in call for call in calls))
+
+    def test_venv_without_pip_is_recreated(self):
+        self.provide("python3")
+        os.makedirs(os.path.join(self.root, ".venv", "bin"))
+        self.write(os.path.join(self.root, ".venv", "bin", "python"), BROKEN_VENV_PYTHON)
+        result, calls = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"system -m venv --clear {self.root}/.venv", calls)
+        self.assertTrue(any(call.startswith("-m pip install") for call in calls))
+        self.assertTrue(calls[-1].endswith("savegmail.py --help"))
 
 
 if __name__ == "__main__":

@@ -3,8 +3,19 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-if [ ! -x "$script_dir/.venv/bin/python" ]; then
-    python -m venv "$script_dir/.venv"
+# (Re)create the .venv when it has no working pip: missing, left half-made by a
+# failed or interrupted creation (no python3-venv on Debian/Ubuntu), or built
+# for a Python version the system no longer provides.
+if ! "$script_dir/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    python=$(command -v python3 || command -v python) || {
+        echo "run-savegmail.sh: Python 3.9 or newer is required (no python3 or python command found)" >&2
+        exit 1
+    }
+    if ! "$python" -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+        echo "run-savegmail.sh: Python 3.9 or newer is required ($python is older)" >&2
+        exit 1
+    fi
+    "$python" -m venv --clear "$script_dir/.venv"
 fi
 
 # Upgrade the dependencies at most once a week (eager, so indirect ones such as
