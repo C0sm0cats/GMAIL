@@ -968,6 +968,36 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(state["sign_in_note"][0],
                          "↻ signed in as other@example.com, not me@example.com, r to try again")
 
+    def test_sync_drops_emails_gone_during_a_question(self):
+        # The email asked about is deleted elsewhere while d or D waits: the question goes (D: says so until
+        # enter or esc) or shrinks to what is left; y / delete no longer closes the list, the count is right.
+        import time
+        from unittest import mock
+        cases = [(["d", "y", "q"], set(), None, ("quit", [])),
+                 (["D", "delete\r", "q"], set(), set(), ("quit", [])),  # stays: "delete" is not browse keys
+                 (["d", "y"], {"0", "1"}, {"1"}, ("trash", ["1"]))]
+        for keys, selected, asked_after, expected in cases:
+            with self.subTest(keys=keys, selected=selected):
+                state = savegmail.new_picker_state()
+                state["selected"] |= selected
+                removed, asked = [], []
+
+                def sync(loaded):
+                    gone = set()
+                    if removed:
+                        asked.append(set(state["confirm"]["ids"]) if state["confirm"] else None)
+                    elif state["confirm"]:
+                        gone = {min(state["confirm"]["ids"])}
+                        removed.extend(gone)
+                    return {"new": [], "gone": gone, "labels": {}, "total": None, "badges": {}}
+
+                with mock.patch.object(savegmail, "SYNC_INTERVAL", 0.1):
+                    result = pick_later(keys, make_messages(2), delay=0.6, sync=sync, state=state)
+                time.sleep(0.7)  # keys left unsent if the list closed early must not reach the next case
+                self.assertTrue(removed)
+                self.assertEqual(asked[0], asked_after)  # the next sync sees the question changed
+                self.assertEqual(result, expected)
+
     def test_failed_load_more_can_be_retried(self):
         # m while the session expired or Gmail is unreachable: no trace, and m works again afterwards.
         from google.auth.exceptions import RefreshError

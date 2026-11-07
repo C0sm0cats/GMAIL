@@ -1791,7 +1791,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         elif state["confirm"] and state["confirm"]["action"] in TYPED_CONFIRM:
             action = state["confirm"]["action"]
             n = len(state["confirm"]["ids"])
-            question = (f" Permanently delete {n} email{'s' * (n != 1)}{hidden_note()}?" if action == "delete"
+            question = (" Nothing left to delete: gone from the list meanwhile." if action == "delete" and not n
+                        else f" Permanently delete {n} email{'s' * (n != 1)}{hidden_note()}?" if action == "delete"
                         else " Permanently delete everything in the Gmail trash?")
             # The word to type, what is typed and the cursor start the second line: always visible.
             prompt = [("class:error", " Cannot be undone."), ("class:dim", " Type "),
@@ -1864,8 +1865,11 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         clamp()
 
     def submit(event, action, ids):
-        if ids:
-            event.app.exit(result=(action, [message for message in messages if message["id"] in ids]))
+        chosen = [message for message in messages if message["id"] in ids]
+        if chosen:
+            event.app.exit(result=(action, chosen))
+        else:  # everything asked about went meanwhile (synced away): nothing to do, the list stays
+            state["confirm"] = None
 
     bindings.add("up", filter=~confirming & ~helping)(lambda event: move(-1))
     bindings.add("down", filter=~confirming & ~helping)(lambda event: move(1))
@@ -2018,6 +2022,12 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         USER_LABELS.update(result.get("user_labels") or {})
         rows[:] = [message_row(message) for message in messages]
         state["selected"] -= gone
+        # A question still open must not ask about, or act on, emails gone meanwhile. A y question with none
+        # left goes; a typed one stays (saying so) until enter or esc, so the rest of the word is not browse keys.
+        if state["confirm"] and state["confirm"]["action"] != "empty_trash":
+            state["confirm"]["ids"] -= gone
+            if not state["confirm"]["ids"] and state["confirm"]["action"] not in TYPED_CONFIRM:
+                state["confirm"] = None
         if badges is not None:
             badges.clear()
             badges.update(result["badges"])
