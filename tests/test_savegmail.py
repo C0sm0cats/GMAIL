@@ -1213,6 +1213,76 @@ class SaveMessagesAttachmentTest(unittest.TestCase):
         self.assertEqual(service.trashed, ["m1"])
 
 
+class FailingBatchService(FakeSaveService):
+    """The batch call itself fails (503); entries retried one by one fail too, except the ids in ok."""
+
+    def __init__(self, ok=(), error=None):
+        super().__init__(raw="")
+        self.ok = set(ok)
+        self.error = error
+
+    def new_batch_http_request(self, callback):
+        from unittest import mock
+
+        class Batch:
+            def add(self, request, request_id):
+                pass
+
+            def execute(self):
+                raise savegmail.HttpError(mock.Mock(status=503, reason="Backend Error"), b"Backend Error")
+        return Batch()
+
+    def trash(self, userId, id):
+        service = self
+        request = super().trash(userId, id)
+
+        class Request:
+            def execute(self):
+                if id in service.ok:
+                    return request.execute()
+                service.trashed.append(f"tried {id}")
+                from unittest import mock
+                raise service.error or savegmail.HttpError(mock.Mock(status=503, reason="Backend Error"),
+                                                           b"Backend Error")
+        return Request()
+
+
+class BatchCallFailureTest(unittest.TestCase):
+    def test_enter_removes_files_when_trash_batch_fails(self):
+        import io
+        import tempfile
+        from unittest import mock
+
+        def fake_save(service, user_id, msg_id, save_dir, browser, on_step):
+            path = os.path.join(save_dir, f"{msg_id}.pdf")
+            open(path, "w").close()
+            return {"files": [path], "attachments": 0}
+
+        messages = [{"id": msg_id, "from": "S <s@example.com>", "subject": msg_id, "snippet": "",
+                     "internalDate": 1_700_000_000_000} for msg_id in ("x", "y")]
+        service = FailingBatchService(ok={"y"})
+        with tempfile.TemporaryDirectory() as save_dir, \
+                mock.patch.object(savegmail, "save_email_and_attachments", fake_save), \
+                mock.patch.object(savegmail, "console", savegmail.Console(file=io.StringIO())):
+            saved, _, failed, files = savegmail.save_messages(service, "me", messages, save_dir, None, True)
+            self.assertEqual(sorted(os.listdir(save_dir)), ["y.pdf"])
+        self.assertEqual([message["id"] for message in saved], ["y"])
+        self.assertEqual(list(failed), ["x"])
+        self.assertIn("could not move to trash", failed["x"])
+        self.assertEqual(list(files), ["y"])
+
+    def test_trash_batch_failure_returns_errors(self):
+        errors = savegmail.trash_messages(FailingBatchService(), "me", ["x", "y"])
+        self.assertEqual(set(errors), {"x", "y"})
+        self.assertIsInstance(errors["x"], savegmail.HttpError)
+
+    def test_network_down_stops_the_retries(self):
+        service = FailingBatchService(error=OSError("timed out"))
+        errors = savegmail.trash_messages(service, "me", ["x", "y", "z"])
+        self.assertEqual(set(errors), {"x", "y", "z"})
+        self.assertEqual(service.trashed, ["tried x"])
+
+
 class FakeGmail:
     """Where each email is in a fake Gmail: inbox, archive, trash or gone (permanently deleted)."""
 

@@ -639,19 +639,32 @@ def run_batched(service, ids, make_request):
             errors[request_id] = exception
 
     for start in range(0, len(ids), API_BATCH_SIZE):
+        chunk = ids[start:start + API_BATCH_SIZE]
         batch = service.new_batch_http_request(callback=collect)
-        for msg_id in ids[start:start + API_BATCH_SIZE]:
+        for msg_id in chunk:
             batch.add(make_request(msg_id), request_id=msg_id)
-        batch.execute()
+        try:
+            batch.execute()
+        except Exception as exc:
+            # The batch call itself failed (5xx, quota, network): its unanswered entries count as failed.
+            debug(f"Gmail batch request failed: {exc}")
+            for msg_id in chunk:
+                if msg_id not in responses:
+                    errors.setdefault(msg_id, exc)
 
     # Retry throttled/failed batch entries one by one.
-    for msg_id in list(errors):
+    pending = list(errors)
+    for index, msg_id in enumerate(pending):
         try:
             responses[msg_id] = make_request(msg_id).execute()
             del errors[msg_id]
         except Exception as exc:
             errors[msg_id] = exc
             debug(f"Gmail request failed for message {msg_id}: {exc}")
+            if isinstance(exc, GMAIL_ERRORS) and not isinstance(exc, HttpError):
+                # Session expired or network down: the other retries would fail the same way.
+                errors.update({other: exc for other in pending[index + 1:]})
+                break
     return responses, errors
 
 
