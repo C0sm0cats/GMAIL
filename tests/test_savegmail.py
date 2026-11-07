@@ -2356,6 +2356,66 @@ class BackgroundSyncSessionTest(unittest.TestCase):
         self.assertEqual(result["badges"]["All mail"], ("2", "unread"))
 
 
+class LoadMoreSessionTest(unittest.TestCase):
+    """m as interactive_download_main builds it: before:<seconds> from the view floor, known ids dropped."""
+
+    # Newest first, internalDate in ms; m3 and m4 share a second across the first page boundary.
+    MAILBOX = [("m1", 10_000_000), ("m2", 9_000_000), ("m3", 8_000_700), ("m4", 8_000_200),
+               ("m5", 7_000_000), ("m6", 6_000_000), ("m7", 5_000_000), ("m8", 4_000_000)]
+
+    def test_repeated_m_loads_every_older_email_once(self):
+        import io
+        import re
+        import tempfile
+        from unittest import mock
+        from rich.console import Console
+        save_dir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, save_dir, True)
+        first, loads, queries = [], [], []
+
+        def listed(service, user_id, query="", max_results=50, page_token=None, in_trash=False):
+            # Gmail's before:<epoch seconds> is exclusive; no page token here, m relies on before: only.
+            queries.append(query)
+            match = re.search(r"before:(\d+)", query)
+            matching = [(msg_id, date) for msg_id, date in self.MAILBOX
+                        if match is None or date < int(match.group(1)) * 1000]
+            page = matching[:max_results]
+            return ([{"id": msg_id, "from": f"S <{msg_id}@example.com>", "subject": msg_id, "snippet": "",
+                      "internalDate": date, "labels": ["INBOX"]} for msg_id, date in page],
+                    "next" if len(matching) > max_results else None)
+
+        def ask(messages, load_more, *rest):
+            first.extend(message["id"] for message in messages)
+            more = load_more is not None
+            while more and len(loads) < 10:
+                older, more, *loaded = load_more()  # as the list does on m
+                loads.append(([message["id"] for message in older], more))
+                messages.extend(older)
+                for done in loaded:
+                    done()
+            return "quit", []
+
+        with mock.patch.multiple(
+            savegmail, authenticate=lambda: object(), build=lambda *a, **k: FakeSessionService(),
+            user_labels=lambda *a: {}, estimate_total=lambda *a, **k: None, list_candidate_messages=listed,
+            ask_user_to_select_messages=ask, refresh_messages=lambda *a, **k: ([], set()),
+            sync_playwright=lambda: FakePlaywright(), launch_browser=lambda *a, **k: mock.Mock(),
+            open_quietly=lambda url: True, console=Console(file=io.StringIO()),
+        ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir, "--max", "3"]):
+            savegmail.interactive_download_main()
+
+        self.assertEqual(first, ["m1", "m2", "m3"])
+        self.assertEqual(loads, [(["m4", "m5"], True), (["m6", "m7"], True), (["m8"], False)])
+        dates = dict(self.MAILBOX)
+        shown = list(first)
+        for older, _ in loads:  # each m: new emails, all older than everything listed before
+            self.assertTrue(older)
+            self.assertLess(max(dates[msg_id] for msg_id in older), min(dates[msg_id] for msg_id in shown))
+            shown += older
+        self.assertEqual(shown, [msg_id for msg_id, _ in self.MAILBOX])  # none twice, none skipped
+        self.assertEqual(queries[1:], ["before:8001", "before:7001", "before:5001"])
+
+
 class LabelGmail(FakeGmail):
     """FakeGmail whose emails also carry UNREAD / STARRED: m0 starred, m1 and m2 unread, all in the Inbox."""
 
