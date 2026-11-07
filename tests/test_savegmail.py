@@ -3572,6 +3572,34 @@ class MaxOptionTest(unittest.TestCase):
         self.assertEqual(savegmail.positive_int("50"), 50)
 
 
+class DownloadPathOptionTest(unittest.TestCase):
+    """An unusable --download-path is refused with a message before sign-in, not with a traceback."""
+
+    def test_unusable_download_path_is_refused_before_sign_in(self):
+        import io
+        import tempfile
+        from unittest import mock
+
+        from rich.console import Console
+
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {"HOME": home}):
+            a_file = os.path.join(home, "a-file")
+            open(a_file, "w").close()
+            for path, expected in ((a_file, "Could not use the download folder"),
+                                   (os.path.join(a_file, "archive"), "Could not use the download folder"),
+                                   ("", "Empty download folder")):
+                with self.subTest(path=path):
+                    output = io.StringIO()
+                    with mock.patch.object(savegmail, "authenticate", side_effect=AssertionError("signed in")), \
+                            mock.patch.object(savegmail, "console", Console(file=output, width=200)), \
+                            mock.patch.object(sys, "argv", ["savegmail", "--download-path", path]):
+                        with self.assertRaises(SystemExit) as raised:
+                            savegmail.interactive_download_main()
+                    self.assertEqual(raised.exception.code, 1)
+                    self.assertIn(expected, output.getvalue())
+            self.assertEqual(sorted(os.listdir(home)), ["a-file"])
+
+
 class QueryExclusionTest(unittest.TestCase):
     """--query accepts a lone exclusion term (-in:inbox) instead of stopping with "expected one argument"."""
 

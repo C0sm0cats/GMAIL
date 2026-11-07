@@ -2451,6 +2451,15 @@ def home_relative(path):
     return path
 
 
+def make_download_folder(path):
+    """Create the download folder if needed and return it with ~ expanded; OSError if it can't be used."""
+    folder = os.path.expanduser(path)
+    if not folder:
+        raise OSError("empty path")
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
 def positive_int(value):
     """argparse type for --max: an integer of at least 1."""
     import argparse
@@ -2540,6 +2549,16 @@ def interactive_download_main():
             os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         parser.error("--headed needs a graphical display (DISPLAY or WAYLAND_DISPLAY is not set)")
 
+    try:
+        save_dir = make_download_folder(args.download_path)
+    except OSError as error:
+        if not args.download_path:
+            console.print("[red]✗[/] Empty download folder (--download-path).")
+        else:
+            console.print(f"[red]✗[/] Could not use the download folder {escape(args.download_path)}"
+                          f"\n  [dim]{escape(str(error))}[/]")
+        sys.exit(1)
+
     console.clear()
     creds = authenticate()
     playwright = browser = preview_dir = None
@@ -2570,8 +2589,6 @@ def interactive_download_main():
     try:
         service = build("gmail", "v1", credentials=creds)
         user_id = "me"
-        save_dir = os.path.expanduser(args.download_path)
-        os.makedirs(save_dir, exist_ok=True)
         shown_dir = home_relative(save_dir)
 
         try:
@@ -2796,11 +2813,8 @@ def interactive_download_main():
             ids = {message["id"] for message in chosen}
 
             if action == "folder":
-                wanted = os.path.expanduser((state["folder"] or "").strip())
                 try:
-                    if not wanted:
-                        raise OSError("empty path")
-                    os.makedirs(wanted, exist_ok=True)
+                    wanted = make_download_folder((state["folder"] or "").strip())
                 except OSError as exc:
                     notice = [[("class:error", " ✗ "), ("", "Could not use that folder"),
                                ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
