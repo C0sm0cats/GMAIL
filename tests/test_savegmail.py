@@ -937,6 +937,58 @@ class HugeHeaderTest(unittest.TestCase):
         self.assertNotIn("ab" * 5000, headers[0])  # but not all 75 KB of them
 
 
+class PageCountTest(unittest.TestCase):
+    """A sender's forced page breaks used to make Chromium print 20,000 pages, for minutes per email."""
+
+    @staticmethod
+    def page_break_email(breaks):
+        import base64
+        body = "<p>Hi</p><style>i{display:block;break-after:page}</style>" + "<i></i>" * breaks
+        raw = ("Subject: Breaks\r\nFrom: s@example.com\r\nMIME-Version: 1.0\r\n"
+               "Content-Type: text/html; charset=utf-8\r\n\r\n" + body + "\r\n").encode()
+        return base64.urlsafe_b64encode(raw).decode()
+
+    def test_printed_pages_are_capped(self):
+        import tempfile
+        options = []
+
+        class OptionsRecordingPage(ContentRecordingPage):
+            def pdf(self, path, **kwargs):
+                options.append(kwargs)
+                super().pdf(path, **kwargs)
+
+        class OptionsRecordingBrowser(ContentRecordingBrowser):
+            def new_page(self, **kwargs):
+                page = OptionsRecordingPage()
+                self.pages.append(page)
+                return page
+
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(FakeRawService(self.page_break_email(10)), "me", "id1",
+                                                 save_dir, OptionsRecordingBrowser())
+        self.assertEqual(options[0].get("page_ranges"), f"1-{savegmail.MAX_PDF_PAGES}")
+
+    def test_chromium_prints_at_most_max_pages(self):
+        import re
+        import tempfile
+        from unittest import mock
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(channel="chromium")
+            except Exception as error:  # no Playwright Chromium here; never install it from a test
+                self.skipTest(f"Chromium unavailable: {error}")
+            try:
+                with tempfile.TemporaryDirectory() as save_dir, mock.patch.object(savegmail, "MAX_PDF_PAGES", 5):
+                    result = savegmail.save_email_and_attachments(
+                        FakeRawService(self.page_break_email(50)), "me", "id1", save_dir, browser)
+                    with open(os.path.join(save_dir, result["pdf"]), "rb") as f:
+                        pdf = f.read()
+            finally:
+                browser.close()
+        self.assertEqual(len(re.findall(rb"/Type\s*/Page[^s]", pdf)), 5)
+
+
 class PdfFileNameTest(unittest.TestCase):
     """The rendered PDF never overwrites or deletes a file the program did not create."""
 

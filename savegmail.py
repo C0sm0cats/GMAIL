@@ -70,6 +70,10 @@ capped_header_policy = CappedHeaderPolicy()
 # an email referencing one image a thousand times would otherwise make a HTML a thousand times its size.
 INLINE_IMAGE_URL = "https://cid.savegmail.invalid/{}"
 
+# A sender's forced page breaks or a very tall element can make Chromium print tens of thousands of pages,
+# in a time quadratic in their number (minutes per email). Real emails stay far below this many pages.
+MAX_PDF_PAGES = 1000
+
 
 def new_email_page(browser, resources=None):
     """Open a page for content written by a sender: its scripts never run, and it never navigates away
@@ -584,6 +588,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
             header_template=header_template,
             footer_template=footer_template,
             margin=pdf_margins,
+            page_ranges=f"1-{MAX_PDF_PAGES}",
             path=final_pdf_path
         )
     except Exception as e:
