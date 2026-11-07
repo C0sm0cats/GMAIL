@@ -3035,7 +3035,7 @@ class SignInAgainSessionTest(unittest.TestCase):
     def credentials(token):
         return savegmail.Credentials(token=token, refresh_token="ref" + token[3:], client_id="id", client_secret="s")
 
-    def run_session(self, step, signs_in_as, other_launch_writes=None):
+    def run_session(self, step, signs_in_as, other_launch_writes=None, credentials_path=None):
         import io
         import tempfile
         from unittest import mock
@@ -3065,10 +3065,13 @@ class SignInAgainSessionTest(unittest.TestCase):
 
         listed = [{"id": "a1", "from": "S <s@example.com>", "subject": "Subject", "snippet": "",
                    "internalDate": 1_700_000_000_000, "labels": ["INBOX"]}]
+        # With credentials_path, the real oauth_flow runs against that client file instead of the fake Flow.
+        flow = {} if credentials_path else {"oauth_flow": lambda: Flow()}
         with mock.patch.multiple(
             savegmail, authenticate=lambda: creds, build=build, user_labels=lambda *a: {},
             list_candidate_messages=lambda *a, **k: (listed, None), ask_user_to_select_messages=ask,
-            oauth_flow=lambda: Flow(), TOKEN_PATH=token_path, sync_playwright=lambda: FakePlaywright(),
+            **flow, CREDENTIALS_PATH=credentials_path or savegmail.CREDENTIALS_PATH,
+            TOKEN_PATH=token_path, sync_playwright=lambda: FakePlaywright(),
             launch_browser=lambda *a, **k: mock.Mock(), open_quietly=lambda url: True,
             console=Console(file=io.StringIO()),
         ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", folder]):
@@ -3100,6 +3103,18 @@ class SignInAgainSessionTest(unittest.TestCase):
             with self.assertRaises(savegmail.RefreshError):
                 sync(loaded)
         creds, _, token = self.run_session(step, signs_in_as="tokB")
+        self.assertEqual((creds.token, token), ("tokA", None))
+
+    def test_r_without_credentials_json_fails_without_quitting(self):
+        # credentials.json removed after the first sign-in: r fails like any other sign-in failure
+        # (an Exception run_sign_in catches), instead of sys.exit closing the whole list.
+        missing = os.path.join(__import__("tempfile").mkdtemp(), "missing-credentials.json")
+        self.addCleanup(os.rmdir, os.path.dirname(missing))
+
+        def step(sync, sign_in, loaded):
+            with self.assertRaisesRegex(FileNotFoundError, "Missing Google OAuth client file"):
+                sign_in()
+        creds, _, token = self.run_session(step, signs_in_as="tokA2", credentials_path=missing)
         self.assertEqual((creds.token, token), ("tokA", None))
 
     def test_token_of_another_account_written_elsewhere_is_not_adopted(self):

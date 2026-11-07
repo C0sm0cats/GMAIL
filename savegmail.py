@@ -223,13 +223,9 @@ def convert_expiry_to_local_time(expiry_utc):
 
 
 def oauth_flow():
+    """The OAuth flow of credentials.json; raises FileNotFoundError when that file is missing."""
     if not os.path.exists(CREDENTIALS_PATH):
-        console.print(
-            f"[red]✗[/] Missing Google OAuth client file: {escape(CREDENTIALS_PATH)}\n"
-            "  [dim]Download it from Google Cloud Console → APIs & Services → Credentials "
-            "(OAuth client ID, Desktop app) and save it there as credentials.json.[/]"
-        )
-        sys.exit(1)
+        raise FileNotFoundError(f"Missing Google OAuth client file: {CREDENTIALS_PATH}")
     return InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
 
 
@@ -265,7 +261,15 @@ def open_quietly(url):
 
 def sign_in(reason):
     """Browser OAuth sign-in with compact output, erased once signed in (kept with --verbose)."""
-    flow = oauth_flow()
+    try:
+        flow = oauth_flow()
+    except FileNotFoundError:
+        console.print(
+            f"[red]✗[/] Missing Google OAuth client file: {escape(CREDENTIALS_PATH)}\n"
+            "  [dim]Download it from Google Cloud Console → APIs & Services → Credentials "
+            "(OAuth client ID, Desktop app) and save it there as credentials.json.[/]"
+        )
+        sys.exit(1)
 
     class QuietBrowser(webbrowser.BaseBrowser):
         # run_local_server hands us the sign-in URL here, so the prompt and opening are ours.
@@ -306,7 +310,7 @@ def sign_in_quietly(check=lambda creds: None, timeout=300):
 
     check(creds) runs before token.json is written, and may raise to refuse the sign-in.
     """
-    flow = oauth_flow()
+    flow = oauth_flow()  # a missing credentials.json raises, so r fails without closing the list
 
     class SilentBrowser(webbrowser.BaseBrowser):
         def open(self, url, new=0, autoraise=True):
