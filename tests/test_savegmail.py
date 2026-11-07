@@ -2519,6 +2519,25 @@ class UndoAfterDeleteTest(unittest.TestCase):
         self.assertEqual(left, [])
         self.assertIsNone(offered[-1])
 
+    def test_preview_writes_nothing_to_the_download_folder(self):
+        from unittest import mock
+        rendered = []
+
+        def render(service, user_id, msg_id, save_dir, browser, on_step, save_attachments=True):
+            # Writes what a real render would, so a preview landing in the wrong place shows up as files.
+            rendered.append((save_dir, save_attachments))
+            open(os.path.join(save_dir, f"{msg_id}.pdf"), "wb").close()
+            if save_attachments:
+                open(os.path.join(save_dir, f"{msg_id}-att.bin"), "wb").close()
+            return {"pdf": f"{msg_id}.pdf"}
+        with mock.patch.object(savegmail, "save_email_and_attachments", render):
+            gmail, left, offered = self.run_session({"A": "inbox"}, [("preview", ["A"])])
+        self.assertEqual(left, [])
+        [(preview_dir, save_attachments)] = rendered
+        self.assertFalse(save_attachments)
+        self.assertFalse(os.path.exists(preview_dir))  # the session temp dir is removed on quit
+        self.assertEqual(gmail.places["A"], "inbox")
+
     def test_no_undo_of_permanently_deleted_emails(self):
         for first in ["trash", "download"]:
             with self.subTest(first=first):
