@@ -586,13 +586,13 @@ class PickerTest(unittest.TestCase):
                     "badges": {"Inbox": ("4", "unread")}}
 
         state = savegmail.new_picker_state()
-        state["cursor_id"] = "1"
+        state["cursor_id"] = "0"  # moves from first to last row, so a stale index points elsewhere
         action, ids = pick_later("\r", messages, sync=sync, badges=badges, state=state)
         self.assertEqual(calls, [["0", "1", "2"]])
         self.assertEqual([message["id"] for message in messages], ["new", "1", "0"])  # newest first
         self.assertEqual(next(m for m in messages if m["id"] == "0")["labels"], ["INBOX", "STARRED"])
         self.assertEqual(badges, {"Inbox": ("4", "unread")})
-        self.assertEqual((action, ids), ("download", ["1"]))
+        self.assertEqual((action, ids), ("download", ["0"]))
 
     def test_failed_sync_keeps_the_list(self):
         def sync(loaded):
