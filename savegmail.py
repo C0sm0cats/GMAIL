@@ -2657,6 +2657,8 @@ def interactive_download_main():
                     each["state"]["signed_out"] = True
 
         totals = {"saved": 0, "trashed": 0, "deleted": 0}
+        # Emails this session moved to the trash and that are still there (a restore takes them off the total).
+        trashed_here = set()
         # Back to the list after every action, until the user quits.
         while True:
             view = views[current]
@@ -2718,7 +2720,8 @@ def interactive_download_main():
                         with console.status("[dim]Restoring from trash…[/]"):
                             errors = untrash_messages(service, user_id, [message["id"] for message in undo["trashed"]])
                     restored = [message for message in undo["trashed"] if message["id"] not in errors]
-                    totals["trashed"] -= len(restored)
+                    totals["trashed"] -= len(trashed_here & {message["id"] for message in restored})
+                    trashed_here -= {message["id"] for message in restored}
                     # Emails still stuck in the trash keep their files, so a retry of u stays consistent.
                     unsaved = {msg_id: files for msg_id, files in undo["files"].items() if msg_id not in errors}
                     removed = [path for files in unsaved.values() for path in files]
@@ -2788,7 +2791,15 @@ def interactive_download_main():
                     with console.status("[dim]Restoring from trash…[/]"):
                         errors = untrash_messages(service, user_id, list(ids))
                     restored = [message for message in chosen if message["id"] not in errors]
-                    drop(view, {message["id"] for message in restored})
+                    restored_ids = {message["id"] for message in restored}
+                    drop(view, restored_ids)
+                    # Out of the trash: no longer moved to trash this session, and u has nothing to restore for them.
+                    totals["trashed"] -= len(trashed_here & restored_ids)
+                    trashed_here -= restored_ids
+                    if undo and restored_ids & {message["id"] for message in undo["trashed"]}:
+                        trashed = [message for message in undo["trashed"] if message["id"] not in restored_ids]
+                        undo = (dict(undo, trashed=trashed)
+                                if trashed or undo.get("archived") or undo["files"] else None)
                     notice = [[("class:checked", " ↶ "), ("", f"{plural(len(restored), 'email')} restored from trash")]
                               if restored else [("class:error", " ✗ "), ("", "Nothing restored from trash")]]
                     notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
@@ -2802,6 +2813,7 @@ def interactive_download_main():
                     if trashed:
                         undo = {"label": "trash", "trashed": trashed, "files": {}}
                     totals["trashed"] += len(trashed)
+                    trashed_here |= {message["id"] for message in trashed}
                     notice = [[("class:checked", " ✓ "), ("", f"{plural(len(trashed), 'email')} moved to trash (not saved)"),
                                ("class:dim class:keyhint", " · u undo")]
                               if trashed else [("class:error", " ✗ "), ("", "Nothing moved to trash")]]
@@ -2903,6 +2915,7 @@ def interactive_download_main():
                         if saved:
                             undo = {"label": "save+trash", "trashed": saved, "files": files}
                         totals["trashed"] += len(saved)
+                        trashed_here |= saved_ids
                         summary += " · moved to trash"
                     else:
                         state["selected"] -= saved_ids

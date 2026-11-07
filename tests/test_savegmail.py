@@ -2174,7 +2174,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
         Returns (fake Gmail, files left in the download folder, undo label offered before each step);
         self.notices holds the notice shown before each step, as plain text lines; self.marked the ids
         shown ✓, self.selected those selected, and self.shown those listed, before each step; self.saved
-        the ids passed to each save_messages call.
+        the ids passed to each save_messages call; self.output what the session printed (its Done summary).
         """
         import io
         import tempfile
@@ -2188,6 +2188,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
         steps, offered, self.notices, self.signed_out = list(steps), [], [], []
         self.marked, self.selected, self.saved, self.shown = [], [], [], []
         broken = []
+        self.output = io.StringIO()
 
         def ask(messages, load_more, state, notice, undo_label, *rest):
             if down is not None and len(offered) == down[0]:
@@ -2238,7 +2239,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
             user_labels=lambda *a: {}, ask_user_to_select_messages=ask,
             refresh_messages=lambda *a, **k: ([], set()), refresh_labels=lambda *a: 0,
             sync_playwright=lambda: FakePlaywright(), launch_browser=launch or (lambda *a, **k: mock.Mock()),
-            open_quietly=lambda url: True, console=Console(file=io.StringIO()), **fakes,
+            open_quietly=lambda url: True, console=Console(file=self.output), **fakes,
         ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir, *args]):
             savegmail.interactive_download_main()
         return gmail, sorted(os.listdir(save_dir)), offered
@@ -2672,6 +2673,16 @@ class RestoreKeyTest(unittest.TestCase):
         gmail, left, offered = self.run_session({"t0": "trash", "t1": "trash"}, [("restore", ["t1"])])
         self.assertEqual(gmail.places, {"t0": "trash", "t1": "inbox"})
         self.assertEqual(self.notices[1][0], " ↶ 1 email restored from trash")
+
+    def test_restore_after_trash_drops_the_undo_and_the_trash_total(self):
+        gmail, left, offered = self.run_session({"x": "inbox", "y": "inbox"},
+                                                [("trash", ["x", "y"]), ("restore", ["x"])])
+        self.assertEqual(offered[2], "trash (1)")
+        self.assertIn("0 emails saved · 1 moved to trash", self.output.getvalue())
+        gmail, left, offered = self.run_session({"x": "inbox"}, [("trash", ["x"]), ("restore", ["x"]), ("undo", [])])
+        self.assertIsNone(offered[2])
+        self.assertEqual(self.notices[2][0], " ↶ 1 email restored from trash")
+        self.assertNotIn("Done", self.output.getvalue())
 
 
 class SyncedMailboxApi(FakeService):
