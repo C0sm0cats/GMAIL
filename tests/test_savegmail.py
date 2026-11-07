@@ -2609,6 +2609,107 @@ class BackgroundSyncSessionTest(unittest.TestCase):
         self.assertEqual(result["badges"]["All mail"], ("2", "unread"))
 
 
+class HistoryMailboxApi(SyncedMailboxApi):
+    """SyncedMailboxApi with Gmail's history: change() records a label change, gets and lists are counted."""
+
+    def __init__(self, labels):
+        super().__init__(labels)
+        self.history_id, self.events, self.gets, self.lists, self.oldest = 100, [], [], 0, 0
+
+    def change(self, msg_id, labels):
+        self.mail[msg_id] = labels
+        self.history_id += 1
+        self.events.append((self.history_id, msg_id))
+
+    def getProfile(self, userId):
+        return FakeResult({"emailAddress": "me@example.com", "historyId": str(self.history_id)})
+
+    def get(self, userId, id, format, fields):
+        self.gets.append(id)
+        return super().get(userId, id, format, fields)
+
+    def list(self, userId, q="", maxResults=100, **kwargs):
+        if not q and maxResults > 1:
+            self.lists += 1  # a page of the view itself, not a tab counter or the total estimate
+        return super().list(userId, q=q, maxResults=maxResults, **kwargs)
+
+    def history(self):
+        api = self
+
+        class History:
+            def list(self, userId, startHistoryId, pageToken=None, maxResults=100):
+                if int(startHistoryId) < api.oldest:
+                    from unittest import mock
+                    raise savegmail.HttpError(mock.Mock(status=404, reason="Not Found"), b"Not Found")
+                return FakeResult({"historyId": str(api.history_id), "history": [
+                    {"id": str(number), "labelsRemoved": [{"message": {"id": msg_id}}]}
+                    for number, msg_id in api.events if number > int(startHistoryId)]})
+        return History()
+
+
+class HistorySyncSessionTest(unittest.TestCase):
+    """The background sync asks Gmail's history what changed instead of re-reading every loaded email."""
+
+    def run_session(self, api, step):
+        import io
+        import tempfile
+        from unittest import mock
+        from rich.console import Console
+        save_dir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, save_dir, True)
+        calls = []
+
+        def listed(*args, **kwargs):
+            return [{"id": msg_id, "from": f"S <{msg_id}@example.com>", "subject": f"Subject {msg_id}",
+                     "snippet": "", "internalDate": 1_700_000_000_000 - index, "labels": list(labels)}
+                    for index, (msg_id, labels) in enumerate(api.mail.items())], None
+
+        def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, *rest):
+            if not calls:
+                calls.append(None)
+                step(lambda: sync([dict(message) for message in messages]))
+            return "quit", []
+
+        with mock.patch.multiple(
+            savegmail, authenticate=lambda: object(), build=lambda *a, **k: api, user_labels=lambda *a: {},
+            list_candidate_messages=listed, ask_user_to_select_messages=ask, sync_playwright=lambda: FakePlaywright(),
+            launch_browser=lambda *a, **k: mock.Mock(), open_quietly=lambda url: True,
+            console=Console(file=io.StringIO()),
+        ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir]):
+            savegmail.interactive_download_main()
+
+    def test_sync_rereads_only_emails_changed_in_gmail(self):
+        api = HistoryMailboxApi({f"m{index}": ["INBOX", "UNREAD"] for index in range(300)})
+        results = []
+
+        def step(sync):
+            results.append(sync())  # nothing changed since the list was loaded
+            api.change("m7", ["INBOX"])  # read on the phone
+            results.append(sync())  # dropped by the list (Tab, an action) before it was applied
+            results.append(sync())  # so m7 is still reported
+            results[-1]["applied"]()
+            results.append(sync())  # applied: nothing new since
+        self.run_session(api, step)
+        unchanged, dropped, changed, after = results
+        self.assertEqual((unchanged["new"], unchanged["gone"], unchanged["labels"]), ([], set(), {}))
+        self.assertEqual(api.lists, 2)  # one listing for each of the 2 syncs that saw m7, none otherwise
+        self.assertEqual(dropped["labels"], {"m7": ["INBOX"]})
+        self.assertEqual(changed["labels"], {"m7": ["INBOX"]})
+        self.assertEqual(after["labels"], {})
+        self.assertEqual(api.gets, ["m7", "m7"])  # one messages.get per sync that saw m7, none per loaded email
+
+    def test_history_too_old_falls_back_to_the_full_sync(self):
+        api = HistoryMailboxApi({f"m{index}": ["INBOX", "UNREAD"] for index in range(3)})
+        results = []
+
+        def step(sync):
+            api.change("m1", ["INBOX"])
+            api.oldest = api.history_id + 1  # Gmail no longer keeps the history since the load
+            results.append(sync())
+        self.run_session(api, step)
+        self.assertEqual(results[0]["labels"], {"m0": ["INBOX", "UNREAD"], "m1": ["INBOX"], "m2": ["INBOX", "UNREAD"]})
+
+
 class LoadMoreSessionTest(unittest.TestCase):
     """m as interactive_download_main builds it: before:<seconds> from the view floor, known ids dropped."""
 
