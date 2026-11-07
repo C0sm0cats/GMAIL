@@ -1888,6 +1888,27 @@ class PdfFileNameTest(unittest.TestCase):
             self.assertEqual(self.read(os.path.join(save_dir, "a_b_c.txt")), b"X")
             self.assertEqual(len(result["files"]), 2)
 
+    def test_long_multibyte_names_are_truncated(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as save_dir:
+            # Linux refuses names over 255 bytes; the leading "A" puts each cut inside a 3-byte character.
+            results = [
+                self.save(save_dir, "A" + "請求書" * 40, attachment=("A" + "契約書" * 40 + ".pdf", b"CONTRACT")),
+                self.save(save_dir, "Ext", attachment=("a." + "x" * 300, b"EXT")),
+            ]
+            self.assertEqual(sum(len(result["files"]) for result in results), 4)
+            names = os.listdir(save_dir)
+            self.assertEqual(len(names), 4)
+            for name in names:
+                encoded = name.encode("utf-8")  # strict: no character cut in half
+                self.assertLessEqual(len(encoded), 255, name)
+            contract = next(name for name in names if name.startswith("A契約書"))
+            self.assertTrue(contract.endswith(".pdf"), contract)
+            self.assertEqual(self.read(os.path.join(save_dir, contract)), b"CONTRACT")
+            pdf = results[0]["pdf"]
+            self.assertIn("請求書", pdf)
+            self.assertEqual(self.read(os.path.join(save_dir, pdf)), b"%PDF-RENDERED")
+
     def test_same_attachment_name_gets_suffix(self):
         import tempfile
         with tempfile.TemporaryDirectory() as save_dir:
