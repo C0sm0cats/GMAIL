@@ -2349,14 +2349,17 @@ def interactive_download_main():
                     moved = [message for message in chosen if done is None or message["id"] in done]
                     notice = []
                     if moved:
+                        # u only puts back the emails that were in the Inbox (not sent or already archived ones).
+                        left_inbox = [message for message in moved if "INBOX" in message.get("labels", [])]
                         for message in moved:
                             message["labels"] = [label for label in message.get("labels", []) if label not in remove] + add
                         if view["name"] in {"Inbox", "Spam", "Archived"}:
                             drop(view, {message["id"] for message in moved})
                         if action == "archive":
-                            undo = {"label": "archive", "trashed": [], "files": {}, "archived": moved}
-                            notice = [[("class:checked", " ✓ "), ("", f"{plural(len(moved), 'email')} archived"),
-                                       ("class:dim class:keyhint", " · u undo")]]
+                            notice = [[("class:checked", " ✓ "), ("", f"{plural(len(moved), 'email')} archived")]]
+                            if left_inbox:
+                                undo = {"label": "archive", "trashed": [], "files": {}, "archived": left_inbox}
+                                notice[0].append(("class:dim class:keyhint", " · u undo"))
                         else:
                             notice = [[("class:checked", " ✓ "), ("", f"{plural(len(moved), 'email')} moved to the Inbox")]]
                     sign_out_if_expired(error)

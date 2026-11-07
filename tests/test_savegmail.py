@@ -1222,7 +1222,8 @@ class FakeGmail:
 
     def message(self, msg_id):
         return {"id": msg_id, "from": f"S <{msg_id}@example.com>", "subject": f"Subject {msg_id}",
-                "snippet": "", "internalDate": 1_700_000_000_000, "labels": []}
+                "snippet": "", "internalDate": 1_700_000_000_000,
+                "labels": ["INBOX"] if self.places.get(msg_id) == "inbox" else []}
 
     def list_candidate_messages(self, service, user_id, query="", max_results=50, page_token=None, in_trash=False):
         wanted = {"trash"} if in_trash else {"inbox", "archive"}
@@ -1472,6 +1473,14 @@ class UndoAfterDeleteTest(unittest.TestCase):
                                                 [("archive", ["A", "B"]), ("delete", ["B"]), ("undo", [])])
         self.assertEqual(offered[-2], "archive (1)")
         self.assertEqual(gmail.places, {"A": "inbox", "B": "gone"})
+
+    def test_archive_undo_only_puts_back_emails_that_were_in_the_inbox(self):
+        # e in All mail on an Inbox email and a sent or already archived one: u only undoes the first.
+        gmail, left, offered = self.run_session({"A": "inbox", "S": "archive"},
+                                                [("archive", ["A", "S"]), ("undo", [])])
+        self.assertEqual(offered[1], "archive (1)")
+        self.assertEqual(gmail.places, {"A": "inbox", "S": "archive"})
+        self.assertEqual(self.notices[2][0], " ↶ 1 email back in the Inbox")
 
     def test_partial_delete_keeps_the_deleted_emails_files(self):
         ids = [f"m{i}" for i in range(1500)]
