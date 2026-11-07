@@ -271,14 +271,20 @@ def sign_in(reason):
         )
         sys.exit(1)
 
+    printed_rows = []
+
     class QuietBrowser(webbrowser.BaseBrowser):
         # run_local_server hands us the sign-in URL here, so the prompt and opening are ours.
         def open(self, url, new=0, autoraise=True):
-            console.print(f"[yellow]![/] {reason}")
-            console.print(f"  [dim]Didn't open?[/] [link={url}]Open the sign-in page[/link]")
-            if VERBOSE:
-                # Soft wrap keeps the URL one logical line, so terminals still detect it as a link.
-                console.print(f"  {url}", style="dim", markup=False, soft_wrap=True)
+            # The URL in plain text: terminals without OSC 8 links (xterm, tmux, the console) show only
+            # a link's text. Soft wrap keeps each line one logical line (terminals detect the URL as a
+            # link, the erase below counts its rows).
+            lines = [(f"[yellow]![/] {escape(reason)}", f"! {reason}"),
+                     (f"  [dim]Didn't open? Open the sign-in page:[/]", "  Didn't open? Open the sign-in page:"),
+                     (f"  [dim][link={url}]{escape(url)}[/link][/]", f"  {url}")]
+            for markup, plain in lines:
+                console.print(markup, soft_wrap=True)
+                printed_rows.append(max(1, -(-cell_len(plain) // max(1, console.width))))
             return open_quietly(url)
 
     webbrowser.register("savegmail", None, QuietBrowser("savegmail"))
@@ -295,8 +301,8 @@ def sign_in(reason):
         console.print(f"[red]✗[/] Sign-in cancelled or refused ({escape(e.error or str(e))}), "
                       "run savegmail again to retry.")
         sys.exit(1)
-    if not VERBOSE and console.is_terminal:
-        console.file.write("\x1b[2F\x1b[J")  # erase the two prompt lines
+    if not VERBOSE and console.is_terminal and printed_rows:
+        console.file.write(f"\x1b[{sum(printed_rows)}F\x1b[J")  # erase the prompt lines
     debug(f"Token expires {convert_expiry_to_local_time(creds.expiry)}")
     return creds
 
@@ -305,15 +311,17 @@ class WrongAccountError(Exception):
     """Signed in again with another Google account than the one the list shows."""
 
 
-def sign_in_quietly(check=lambda creds: None, timeout=300):
+def sign_in_quietly(check=lambda creds: None, timeout=300, show_url=lambda url: None):
     """Browser OAuth sign-in that prints nothing, for use while the list is on screen.
 
     check(creds) runs before token.json is written, and may raise to refuse the sign-in.
+    show_url(url) gets the sign-in page, for the list to show in case the browser does not open.
     """
     flow = oauth_flow()  # a missing credentials.json raises, so r fails without closing the list
 
     class SilentBrowser(webbrowser.BaseBrowser):
         def open(self, url, new=0, autoraise=True):
+            show_url(url)
             return open_quietly(url)
 
     webbrowser.register("savegmail-silent", None, SilentBrowser("savegmail-silent"))
@@ -1515,7 +1523,7 @@ def new_picker_state():
             "cursor_id": None, "sort": "date",
             "folder": None,
             "syncing": False, "sync_note": None, "signed_out": False, "signing_in": False,
-            "sign_in_note": None}
+            "sign_in_note": None, "sign_in_url": None}
 
 
 SYNC_INTERVAL = 60  # seconds between automatic syncs while the list is shown
@@ -1535,8 +1543,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     sync(loaded) re-reads the view from Gmail in a worker thread and returns {"new", "gone",
     "labels", "badges", "total"}: it runs in the background when the list shows (after every action
     and Tab) and every SYNC_INTERVAL seconds. Results are applied in place (messages, badges).
-    When it fails because the Gmail session expired, r runs sign_in() (browser sign-in, in a worker
-    thread), then syncs again.
+    When it fails because the Gmail session expired, r runs sign_in(show_url) (browser sign-in, in a
+    worker thread; show_url(url) shows the sign-in page under the header until it ends), then syncs again.
     views are the tab names shown in the header, view the current one; the Trash view swaps
     enter / d (meaningless there) for R restore.
     load_more() runs in a worker thread and returns (older messages sorted newest first, whether even
@@ -1578,8 +1586,15 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         # (header, blank, column titles, list, blank, footer)
         return max(1, min(wanted, size().rows - 7 - (FOOTER_LINES - 1) - notice_rows()))
 
+    def notice_lines():
+        """The notice, then the sign-in page while r waits for it (in case the browser did not open)."""
+        if state["signing_in"] and state.get("sign_in_url"):
+            return notice + [[("class:warn", " ! "), ("", "Didn't open? Open the sign-in page: "),
+                              ("class:dim", state["sign_in_url"])]]
+        return notice
+
     def notice_rows():
-        return sum(screen_rows(line, size().columns) for line in notice)
+        return sum(screen_rows(line, size().columns) for line in notice_lines())
 
     def clamp():
         indexes = visible()
@@ -1648,7 +1663,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     def render_notice():
         parts = []
-        for line in notice:
+        for line in notice_lines():
             if parts:
                 parts.append(("", "\n"))
             parts += line
@@ -2032,10 +2047,14 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             await asyncio.sleep(SYNC_INTERVAL)
 
     async def run_sign_in(app):
-        state["signing_in"] = True
+        def show_url(url):  # called from the sign-in thread; invalidate is thread-safe
+            state["sign_in_url"] = url
+            app.invalidate()
+
+        state["signing_in"], state["sign_in_url"] = True, None
         app.invalidate()
         try:
-            await in_background(sign_in)
+            await in_background(sign_in, show_url)
         except Exception as exc:
             debug(f"Sign-in failed: {exc}")
             failure = str(exc) if isinstance(exc, WrongAccountError) else "sign-in failed"
@@ -2043,7 +2062,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         else:
             state["signed_out"] = False
         finally:
-            state["signing_in"] = False
+            state["signing_in"], state["sign_in_url"] = False, None
             app.invalidate()
         if not state["signed_out"]:
             await run_sync(app)
@@ -2175,11 +2194,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         "group.delete": "fg:ansired bold",
         "warn": "fg:ansiyellow bold",
     })
-    windows = [Window(FormattedTextControl(render_header), height=1)]
-    if notice:
-        # Wrapped, not cut: the cause of a failure is often longer than the line.
-        windows.append(Window(FormattedTextControl(render_notice), wrap_lines=True,
-                              height=lambda: Dimension.exact(notice_rows())))
+    windows = [Window(FormattedTextControl(render_header), height=1),
+               # Wrapped, not cut: the cause of a failure is often longer than the line. No rows when empty.
+               Window(FormattedTextControl(render_notice), wrap_lines=True,
+                      height=lambda: Dimension.exact(notice_rows()))]
     windows += [
         Window(height=1),
         Window(FormattedTextControl(render_columns), height=1),
@@ -2696,8 +2714,8 @@ def interactive_download_main():
         def adopt(fresh):
             creds.token, creds._refresh_token, creds.expiry = fresh.token, fresh.refresh_token, fresh.expiry
 
-        def sign_in_again():
-            adopt(sign_in_quietly(check_account))
+        def sign_in_again(show_url=lambda url: None):
+            adopt(sign_in_quietly(check_account, show_url=show_url))
 
         def sync_for(view):
             def sync(loaded):

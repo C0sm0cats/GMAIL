@@ -877,7 +877,7 @@ class PickerTest(unittest.TestCase):
 
         messages = make_messages(2)
         state = savegmail.new_picker_state()
-        action, _ = pick_later("rq", messages, sync=sync, sign_in=lambda: signed_in.append(True), state=state)
+        action, _ = pick_later("rq", messages, sync=sync, sign_in=lambda show_url: signed_in.append(True), state=state)
         self.assertEqual(signed_in, [True])
         self.assertFalse(state["signed_out"])
         self.assertEqual([message["id"] for message in messages], ["0"])
@@ -910,7 +910,7 @@ class PickerTest(unittest.TestCase):
         def sync(loaded):
             raise RefreshError("invalid_grant")
 
-        def sign_in():
+        def sign_in(show_url):
             raise savegmail.WrongAccountError("signed in as other@example.com, not me@example.com")
 
         state = savegmail.new_picker_state()
@@ -962,7 +962,7 @@ class PickerTest(unittest.TestCase):
 
         cases = [("\t", {"sync": slow_sync}, "next_view"), ("q", {"sync": slow_sync}, "quit"),
                  ("m\t", {"load_more": slow_load_more}, "next_view"),
-                 ("rq", {"sync": expired, "sign_in": lambda: release.wait(10)}, "quit")]
+                 ("rq", {"sync": expired, "sign_in": lambda show_url: release.wait(10)}, "quit")]
         for keys, kwargs, expected in cases:
             with self.subTest(keys=keys):
                 messages = make_messages(2)
@@ -973,9 +973,28 @@ class PickerTest(unittest.TestCase):
                 self.assertEqual([message["id"] for message in messages], ["0", "1"])  # result dropped
         self.assertEqual(applied, [])
 
+    def test_r_shows_the_sign_in_page_while_waiting(self):
+        # The browser may not open (no default browser, another desktop): the page is shown to open by hand.
+        import threading
+        from google.auth.exceptions import RefreshError
+        url = "https://accounts.example.invalid/o/oauth2/auth?client_id=id.example.invalid&state=abc"
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def sync(loaded):
+            raise RefreshError("invalid_grant")
+
+        def sign_in(show_url):
+            show_url(url)
+            release.wait(10)
+
+        text = screen_after("r", 100, 20, sync=sync, sign_in=sign_in)
+        self.assertIn("Didn't open? Open the sign-in page:", text)
+        self.assertIn(url, text.replace("\n", ""))
+
     def test_r_does_nothing_while_signed_in(self):
         signed_in = []
-        action, _ = pick_later("rq", make_messages(2), sign_in=lambda: signed_in.append(True))
+        action, _ = pick_later("rq", make_messages(2), sign_in=lambda show_url: signed_in.append(True))
         self.assertEqual((signed_in, action), ([], "quit"))
 
     def test_cursor_follows_email_across_runs(self):
@@ -4142,6 +4161,33 @@ class AuthenticateTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 1)
         self.assertIn("Gmail unreachable", self.output.getvalue())
 
+    def test_launch_sign_in_shows_the_url_in_plain_text_then_erases_it(self):
+        # Terminals without OSC 8 links (xterm, tmux, the Linux console) show only a link's text.
+        import datetime
+        import io
+        import re
+        import webbrowser
+        from unittest import mock
+        from rich.console import Console
+        url = "https://accounts.example.invalid/o/oauth2/auth?response_type=code&client_id=id.example.invalid&state=abc"
+        fresh = mock.Mock(expiry=datetime.datetime(2030, 1, 1))
+
+        class Flow:
+            def run_local_server(self, browser, **kwargs):
+                webbrowser.get(browser).open(url)
+                return fresh
+
+        output = io.StringIO()
+        with mock.patch.object(savegmail, "oauth_flow", lambda: Flow()), \
+                mock.patch.object(savegmail, "open_quietly", return_value=False), \
+                mock.patch.object(savegmail, "console", Console(file=output, width=40, force_terminal=True)):
+            self.assertIs(self.real_sign_in("Sign in to Gmail in your browser."), fresh)
+        text = re.sub(r"\x1b\]8;[^\x1b]*\x1b\\", "", output.getvalue())  # drop the OSC 8 link escapes
+        text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        self.assertIn("  " + url + "\n", text)
+        # 1 row for the reason, 1 for "Didn't open?" (37 cells), 3 for the URL (2 + 104 cells in 40 columns).
+        self.assertTrue(text.endswith("\x1b[5F\x1b[J"), repr(text[-20:]))
+
     def test_ctrl_c_while_waiting_for_sign_in_quits_cleanly(self):
         from unittest import mock
         flow = mock.Mock()
@@ -4231,6 +4277,26 @@ class TokenFileModeTest(unittest.TestCase):
                         self.assertEqual(token.read(), '{"refresh_token": "fake"}')
         finally:
             os.umask(old_umask)
+
+    def test_quiet_sign_in_hands_the_url_to_the_list(self):
+        import tempfile
+        import webbrowser
+        from unittest import mock
+        url = "https://accounts.example.invalid/o/oauth2/auth?state=abc"
+        test = self
+
+        class Flow:
+            def run_local_server(self, browser, **kwargs):
+                webbrowser.get(browser).open(url)
+                return test.FakeCreds()
+
+        shown = []
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(savegmail, "oauth_flow", lambda: Flow()), \
+                mock.patch.object(savegmail, "open_quietly", return_value=False), \
+                mock.patch.object(savegmail, "TOKEN_PATH", os.path.join(folder, "token.json")):
+            savegmail.sign_in_quietly(show_url=shown.append)
+        self.assertEqual(shown, [url])
 
     def test_quiet_sign_in_gives_up_after_a_while(self):
         # A closed sign-in tab must not leave "signing in…" forever with r disabled.
