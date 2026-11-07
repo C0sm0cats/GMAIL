@@ -2942,6 +2942,35 @@ class UndoAfterDeleteTest(unittest.TestCase):
                     self.assertEqual(gmail.places, {"A": "trash", "B": "inbox"})
 
 
+    def test_gmail_error_shows_its_reason_not_the_url(self):
+        # Gmail refuses a change (quota, scopes): the notice says why, not a request URL cut at 80 characters.
+        import json
+        from googleapiclient.discovery import build
+        from googleapiclient.http import HttpMockSequence
+        body = json.dumps({"error": {"code": 403, "message": "Request had insufficient authentication scopes."}})
+        service = build("gmail", "v1", http=HttpMockSequence([({"status": "403"}, body)]), static_discovery=True)
+        try:
+            service.users().messages().list(userId="me", q="in:inbox", maxResults=100).execute()
+        except savegmail.HttpError as exc:
+            error = exc
+        reason = "403 Request had insufficient authentication scopes."
+        for action, ids in [("star", ["B"]), ("unread", ["B"]), ("archive", ["B"]), ("trash", ["B"]),
+                            ("undo", []), ("next_view", [])]:
+            with self.subTest(action=action):
+                self.run_session({"A": "inbox", "B": "inbox"}, [("trash", ["A"]), (action, ids)],
+                                 down=(1, error))
+                shown = "\n".join(self.notices[2])
+                self.assertIn(reason, shown)
+                self.assertNotIn("googleapis.com", shown)
+
+    def test_failure_notice_gives_the_reason_of_a_gmail_error(self):
+        from unittest import mock
+        error = savegmail.HttpError(mock.Mock(status=429, reason="Too Many Requests"),
+                                    b'{"error": {"code": 429, "message": "User-rate limit exceeded."}}',
+                                    uri="https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify?alt=json")
+        self.assertEqual(savegmail.error_text(error), "429 User-rate limit exceeded.")
+        self.assertEqual(savegmail.error_text(OSError("timed out")), "timed out")
+
     def test_chromium_that_does_not_start_keeps_the_list(self):
         # No display, missing system libraries, or a failed install: p, enter and s show a ✗ and keep the
         # list and its undo; playwright install only runs when the executable is missing.

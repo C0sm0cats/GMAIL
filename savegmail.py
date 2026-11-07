@@ -2415,7 +2415,7 @@ def preview_messages(service, user_id, messages, browser, preview_dir):
             except KeyboardInterrupt:
                 break
             except Exception as exc:
-                failed[message["id"]] = str(exc)
+                failed[message["id"]] = error_text(exc)
             else:
                 # Open each one as soon as it is ready instead of waiting for the whole selection.
                 path = os.path.join(preview_dir, result["pdf"])
@@ -2456,7 +2456,7 @@ def save_messages(service, user_id, messages, save_dir, browser, trash_after):
             except KeyboardInterrupt:
                 break
             except Exception as exc:
-                failed[message["id"]] = str(exc)
+                failed[message["id"]] = error_text(exc)
                 print_message_line("[red]✗[/]", message, "failed", sender_w)
                 console.print(f"      [dim]└ {escape(str(exc))}[/]")
             else:
@@ -2471,7 +2471,7 @@ def save_messages(service, user_id, messages, save_dir, browser, trash_after):
             for msg_id, exc in trash_messages(service, user_id, list(results)).items():
                 # Email stays in Gmail, so drop its files to keep a retry duplicate-free.
                 remove_files(results.pop(msg_id)["files"])
-                failed[msg_id] = f"could not move to trash: {exc}"
+                failed[msg_id] = f"could not move to trash: {error_text(exc)}"
 
     saved = [message for message in messages if message["id"] in results]
     files = {msg_id: result["files"] for msg_id, result in results.items()}
@@ -2487,13 +2487,22 @@ def stopped_notice(done, total):
     return [("class:error", " ✗ "), ("", f"Stopped after {done} of {total}"), ("class:dim", " · Ctrl+C")]
 
 
+def error_text(exc):
+    """Short text for an error in a notice: for a Gmail HttpError its code and reason, not the long request URL."""
+    if isinstance(exc, HttpError):
+        reason = (exc.reason or "").strip()
+        if reason:
+            return f"{exc.status_code} {reason}"
+    return str(exc)
+
+
 def failure_notice(messages, failed, limit=3):
     """Notice lines for failed emails (they stay in Gmail and selected, ready for a retry)."""
     by_id = {message["id"]: message for message in messages}
     lines = []
     for msg_id, error in list(failed.items())[:limit]:
         subject = fit(by_id[msg_id].get("subject") or "No Subject", 40).rstrip()
-        lines.append([("class:error", " ✗ "), ("", subject), ("class:dim", " · " + fit(str(error), 80).rstrip())])
+        lines.append([("class:error", " ✗ "), ("", subject), ("class:dim", " · " + fit(error_text(error), 80).rstrip())])
     if len(failed) > limit:
         lines.append([("class:dim", f"   … and {len(failed) - limit} more failed")])
     return lines
@@ -2742,7 +2751,7 @@ def interactive_download_main():
                     if view["more"]:
                         view["total"] = estimate_total(service, user_id, view["query"], view["in_trash"])
             except GMAIL_ERRORS as exc:
-                return [[("class:error", " ✗ "), ("", "Refresh failed"), ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
+                return [[("class:error", " ✗ "), ("", "Refresh failed"), ("class:dim", " · " + fit(error_text(exc), 80).rstrip())]]
             drop(view, removed)
             try:
                 # Read / unread, stars… changed in Gmail meanwhile (web, phone, o).
@@ -2965,7 +2974,7 @@ def interactive_download_main():
                         parts.append(f"{plural(len(removed), 'file')} removed")
                     notice = [[("class:checked", " ↶ "), ("", " · ".join(parts) or "Nothing undone")]]
                     notice += failure_notice(undo["trashed"] + undo.get("archived", []),
-                                             {msg_id: str(exc) for msg_id, exc in errors.items()})
+                                             {msg_id: error_text(exc) for msg_id, exc in errors.items()})
                     sign_out_if_expired(*errors.values())
                     stuck = [message for message in undo["trashed"] if message["id"] in errors]
                     stuck_archived = [message for message in undo.get("archived", []) if message["id"] in errors]
@@ -3001,7 +3010,7 @@ def interactive_download_main():
                         notice.append([("class:error", " ✗ "),
                                        ("", f"Could not {'archive' if action == 'archive' else 'move'} "
                                             f"{plural(len(chosen) - len(moved), 'email')}"),
-                                       ("class:dim", " · " + fit(str(error), 80).rstrip())])
+                                       ("class:dim", " · " + fit(error_text(error), 80).rstrip())])
 
                 elif action == "restore":
                     with console.status("[dim]Restoring from trash…[/]"):
@@ -3018,7 +3027,7 @@ def interactive_download_main():
                                 if trashed or undo.get("archived") or undo["files"] else None)
                     notice = [[("class:checked", " ↶ "), ("", f"{plural(len(restored), 'email')} restored from trash")]
                               if restored else [("class:error", " ✗ "), ("", "Nothing restored from trash")]]
-                    notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
+                    notice += failure_notice(chosen, {msg_id: error_text(exc) for msg_id, exc in errors.items()})
                     sign_out_if_expired(*errors.values())
 
                 elif action == "trash":
@@ -3033,7 +3042,7 @@ def interactive_download_main():
                     notice = [[("class:checked", " ✓ "), ("", f"{plural(len(trashed), 'email')} moved to trash (not saved)"),
                                ("class:dim class:keyhint", " · u undo")]
                               if trashed else [("class:error", " ✗ "), ("", "Nothing moved to trash")]]
-                    notice += failure_notice(chosen, {msg_id: str(exc) for msg_id, exc in errors.items()})
+                    notice += failure_notice(chosen, {msg_id: error_text(exc) for msg_id, exc in errors.items()})
                     sign_out_if_expired(*errors.values())
 
                 elif action == "open":
@@ -3060,7 +3069,7 @@ def interactive_download_main():
                     if error is not None:
                         notice.append([("class:error", " ✗ "), ("", "Could not change the read state" + (
                             f" of {plural(len(chosen) - len(changed), 'email')}" if changed else "")),
-                                       ("class:dim", " · " + fit(str(error), 80).rstrip())])
+                                       ("class:dim", " · " + fit(error_text(error), 80).rstrip())])
 
                 elif action == "star":
                     # Like Gmail: star them all, unless they all are already starred.
@@ -3078,7 +3087,7 @@ def interactive_download_main():
                     if error is not None:
                         notice.append([("class:error", " ✗ "), ("", "Could not change the star" + (
                             f" of {plural(len(chosen) - len(changed), 'email')}" if changed else "")),
-                                       ("class:dim", " · " + fit(str(error), 80).rstrip())])
+                                       ("class:dim", " · " + fit(error_text(error), 80).rstrip())])
 
                 elif action == "empty_trash":
                     trash_ids = []
@@ -3106,7 +3115,7 @@ def interactive_download_main():
                         totals["deleted"] += len(deleted & set(trash_ids))
                     if error is not None:
                         notice.append([("class:error", " ✗ "), ("", "Could not empty the trash"),
-                                       ("class:dim", " · " + fit(str(error), 80).rstrip())])
+                                       ("class:dim", " · " + fit(error_text(error), 80).rstrip())])
 
                 elif action == "delete":
                     with console.status("[dim]Deleting…[/]"):
@@ -3121,7 +3130,7 @@ def interactive_download_main():
                         notice = [[("class:checked", " ✓ "), ("", f"{plural(len(deleted), 'email')} permanently deleted")]]
                     if error is not None:
                         notice.append([("class:error", " ✗ "), ("", f"Could not delete {plural(len(ids) - len(deleted), 'email')}"),
-                                       ("class:dim", " · " + fit(str(error), 80).rstrip())])
+                                       ("class:dim", " · " + fit(error_text(error), 80).rstrip())])
 
                 else:
                     trash_after = action == "download"
@@ -3166,7 +3175,7 @@ def interactive_download_main():
                                ("class:dim class:keyhint", " · r to sign in again")]]
                 else:
                     notice = [[("class:error", " ✗ "), ("", "Gmail request failed"),
-                               ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
+                               ("class:dim", " · " + fit(error_text(exc), 80).rstrip())]]
 
             console.clear()
             console.print(banner)
