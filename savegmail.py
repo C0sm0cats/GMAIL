@@ -131,6 +131,10 @@ def measure_pdf_margins(browser, header_template, footer_template):
         measurement_page.close()
 
 
+class BrowserStartError(Exception):
+    """Chromium could not be started (missing display or system libraries, failed install, ...)."""
+
+
 def launch_browser(playwright, headed=False):
     """Launch full Chromium (new headless mode unless headed), installing it if missing."""
     def launch():
@@ -138,7 +142,11 @@ def launch_browser(playwright, headed=False):
 
     try:
         return launch()
-    except Exception as error:
+    except PlaywrightError as error:
+        # Only a missing executable is fixed by an install; any other failure (no display,
+        # missing system libraries) would reinstall for nothing and fail the same way.
+        if "Executable doesn't exist" not in str(error):
+            raise
         warn(f"Playwright Chromium is not ready: {error}")
         console.print("[dim]Installing Chromium for Playwright…[/]")
         subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
@@ -2277,6 +2285,10 @@ def interactive_download_main():
         empty_trash(service)
         return
 
+    if args.headed and sys.platform.startswith("linux") and not (
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        parser.error("--headed needs a graphical display (DISPLAY or WAYLAND_DISPLAY is not set)")
+
     console.clear()
     creds = authenticate()
     playwright = browser = preview_dir = None
@@ -2295,9 +2307,13 @@ def interactive_download_main():
         """Start Chromium on first use and keep it; start it again if it was closed or crashed."""
         nonlocal playwright, browser
         if browser is None or not browser_alive():
-            playwright = playwright or sync_playwright().start()
-            with console.status("[dim]Preparing Chromium…[/]"):
-                browser = launch_browser(playwright, headed=args.headed)
+            try:
+                playwright = playwright or sync_playwright().start()
+                with console.status("[dim]Preparing Chromium…[/]"):
+                    browser = launch_browser(playwright, headed=args.headed)
+            except Exception as error:
+                browser = None
+                raise BrowserStartError(str(error)) from error
         return browser
 
     try:
@@ -2756,6 +2772,11 @@ def interactive_download_main():
                     if len(saved) + len(failed) < len(chosen):
                         notice.append(stopped_notice(len(saved) + len(failed), len(chosen)))
                     notice += failure_notice(chosen, failed)
+            except BrowserStartError as exc:
+                # Nothing was rendered nor changed: back to the list, the selection and undo kept.
+                debug(f"Chromium could not start: {exc}")
+                notice = [[("class:error", " ✗ "), ("", "Could not start Chromium"),
+                           ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
             except GMAIL_ERRORS as exc:
                 # Session expired or Gmail unreachable midway: back to the list, the undo kept as it was.
                 debug(f"Gmail request failed: {exc}")

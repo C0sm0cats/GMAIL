@@ -2193,6 +2193,51 @@ class UndoAfterDeleteTest(unittest.TestCase):
                     self.assertEqual(gmail.places, {"A": "trash", "B": "inbox"})
 
 
+    def test_chromium_that_does_not_start_keeps_the_list(self):
+        # No display, missing system libraries, or a failed install: p, enter and s show a ✗ and keep the
+        # list and its undo; playwright install only runs when the executable is missing.
+        import subprocess
+        from unittest import mock
+        no_display = "BrowserType.launch: Looks like you launched a headed browser without having a XServer running."
+        missing = "BrowserType.launch: Executable doesn't exist at /nowhere/chrome"
+        failed_install = subprocess.CalledProcessError(1, ["playwright", "install", "chromium"])
+        cases = [(no_display, None, 0), (missing, None, 1), (missing, failed_install, 1)]
+        launch_browser = savegmail.launch_browser  # run_session replaces it by launch
+        for error, install_error, installs in cases:
+            for action in ["save", "download", "preview"]:
+                with self.subTest(error=error, install_error=install_error, action=action):
+                    fake = mock.Mock()
+                    fake.chromium.launch.side_effect = savegmail.PlaywrightError(error)
+                    installed = []
+
+                    def run(command, **kwargs):
+                        installed.append(command)
+                        if install_error is not None:
+                            raise install_error
+                        return subprocess.CompletedProcess(command, 0)
+                    with mock.patch.object(savegmail.subprocess, "run", run):
+                        gmail, left, offered = self.run_session(
+                            {"A": "inbox", "B": "inbox"}, [("trash", ["A"]), (action, ["B"])],
+                            launch=lambda playwright, headed=False: launch_browser(fake, headed))
+                    self.assertEqual(len(installed), installs)
+                    self.assertTrue(self.notices[2][0].startswith(" ✗ Could not start Chromium · "), self.notices[2])
+                    self.assertEqual(offered[1:], ["trash (1)"] * 2)
+                    self.assertEqual(gmail.places, {"A": "trash", "B": "inbox"})
+                    self.assertEqual(left, [])
+
+    def test_headed_without_display_is_refused_at_start(self):
+        from unittest import mock
+        env = {key: value for key, value in os.environ.items() if key not in {"DISPLAY", "WAYLAND_DISPLAY"}}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "platform", "linux"), \
+                mock.patch.object(sys, "argv", ["savegmail", "--headed"]), \
+                mock.patch.object(savegmail, "authenticate") as authenticate, \
+                mock.patch("sys.stderr", new_callable=__import__("io").StringIO) as stderr:
+            with self.assertRaises(SystemExit):
+                savegmail.interactive_download_main()
+        authenticate.assert_not_called()
+        self.assertIn("--headed needs a graphical display", stderr.getvalue())
+
+
 class SaveMarksTest(unittest.TestCase):
     """s keeps the emails in Gmail, marked ✓ in every view and no longer selected; u takes back only its own ✓."""
 
