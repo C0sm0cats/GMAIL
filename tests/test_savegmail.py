@@ -4032,6 +4032,48 @@ class LauncherVenvTest(unittest.TestCase):
         self.assertFalse(any("venv" in call or "pip install" in call for call in calls))
 
 
+class ContinuousIntegrationTest(unittest.TestCase):
+    """The CI runs the README's test command from the launcher's minimum Python, with its dependencies."""
+
+    def setUp(self):
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        workflow = os.path.join(repo, ".github", "workflows", "tests.yml")
+        self.assertTrue(os.path.exists(workflow), "no .github/workflows/tests.yml")
+        with open(workflow) as handle:
+            self.workflow = handle.read()
+        with open(os.path.join(repo, "run-savegmail.sh")) as handle:
+            self.launcher = handle.read()
+        with open(os.path.join(repo, "README.md")) as handle:
+            self.readme = handle.read()
+
+    @staticmethod
+    def packages(text):
+        """The package names continued by backslashes after pip's --upgrade-strategy eager."""
+        lines = text.split("--upgrade-strategy eager \\\n", 1)[1].splitlines()
+        names = []
+        for line in lines:
+            names.append(line.strip().rstrip("\\").strip().split(";")[0].strip())
+            if not line.rstrip().endswith("\\"):
+                break
+        return names
+
+    def test_matrix_starts_at_the_launcher_minimum(self):
+        import re
+        minimum = re.search(r"sys\.version_info < \((\d+), (\d+)\)", self.launcher).groups()
+        versions = re.search(r"python-version: \[([^\]]*)\]", self.workflow).group(1)
+        versions = [tuple(v.strip(' "\'').split(".")) for v in versions.split(",")]
+        self.assertEqual(min(versions, key=lambda v: tuple(map(int, v))), minimum)
+
+    def test_installs_the_launcher_dependencies(self):
+        self.assertEqual(self.packages(self.workflow), self.packages(self.launcher))
+        self.assertIn("playwright install --with-deps chromium", self.workflow)
+
+    def test_runs_the_readme_test_command(self):
+        command = ".venv/bin/python -m unittest discover -s tests"
+        self.assertIn(command, self.readme)
+        self.assertIn("run: " + command, self.workflow)
+
+
 class AuthenticateTest(unittest.TestCase):
     """Launch sign-in: only a refused refresh asks to sign in again; offline says so and quits."""
 
