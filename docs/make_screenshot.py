@@ -110,7 +110,7 @@ def svg(screen):
         cells = []
         for x in range(COLUMNS):
             cell = row[x]
-            cells.append((cell.data, cell.fg, cell.bold, cell.bg, cell.reverse))
+            cells.append((cell.data, cell.fg, cell.bold, cell.bg, cell.reverse, cell.underscore))
         lines.append(cells)
     while lines and not any(cell[0].strip() for cell in lines[-1]):
         lines.pop()
@@ -135,7 +135,7 @@ def svg(screen):
         while x < len(cells):
             cell = cells[x]
             char, fg, bold = cell[0], cell[1], cell[2]
-            bg, reverse = (cell[3], cell[4]) if len(cell) > 3 else ("default", False)
+            bg, reverse, underline = (cell[3], cell[4], cell[5]) if len(cell) > 3 else ("default", False, False)
             fill, back = color(fg, PALETTE["default"]), color(bg, None)
             if reverse:
                 fill, back = color(bg, BACKGROUND), color(fg, PALETTE["default"])
@@ -146,6 +146,9 @@ def svg(screen):
             if back:
                 out.append(f'<rect x="{left:.1f}" y="{top:.1f}" width="{CELL_W * span:.1f}" height="{CELL_H}" '
                            f'fill="{back}"/>')
+            if underline:
+                out.append(f'<rect x="{left:.1f}" y="{top + CELL_H - 3:.1f}" width="{CELL_W * span:.1f}" height="1" '
+                           f'fill="{fill}"/>')
             if char.strip():
                 weight = ' font-weight="bold"' if bold else ""
                 if wide:  # emoji: let the viewer's emoji font draw it
