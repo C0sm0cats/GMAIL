@@ -192,6 +192,17 @@ class TextHelpersTest(unittest.TestCase):
         self.assertEqual(row["subject"], "✈ ⚠ FR Météo ☀ 👨👩👧 👍 ❤")
         self.assertIn(text.lower(), row["haystack"])
 
+    def test_column_widths_do_not_remeasure_rows_on_every_frame(self):
+        from unittest import mock
+        # Over rich's 4096-entry cache, measuring CJK text on every frame made each key take 80+ ms at 5 000.
+        rows = [savegmail.message_row({"id": str(i), "from": f"山田太郎{i} <a{i}@b.jp>",
+                                       "subject": f"【お知らせ{'漢字' * (i % 9)}】No.{i}"}) for i in range(5000)]
+        expected = savegmail.column_widths(rows, 120)
+        with mock.patch.object(savegmail, "cell_len", wraps=savegmail.cell_len) as measured:
+            self.assertEqual(savegmail.column_widths(rows, 120), expected)
+        self.assertEqual(measured.call_count, 0)
+        self.assertEqual(expected[0], 12)  # "山田太郎4999": four double-width kanji and four digits.
+
     def test_draft(self):
         detail = {"id": "1", "labelIds": ["DRAFT"], "payload": {"headers": [{"name": "From", "value": "Me <me@x>"}]}}
         row = savegmail.message_row(savegmail.to_candidate(detail))

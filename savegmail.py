@@ -1719,6 +1719,9 @@ def message_row(message):
         # The display copies only: haystack and party below keep the original text.
         "sender": plain_emoji(sender),
         "subject": plain_emoji(subject),
+        # Display widths, measured once: column_widths runs on every frame over all rows.
+        "sender_cells": cell_len(plain_emoji(sender)),
+        "subject_cells": cell_len(plain_emoji(subject)),
         "snippet": plain_emoji(snippet),
         "attachment": bool(message.get("attachment")),
         "kind": kind,
@@ -1736,11 +1739,11 @@ def message_row(message):
 def column_widths(rows, total_width):
     """Return (sender, subject, snippet) widths for the space left after fixed columns."""
     fixed = 4 + 5 + DATE_W + 2 + SIZE_W + 2  # cursor + checkbox, star + attachment + unread dot, date, size, gaps
-    sender_w = min(max((cell_len(row["sender"]) for row in rows), default=6), 22)
+    sender_w = min(max((row["sender_cells"] for row in rows), default=6), 22)
     # Narrow screens: the sender gets shorter (down to 8) before the subject goes under 20.
     sender_w = min(sender_w, max(8, total_width - fixed - 2 - 1 - 20))
     rest = max(0, total_width - fixed - sender_w - 2 - 1)
-    longest_subject = max((cell_len(row["subject"]) for row in rows), default=7)
+    longest_subject = max((row["subject_cells"] for row in rows), default=7)
     subject_w = min(longest_subject, max(20, int(rest * 0.6)), rest)
     snippet_w = rest - subject_w - 2
     if snippet_w < 10:
