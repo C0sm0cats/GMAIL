@@ -2902,7 +2902,16 @@ def interactive_download_main():
         shown_dir = home_relative(save_dir)
 
         try:
-            account = service.users().getProfile(userId=user_id).execute().get("emailAddress", user_id)
+            try:
+                account = service.users().getProfile(userId=user_id).execute().get("emailAddress", user_id)
+            except RefreshError as error:
+                # Revoked while the saved access token had not expired yet: authenticate() could not tell.
+                debug(f"Session refused at launch: {error}")
+                fresh = sign_in("Gmail session expired, sign in again in your browser.")
+                save_token(fresh)
+                # In place: the sync connection built further down shares these credentials.
+                creds.token, creds._refresh_token, creds.expiry = fresh.token, fresh.refresh_token, fresh.expiry
+                account = service.users().getProfile(userId=user_id).execute().get("emailAddress", user_id)
         except NETWORK_ERRORS as error:
             exit_unreachable(error)
         def make_banner():

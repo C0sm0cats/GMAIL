@@ -3852,7 +3852,7 @@ class SignInAgainSessionTest(unittest.TestCase):
     def credentials(token):
         return savegmail.Credentials(token=token, refresh_token="ref" + token[3:], client_id="id", client_secret="s")
 
-    def run_session(self, step, signs_in_as, other_launch_writes=None, credentials_path=None):
+    def run_session(self, step, signs_in_as, other_launch_writes=None, credentials_path=None, revoked_at_launch=()):
         import io
         import tempfile
         from unittest import mock
@@ -3861,7 +3861,7 @@ class SignInAgainSessionTest(unittest.TestCase):
         self.addCleanup(__import__("shutil").rmtree, folder, True)
         token_path = os.path.join(folder, "token.json")
         creds = self.credentials("tokA")
-        revoked, connections, calls = set(), [], []
+        revoked, connections, calls = set(revoked_at_launch), [], []
 
         def build(*args, credentials, **kwargs):
             connections.append(credentials)
@@ -3869,7 +3869,9 @@ class SignInAgainSessionTest(unittest.TestCase):
 
         class Flow:
             def run_local_server(self, **kwargs):
-                return SignInAgainSessionTest.credentials(signs_in_as)
+                fresh = SignInAgainSessionTest.credentials(signs_in_as)
+                fresh.expiry = __import__("datetime").datetime(2100, 1, 1)  # a real sign-in sets it
+                return fresh
 
         def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, sign_in):
             if not calls:
@@ -3910,6 +3912,17 @@ class SignInAgainSessionTest(unittest.TestCase):
         creds, connections, token = self.run_session(step, signs_in_as="tokA2")
         self.assertEqual((results[0]["new"], results[0]["gone"]), ([], set()))
         self.assertEqual((creds.token, creds.refresh_token, token), ("tokA2", "refA2", "tokA2"))
+        self.assertTrue(all(connection is creds for connection in connections[:2]))  # service and sync_service
+
+    def test_token_revoked_before_it_expires_signs_in_at_launch(self):
+        # Access revoked within the hour: authenticate() keeps the unexpired token, Gmail refuses it at launch.
+        results = []
+
+        def step(sync, sign_in, loaded):
+            results.append(sync(loaded))
+        creds, connections, token = self.run_session(step, signs_in_as="tokA2", revoked_at_launch={"tokA"})
+        self.assertEqual((creds.token, creds.refresh_token, token), ("tokA2", "refA2", "tokA2"))
+        self.assertEqual(results[0]["gone"], set())
         self.assertTrue(all(connection is creds for connection in connections[:2]))  # service and sync_service
 
     def test_r_with_another_account_is_refused(self):
