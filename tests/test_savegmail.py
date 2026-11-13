@@ -3368,6 +3368,25 @@ class UndoAfterDeleteTest(unittest.TestCase):
                     self.assertEqual(gmail.places, {"A": "trash", "B": "inbox"})
                     self.assertEqual(left, [])
 
+    def test_missing_system_library_is_named_with_its_fix(self):
+        from unittest import mock
+        log = ("BrowserType.launch: Target page, context or browser has been closed\nBrowser logs:\n\n"
+               "<launching> /x/chrome --headless\n[pid=12][err] /x/chrome: error while loading shared "
+               "libraries: libglib-2.0.so.0: cannot open shared object file: No such file or directory")
+        launch_browser = savegmail.launch_browser  # run_session replaces it by launch
+        for action in ["save", "download", "preview"]:
+            with self.subTest(action=action):
+                fake = mock.Mock()
+                fake.chromium.launch.side_effect = savegmail.PlaywrightError(log)
+                gmail, left, offered = self.run_session(
+                    {"A": "inbox", "B": "inbox"}, [(action, ["B"])],
+                    launch=lambda playwright, headed=False: launch_browser(fake, headed))
+                shown = "".join(self.notices[1])
+                self.assertIn("Could not start Chromium · system library libglib-2.0.so.0 is missing", shown)
+                self.assertIn(f"sudo {sys.executable} -m playwright install-deps chromium", shown)
+                self.assertEqual(gmail.places, {"A": "inbox", "B": "inbox"})
+        self.assertEqual(savegmail.chromium_start_reason(savegmail.PlaywrightError("first\nsecond")), "first")
+
     def test_headed_without_display_is_refused_at_start(self):
         from unittest import mock
         env = {key: value for key, value in os.environ.items() if key not in {"DISPLAY", "WAYLAND_DISPLAY"}}
@@ -4536,8 +4555,15 @@ class TypedSelectionTest(unittest.TestCase):
         self.assertIn(subject, shown["2"])
 
 
+# FAKE_CHROMIUM: unset, Chromium starts; "missing", it starts once `playwright install chromium`
+# ran; "broken", it never starts (system libraries missing).
 FAKE_PYTHON = """#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_LOG"
+case "${FAKE_CHROMIUM:-}:$*" in
+    "missing:-m playwright install chromium") touch "$FAKE_LOG.chromium"; exit 0 ;;
+    missing:-c*sync_playwright*) [ -e "$FAKE_LOG.chromium" ]; exit $? ;;
+    broken:-c*sync_playwright*) exit 1 ;;
+esac
 if [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" != "--version" ]; then
     exit "${FAKE_PIP_RC:-0}"
 fi
@@ -4596,11 +4622,12 @@ class LauncherUpgradeTest(unittest.TestCase):
         self.log = os.path.join(root, "calls.log")
         self.stamp = os.path.join(root, ".venv", ".savegmail-upgraded")
 
-    def launch(self, pip_rc=0):
+    def launch(self, pip_rc=0, chromium=""):
         import subprocess
-        env = dict(os.environ, FAKE_LOG=self.log, FAKE_PIP_RC=str(pip_rc))
+        env = dict(os.environ, FAKE_LOG=self.log, FAKE_PIP_RC=str(pip_rc), FAKE_CHROMIUM=chromium)
         result = subprocess.run(["sh", os.path.join(self.root, "run-savegmail.sh"), "--help"],
                                 env=env, capture_output=True, text=True, timeout=30)
+        self.stderr = result.stderr
         calls = []
         if os.path.exists(self.log):
             with open(self.log) as handle:
@@ -4630,6 +4657,34 @@ class LauncherUpgradeTest(unittest.TestCase):
         self.assertTrue(calls[-1].endswith("savegmail.py --help"))
         rc, pip_calls, _ = self.launch(pip_rc=0)
         self.assertEqual(len(pip_calls), 1)
+
+    def test_missing_chromium_is_installed_before_launch(self):
+        install = "-m playwright install chromium"
+        rc, _, calls = self.launch(chromium="missing")
+        self.assertEqual(rc, 0, self.stderr)
+        self.assertIn(install, calls)
+        self.assertEqual(calls[-1], f"{self.root}/savegmail.py --help")
+        self.assertLess(calls.index(install), len(calls) - 1)
+        self.assertEqual(self.stderr, "")
+        # Installed now: the next launches start Chromium without installing it again.
+        rc, _, calls = self.launch(chromium="missing")
+        self.assertEqual(rc, 0)
+        self.assertNotIn(install, calls)
+
+    def test_ready_chromium_is_not_reinstalled(self):
+        rc, _, calls = self.launch()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("-m playwright install chromium", calls)
+        self.assertEqual(calls[-1], f"{self.root}/savegmail.py --help")
+
+    def test_chromium_that_still_fails_after_install_is_reported(self):
+        # Minimal Debian/Ubuntu, WSL, containers: installed, but its system libraries are missing.
+        rc, _, calls = self.launch(chromium="broken")
+        self.assertEqual(rc, 0)
+        self.assertIn("-m playwright install chromium", calls)
+        self.assertEqual(calls[-1], f"{self.root}/savegmail.py --help")
+        self.assertIn("Chromium does not start", self.stderr)
+        self.assertIn(f"sudo {self.root}/.venv/bin/python -m playwright install-deps chromium", self.stderr)
 
     def test_symlinked_launcher_uses_project_venv(self):
         import subprocess

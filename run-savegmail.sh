@@ -57,8 +57,14 @@ fi
 export PATH="$script_dir/.venv/bin:$PATH"
 export PLAYWRIGHT_BROWSERS_PATH=0
 
-if ! "$script_dir/.venv/bin/python" -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); browser = p.chromium.launch(headless=True); browser.close(); p.stop()' >/dev/null 2>&1; then
+chromium_check='from playwright.sync_api import sync_playwright; p = sync_playwright().start(); browser = p.chromium.launch(headless=True); browser.close(); p.stop()'
+if ! "$script_dir/.venv/bin/python" -c "$chromium_check" >/dev/null 2>&1; then
     "$script_dir/.venv/bin/python" -m playwright install chromium
+    # Installed but still not starting: usually system libraries missing (minimal Debian/Ubuntu,
+    # WSL, containers). The list still works for d, e, * ...; saving and previews will not.
+    if ! "$script_dir/.venv/bin/python" -c "$chromium_check" >/dev/null 2>&1; then
+        echo "run-savegmail.sh: Chromium does not start (missing system libraries?); saving and previews will fail. On Debian/Ubuntu: sudo $script_dir/.venv/bin/python -m playwright install-deps chromium" >&2
+    fi
 fi
 
 exec "$script_dir/.venv/bin/python" "$script_dir/savegmail.py" "$@"

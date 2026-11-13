@@ -166,6 +166,16 @@ class BrowserStartError(Exception):
     """Chromium could not be started (missing display or system libraries, failed install, ...)."""
 
 
+def chromium_start_reason(error):
+    """Why Chromium did not start, in one line: Playwright puts the cause in its browser log."""
+    text = str(error)
+    missing = re.search(r"error while loading shared libraries: ([^:\s]+)", text)
+    if missing:
+        return (f"system library {missing.group(1)} is missing · on Debian/Ubuntu: "
+                f"sudo {sys.executable} -m playwright install-deps chromium")
+    return text.strip().splitlines()[0] if text.strip() else type(error).__name__
+
+
 def launch_browser(playwright, headed=False):
     """Launch full Chromium (new headless mode unless headed), installing it if missing.
 
@@ -2799,7 +2809,8 @@ def interactive_download_main():
                     browser = launch_browser(playwright, headed=args.headed)
             except Exception as error:
                 browser = None
-                raise BrowserStartError(str(error)) from error
+                debug(f"Chromium could not start: {error}")
+                raise BrowserStartError(chromium_start_reason(error)) from error
         return browser
 
     try:
@@ -3290,9 +3301,9 @@ def interactive_download_main():
                     notice += failure_notice(chosen, failed)
             except BrowserStartError as exc:
                 # Nothing was rendered nor changed: back to the list, the selection and undo kept.
-                debug(f"Chromium could not start: {exc}")
+                # The reason is one line (the notice wraps it), the full Playwright log went to debug.
                 notice = [[("class:error", " ✗ "), ("", "Could not start Chromium"),
-                           ("class:dim", " · " + fit(str(exc), 80).rstrip())]]
+                           ("class:dim", " · " + str(exc))]]
             except GMAIL_ERRORS as exc:
                 # Session expired or Gmail unreachable midway: back to the list, the undo kept as it was.
                 debug(f"Gmail request failed: {exc}")

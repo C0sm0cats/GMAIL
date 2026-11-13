@@ -205,6 +205,7 @@ If any step fails, the files written for that email are removed and the email st
 
 - Use `./run-savegmail.sh` instead of running `python savegmail.py` directly
 - The launcher keeps Playwright, its bundled driver runtime, and its Chromium browser binaries inside the local `.venv`
+- If the launcher says Chromium does not start, or saving shows `system library … is missing` (minimal Debian/Ubuntu, WSL, containers), install Chromium's system libraries once: `sudo .venv/bin/python -m playwright install-deps chromium`
 
 ## Notes
 
