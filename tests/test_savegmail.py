@@ -3314,6 +3314,78 @@ class UndoAfterDeleteTest(unittest.TestCase):
         self.assertEqual(offered[1], "trash (2)")
         self.assertEqual(gmail.places, places)
 
+    def catch_unhandled_hangups(self):
+        """SIGHUP's default kills the whole test run: record the ones the session leaves to it instead."""
+        import signal
+        unhandled = []
+
+        def record(signum, frame):
+            unhandled.append(signum)
+        previous = signal.signal(signal.SIGHUP, record)
+        self.addCleanup(signal.signal, signal.SIGHUP, previous)
+        return unhandled, record
+
+    @unittest.skipUnless(hasattr(__import__("signal"), "SIGHUP"), "no SIGHUP on this platform")
+    def test_closed_terminal_during_save_trashes_the_saved_ones(self):
+        # Terminal window closed (SIGHUP) while enter saves B: stop as Ctrl+C does, A saved and trashed.
+        import signal
+        from unittest import mock
+        real_save_messages = savegmail.save_messages
+
+        class Gmail(FakeGmail):
+            def save_messages(self, *args):
+                return real_save_messages(*args)
+
+        def save(service, user_id, msg_id, save_dir, browser, on_step, **kwargs):
+            if msg_id == "B":
+                signal.raise_signal(signal.SIGHUP)
+            path = os.path.join(save_dir, f"{msg_id}.pdf")
+            open(path, "w").close()
+            return {"pdf": f"{msg_id}.pdf", "files": [path], "attachments": 0}
+
+        unhandled, record = self.catch_unhandled_hangups()
+        with mock.patch.object(savegmail, "save_email_and_attachments", save):
+            try:
+                gmail, left, offered = self.run_session({"A": "inbox", "B": "inbox", "C": "inbox"},
+                                                        [("download", ["A", "B", "C"])], gmail_class=Gmail)
+            except KeyboardInterrupt:  # escaping, it would stop the whole test run
+                self.fail("closing the terminal during enter skipped the cleanup")
+        self.assertEqual(unhandled, [])
+        self.assertEqual(left, ["A.pdf"])
+        self.assertEqual(gmail.places, {"A": "trash", "B": "inbox", "C": "inbox"})
+        self.assertIs(signal.getsignal(signal.SIGHUP), record)  # the session puts the previous handler back
+
+    @unittest.skipUnless(hasattr(__import__("signal"), "SIGHUP"), "no SIGHUP on this platform")
+    def test_closed_terminal_during_trash_keeps_undo_for_the_ones_moved(self):
+        # SIGHUP during d's first batch call: that call finishes and the rest is not sent, like Ctrl+C.
+        import signal
+        from unittest import mock
+
+        class HangupTrashApi(FakeTrashApi):
+            def new_batch_http_request(self, callback):
+                api = self
+
+                class Batch(FakeBatch):
+                    def execute(self):
+                        if not api.batches:
+                            signal.raise_signal(signal.SIGHUP)
+                        api.batches.append(len(self.items))
+                        super().execute()
+                return Batch(callback, [])
+
+        unhandled, _ = self.catch_unhandled_hangups()
+        places = {name: "inbox" for name in "ABCDE"}
+        api = HangupTrashApi()
+        with mock.patch.object(savegmail, "API_BATCH_SIZE", 2):
+            try:
+                gmail, left, offered = self.run_session(places, [("trash", list("ABCDE")), ("undo", [])], api=api)
+            except KeyboardInterrupt:  # escaping, it would stop the whole test run
+                self.fail("closing the terminal during d lost the emails already moved")
+        self.assertEqual(unhandled, [])
+        self.assertEqual(api.batches, [2, 2])
+        self.assertEqual(offered[1], "trash (2)")
+        self.assertEqual(gmail.places, places)
+
     def test_ctrl_c_while_chromium_starts_keeps_selection_and_undo(self):
         def launch(*args, **kwargs):
             raise KeyboardInterrupt

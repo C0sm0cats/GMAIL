@@ -2836,7 +2836,31 @@ def glue_query_value(argv):
     return argv
 
 
+def hang_up_like_ctrl_c(signum, frame):
+    """SIGHUP (terminal window closed, SSH dropped): do what Ctrl+C would do at this point.
+
+    Its default kills Python with no cleanup: a partial save left behind, saved emails never trashed.
+    """
+    handler = signal.getsignal(signal.SIGINT)
+    if callable(handler):
+        handler(signum, frame)  # run_batched's handler: the batch call in progress finishes first
+    else:
+        raise KeyboardInterrupt
+
+
 def interactive_download_main():
+    hangup = getattr(signal, "SIGHUP", None)  # Windows has none
+    previous = None
+    if hangup is not None and threading.current_thread() is threading.main_thread():
+        previous = signal.signal(hangup, hang_up_like_ctrl_c)
+    try:
+        run_interactive_download()
+    finally:
+        if previous is not None:
+            signal.signal(hangup, previous)
+
+
+def run_interactive_download():
     import argparse
 
     parser = argparse.ArgumentParser(
