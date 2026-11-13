@@ -1137,6 +1137,9 @@ class PickerTest(unittest.TestCase):
                 self.assertEqual(action, expected)
                 self.assertLess(time.monotonic() - start, 0.3 * len(keys) + 1.5)
                 self.assertEqual([message["id"] for message in messages], ["0", "1"])  # result dropped
+                # Quitting the app must not wait either: the abandoned work runs in daemon threads.
+                self.assertEqual([t.name for t in threading.enumerate() if t.is_alive() and not t.daemon
+                                  and t is not threading.main_thread()], [])
         self.assertEqual(applied, [])
 
     def test_r_shows_the_sign_in_page_while_waiting(self):
