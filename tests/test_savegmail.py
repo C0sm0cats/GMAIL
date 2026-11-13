@@ -144,6 +144,40 @@ class TextHelpersTest(unittest.TestCase):
             self.assertNotIn(sequence, out.getvalue())
         self.assertIn("Invoice �]52;c;", savegmail.fit(message["subject"], 40))
 
+    def test_save_report_keeps_result_whole_at_60_columns(self):
+        """In 60 columns each ✓/✗ line keeps its result whole and aligned; the date takes only the width
+        this batch needs, and the sender shrinks before the subject."""
+        import io
+        from unittest import mock
+        messages = [
+            {"id": "a", "from": "Service client Free Mobile <x@free.example>", "subject": "Votre facture de novembre",
+             "snippet": "", "internalDate": 1_700_000_000_000},
+            {"id": "b", "from": "GitHub <noreply@github.example>", "subject": "Your Octoverse report",
+             "snippet": "", "internalDate": 1_700_000_100_000},
+            {"id": "c", "from": "Bob <bob@example.test>", "subject": "Photos", "snippet": "",
+             "internalDate": 1_700_000_200_000},
+        ]
+
+        def fake_save(service, user_id, msg_id, save_dir, browser, on_step, **kwargs):
+            if msg_id == "b":
+                raise RuntimeError("Timeout")
+            return {"files": [], "attachments": {"a": 12, "c": 2}[msg_id]}
+
+        for width in (60, 70, 80):
+            out = io.StringIO()
+            console = savegmail.Console(file=out, width=width, color_system=None, highlight=False)
+            with mock.patch.object(savegmail, "console", console), \
+                    mock.patch.object(savegmail, "compact_date", lambda ms: "7 Nov 13:35"), \
+                    mock.patch.object(savegmail, "save_email_and_attachments", fake_save):
+                savegmail.save_messages(None, "me", messages, "", None, False)
+            lines = [line.rstrip() for line in out.getvalue().splitlines() if line[1:2] in ("✓", "✗")]
+            self.assertEqual(len(lines), 3, out.getvalue())
+            for line, result in zip(lines, ("PDF + 12 attachments", "failed", "PDF + 2 attachments")):
+                self.assertTrue(line.endswith("  " + result), (width, line))
+                self.assertLessEqual(savegmail.cell_len(line), width, (width, line))
+            self.assertEqual(len({line.rindex("  ") for line in lines}), 1, (width, lines))
+            self.assertIn("Votre fac", lines[0])
+
     def test_emoji_sequences_have_one_width_for_list_and_terminal(self):
         from prompt_toolkit.utils import get_cwidth
         text = "✈️ ⚠️ 🇫🇷 Météo ☀️ 👨‍👩‍👧 👍🏽 ❤️"

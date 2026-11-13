@@ -2548,15 +2548,20 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     return result
 
 
-def print_message_line(mark, message, detail="", sender_w=22):
+def print_message_line(mark, message, detail="", sender_w=22, date_w=None):
+    """One ✓/✗ line of the save report: the result column stays whole, the sender shrinks to 8
+    before the subject drops under 10 (as column_widths does for the list)."""
     row = message_row(message)
     width = console.width
+    date_w = min(DATE_W, cell_len(row["date"]) if date_w is None else date_w)
     detail_w = max(20, cell_len(detail))
-    subject_w = max(10, width - 4 - (DATE_W + 2) - sender_w - 2 - detail_w - 3)
+    room = width - 4 - (date_w + 2) - 2 - detail_w - 3
+    sender_w = min(sender_w, max(8, room - 10))
+    subject_w = max(1, room - sender_w)
     console.print(
-        f" {mark}  [dim]{escape(fit(row['date'], DATE_W))}[/]  "
+        f" {mark}  [dim]{escape(fit(row['date'], date_w))}[/]  "
         f"[{ {'draft': 'red', 'sent': 'magenta'}.get(row['kind'], 'cyan') }]{escape(fit(row['sender'], sender_w))}[/]  "
-        f"{escape(fit(row['subject'], subject_w))}  [dim]{escape(fit(detail, width - 4 - (DATE_W + 2) - sender_w - 2 - subject_w - 3))}[/]"
+        f"{escape(fit(row['subject'], subject_w))}  [dim]{escape(detail)}[/]"
     )
 
 
@@ -2703,7 +2708,9 @@ def save_messages(service, user_id, messages, save_dir, browser, trash_after):
     Ctrl+C stops after the emails already saved (still trashed if asked): the email being saved and the
     ones after it are in neither saved nor failed, and stay in Gmail.
     """
-    sender_w = min(max(cell_len(message_row(m)["sender"]) for m in messages), 22)
+    rows = [message_row(m) for m in messages]
+    sender_w = min(max(cell_len(r["sender"]) for r in rows), 22)
+    date_w = min(max(cell_len(r["date"]) for r in rows), DATE_W)
     results, failed = {}, {}
     progress = Progress(
         SpinnerColumn(),
@@ -2727,13 +2734,13 @@ def save_messages(service, user_id, messages, save_dir, browser, trash_after):
                 break
             except Exception as exc:
                 failed[message["id"]] = error_text(exc)
-                print_message_line("[red]✗[/]", message, "failed", sender_w)
+                print_message_line("[red]✗[/]", message, "failed", sender_w, date_w)
                 console.print(f"      [dim]└ {escape(str(exc))}[/]")
             else:
                 results[message["id"]] = result
                 count = result["attachments"]
                 detail = f"PDF + {count} attachment{'s' * (count > 1)}" if count else "PDF"
-                print_message_line("[green]✓[/]", message, detail, sender_w)
+                print_message_line("[green]✓[/]", message, detail, sender_w, date_w)
             progress.advance(task)
 
         if trash_after and results:
