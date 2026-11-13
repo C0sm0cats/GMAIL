@@ -1021,34 +1021,43 @@ def history_id(service, user_id):
 
 
 def history_changes(service, user_id, start):
-    """(ids of emails added, deleted or relabeled in Gmail since history id start, current history id).
+    """(ids of emails added, deleted or relabeled in Gmail since history id start, {id: labels}, current history id).
 
+    The labels are those the latest record of an email carries (Gmail puts them on each record's message), so
+    changes savegmail made itself need no re-read; an email whose latest record has none is left out.
     Raises HttpError 404 once start is too old for Gmail to keep its history.
     """
-    changed, page_token = set(), None
+    changed, labels, page_token = set(), {}, None
     while True:
         response = service.users().history().list(
             userId=user_id, startHistoryId=start, pageToken=page_token, maxResults=500
         ).execute()
-        for record in response.get("history", []):
+        for record in response.get("history", []):  # oldest first: a later record replaces the labels
             for kind in ("messagesAdded", "messagesDeleted", "labelsAdded", "labelsRemoved"):
-                changed.update(item["message"]["id"] for item in record.get(kind, []))
+                for item in record.get(kind, []):
+                    message = item["message"]
+                    changed.add(message["id"])
+                    if kind != "messagesDeleted" and "labelIds" in message:
+                        labels[message["id"]] = message["labelIds"]
+                    else:
+                        labels.pop(message["id"], None)
         page_token = response.get("nextPageToken")
         if not page_token:
-            return changed, response.get("historyId", start)
+            return changed, labels, response.get("historyId", start)
 
 
 def sync_changes(service, user_id, view, loaded, failed=None):
-    """What changed in Gmail for a view since its history id: (new, gone ids, relabeled, new history id).
+    """What changed in Gmail for a view since its history id: (new, gone ids, relabeled, new history id, known).
 
-    relabeled lists the loaded ids whose labels may have changed: only those Gmail's history lists, and
-    nothing is listed when nothing changed. Without a history id, or one too old (404), every loaded email.
+    relabeled lists the loaded ids whose labels may have changed and must be read again: only those Gmail's
+    history lists without their labels, and nothing is listed when nothing changed. Without a history id, or
+    one too old (404), every loaded email. known is {id: labels} for the loaded ids the history gave labels for.
     New emails Gmail would not read are added to the set failed, when given.
     """
-    changed, history = None, None
+    changed, labels, history = None, {}, None
     if view.get("history"):
         try:
-            changed, history = history_changes(service, user_id, view["history"])
+            changed, labels, history = history_changes(service, user_id, view["history"])
         except HttpError as exc:
             if exc.resp.status != 404:
                 raise
@@ -1056,13 +1065,14 @@ def sync_changes(service, user_id, view, loaded, failed=None):
     if history is None:
         history = history_id(service, user_id)  # taken before the reads below: later changes come next time
     elif not changed:
-        return [], set(), [], history
+        return [], set(), [], history, {}
     new, gone = refresh_messages(service, user_id, view["query"], loaded,
                                  since=view["floor"] if view["more"] else None, in_trash=view["in_trash"],
                                  failed=failed)
     relabeled = [message["id"] for message in loaded
                  if message["id"] not in gone and (changed is None or message["id"] in changed)]
-    return new, gone, relabeled, history
+    known = {msg_id: labels[msg_id] for msg_id in relabeled if msg_id in labels}
+    return new, gone, [msg_id for msg_id in relabeled if msg_id not in known], history, known
 
 
 def refresh_labels(service, user_id, messages, failed=None):
@@ -1070,7 +1080,12 @@ def refresh_labels(service, user_id, messages, failed=None):
 
     Updates messages in place; returns how many changed. The ids Gmail would not read go to failed.
     """
-    fresh = current_labels(service, user_id, [message["id"] for message in messages], failed=failed)
+    return apply_labels(messages, current_labels(service, user_id, [message["id"] for message in messages],
+                                                 failed=failed))
+
+
+def apply_labels(messages, fresh):
+    """Put fresh labels, {id: labels}, on the messages they differ from; returns how many changed."""
     changed = 0
     for message in messages:
         labels = fresh.get(message["id"])
@@ -3073,13 +3088,14 @@ def run_interactive_download():
             failed = set()
             try:
                 with console.status("[dim]Checking Gmail…[/]"):
-                    new, removed, relabeled, history = sync_changes(service, user_id, view, view["messages"],
-                                                                    failed=failed)
+                    new, removed, relabeled, history, known = sync_changes(service, user_id, view, view["messages"],
+                                                                           failed=failed)
                     if view["more"]:
                         view["total"] = estimate_total(service, user_id, view["query"], view["in_trash"])
             except GMAIL_ERRORS as exc:
                 return [[("class:error", " ✗ "), ("", "Refresh failed"), ("class:dim", " · " + fit(error_text(exc), 80).rstrip())]]
             drop(view, removed)
+            known_updated = apply_labels(view["messages"], known)
             try:
                 # Read / unread, stars… changed in Gmail meanwhile (web, phone, o).
                 relabeled = set(relabeled)
@@ -3089,6 +3105,7 @@ def run_interactive_download():
                 debug(f"Could not refresh labels: {exc}")
                 updated = 0
                 failed.update(relabeled)
+            updated += known_updated
             if not failed:  # otherwise the next sync asks Gmail's history from the same point and reads them again
                 view["history"] = history
             known = {message["id"] for message in view["messages"]}
@@ -3159,8 +3176,8 @@ def run_interactive_download():
 
             def sync_once(loaded):
                 failed = set()
-                new, gone, relabeled, history = sync_changes(sync_service, user_id, view, loaded, failed=failed)
-                labels = current_labels(sync_service, user_id, relabeled, failed=failed)
+                new, gone, relabeled, history, known = sync_changes(sync_service, user_id, view, loaded, failed=failed)
+                labels = {**known, **current_labels(sync_service, user_id, relabeled, failed=failed)}
                 # Labels created or renamed in Gmail meanwhile: their names, only when an email changed.
                 names = user_labels(sync_service, user_id) if new or labels else {}
                 total = view["total"]

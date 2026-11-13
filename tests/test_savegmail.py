@@ -4379,6 +4379,7 @@ class HistoryMailboxApi(SyncedMailboxApi):
     """SyncedMailboxApi with Gmail's history: change() records a label change, gets and lists are counted.
 
     Each event keeps its history record type; page, when set, is how many records history.list gives a page.
+    With labeled, each record also carries the email's labels after the change, as Gmail's message resource does.
     """
 
     def __init__(self, labels):
@@ -4387,6 +4388,7 @@ class HistoryMailboxApi(SyncedMailboxApi):
         self.names = {}  # your own labels, {id: name}, as labels.list gives them
         self.page = None
         self.refused = {}  # {id: how many more messages.get calls Gmail answers 429}
+        self.labeled = False
 
     def change(self, msg_id, labels, kind="labelsRemoved"):
         self.mail[msg_id] = labels
@@ -4394,7 +4396,10 @@ class HistoryMailboxApi(SyncedMailboxApi):
 
     def record(self, msg_id, kind):
         self.history_id += 1
-        self.events.append((self.history_id, msg_id, kind))
+        message = {"id": msg_id}
+        if self.labeled and msg_id in self.mail:
+            message["labelIds"] = list(self.mail[msg_id])
+        self.events.append((self.history_id, message, kind))
 
     def receive(self, msg_id, labels):
         self.change(msg_id, labels, "messagesAdded")
@@ -4426,8 +4431,8 @@ class HistoryMailboxApi(SyncedMailboxApi):
                 if int(startHistoryId) < api.oldest:
                     from unittest import mock
                     raise savegmail.HttpError(mock.Mock(status=404, reason="Not Found"), b"Not Found")
-                records = [{"id": str(number), kind: [{"message": {"id": msg_id}}]}
-                           for number, msg_id, kind in api.events if number > int(startHistoryId)]
+                records = [{"id": str(number), kind: [{"message": dict(message)}]}
+                           for number, message, kind in api.events if number > int(startHistoryId)]
                 start = int(pageToken or 0)
                 end = len(records) if api.page is None else start + api.page
                 response = {"historyId": str(api.history_id), "history": records[start:end]}
@@ -4532,6 +4537,38 @@ class HistorySyncSessionTest(unittest.TestCase):
         self.assertEqual(changed["labels"], {"m7": ["INBOX"]})
         self.assertEqual(after["labels"], {})
         self.assertEqual(api.gets, ["m7", "m7"])  # one messages.get per sync that saw m7, none per loaded email
+
+    def test_sync_takes_labels_from_the_history_without_rereading(self):
+        api = HistoryMailboxApi({f"m{index}": ["INBOX"] for index in range(300)})
+        api.labeled = True
+        results = []
+
+        def step(sync):
+            for index in range(300):  # * on every loaded email: one Gmail history record each
+                api.change(f"m{index}", ["INBOX", "STARRED"], "labelsAdded")
+            api.change("m5", ["INBOX"], "labelsRemoved")  # then unstarred on the phone: the latest record wins
+            api.labeled = False
+            api.change("m9", ["INBOX", "UNREAD"])  # a record without labels: m9 is read again
+            results.append(sync())
+        self.run_session(api, step)
+        expected = {f"m{index}": ["INBOX", "STARRED"] for index in range(300)}
+        expected.update(m5=["INBOX"], m9=["INBOX", "UNREAD"])
+        self.assertEqual(results[0]["labels"], expected)
+        self.assertEqual(api.gets, ["m9"])
+
+    def test_refresh_takes_labels_from_the_history_without_rereading(self):
+        from unittest import mock
+        api = HistoryMailboxApi({f"m{index}": ["INBOX"] for index in range(3)})
+        api.labeled = True
+        api.change("m1", ["INBOX", "STARRED"], "labelsAdded")
+        api.labeled = False
+        api.change("m2", ["INBOX", "UNREAD"])
+        view = {"history": "100", "query": "", "floor": None, "more": False, "in_trash": False,
+                "messages": [{"id": f"m{index}", "labels": ["INBOX"], "internalDate": 3 - index} for index in range(3)]}
+        with mock.patch.object(savegmail, "refresh_messages", lambda *a, **k: ([], set())):
+            new, gone, relabeled, history, known = savegmail.sync_changes(api, "me", view, view["messages"])
+            self.assertEqual((relabeled, known), (["m2"], {"m1": ["INBOX", "STARRED"]}))
+        self.assertEqual(api.gets, [])
 
     def test_sync_brings_labels_created_meanwhile(self):
         api = HistoryMailboxApi({f"m{index}": ["INBOX"] for index in range(3)})
