@@ -3490,4 +3490,6 @@ def interactive_download_main():
             shutil.rmtree(preview_dir, ignore_errors=True)
 
 if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="replace")  # non-UTF-8 locale: ✓ → ? rather than a traceback
     interactive_download_main()

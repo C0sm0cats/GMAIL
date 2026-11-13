@@ -5536,5 +5536,30 @@ class GitignoreTest(unittest.TestCase):
         self.assertEqual(added.splitlines(), ["add '.gitignore'"])
 
 
+
+class NonUtf8LocaleTest(unittest.TestCase):
+    def run_cli(self, *args):
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "savegmail.py")
+        env = dict(os.environ, PYTHONIOENCODING="latin-1", COLUMNS="80")
+        return subprocess.run([sys.executable, script, *args], env=env, capture_output=True,
+                              encoding="latin-1", timeout=60)
+
+    def test_help_prints_under_a_latin1_terminal(self):
+        result = self.run_cli("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("UnicodeEncodeError", result.stderr)
+        self.assertIn("--download-path", result.stdout)
+
+    def test_error_message_prints_under_a_latin1_terminal(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile() as blocker:
+            result = self.run_cli("--download-path", os.path.join(blocker.name, "sub"))
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, output)
+        self.assertNotIn("UnicodeEncodeError", output)
+        self.assertIn("? Could not use the download folder", output)
+
+
 if __name__ == "__main__":
     unittest.main()
