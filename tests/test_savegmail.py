@@ -2102,6 +2102,52 @@ class EscapedTextTest(unittest.TestCase):
             "https://example.org/q?a=1&b=2",
         ])
 
+    def test_plain_text_right_to_left_lines_keep_their_order(self):
+        # Each line takes the direction of its first strong character: an Arabic or Hebrew line ends,
+        # on its left, with its final period and Latin words; a Latin line stays left to right.
+        import base64
+        import tempfile
+        from email.message import EmailMessage
+        from playwright.sync_api import sync_playwright
+        msg = EmailMessage()
+        msg["Subject"] = "RTL"
+        msg.set_content("مرحبا، هذا نص عربي في ملف PDF.\nשלום, זה טקסט בעברית.\nHello world, PDF.\n")
+        recording = ContentRecordingBrowser()
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(
+                FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1", save_dir,
+                recording)
+        measure = """([first, last]) => {
+            const div = document.querySelector('div');
+            const node = div.firstChild, text = node.data;
+            const box = (word, from) => {
+                const range = document.createRange(), start = text.indexOf(word, from);
+                range.setStart(node, start);
+                range.setEnd(node, start + word.length);
+                return range.getBoundingClientRect();
+            };
+            const start = text.indexOf(first);
+            return {first: box(first, start).left, last: box(last, start).left,
+                    right: div.getBoundingClientRect().right, firstRight: box(first, start).right};
+        }"""
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(channel="chromium")
+            except Exception as error:  # no Playwright Chromium here; never install it from a test
+                self.skipTest(f"Chromium unavailable: {error}")
+            try:
+                page = browser.new_page()
+                page.set_content(recording.pages[0].html)
+                arabic = page.evaluate(measure, ["مرحبا", "PDF."])
+                hebrew = page.evaluate(measure, ["שלום", "."])
+                latin = page.evaluate(measure, ["Hello", "PDF."])
+            finally:
+                browser.close()
+        self.assertLess(arabic["last"], arabic["first"])  # « PDF. » ends the sentence, on its left
+        self.assertAlmostEqual(arabic["firstRight"], arabic["right"], delta=1)  # aligned on the right
+        self.assertLess(hebrew["last"], hebrew["first"])
+        self.assertLess(latin["first"], latin["last"])
+
 
 class PdfHeaderTest(unittest.TestCase):
     """The PDF prints the subject, sender, date and attachments in its header and footer, with room for them."""

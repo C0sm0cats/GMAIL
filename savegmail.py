@@ -583,8 +583,10 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         # pre-wrap keeps line breaks and the spaces that align columns, and still wraps long lines;
         # a monospace font keeps those columns aligned, as mail clients show plain text. overflow-wrap
         # breaks a link or token wider than the page, which Chromium would shrink the page for, then cut.
+        # unicode-bidi: plaintext gives each line the direction of its first strong character, as mail
+        # clients do: an Arabic or Hebrew line reads right to left, its final period and Latin words in place.
         return ('<div style="font-family: monospace;font-size: 10px;white-space: pre-wrap;'
-                f'overflow-wrap: anywhere">{plain_text}</div>')
+                f'overflow-wrap: anywhere;unicode-bidi: plaintext">{plain_text}</div>')
 
     def body_text(part):
         # get_content() decodes with the declared charset, ASCII when there is none (every accent
