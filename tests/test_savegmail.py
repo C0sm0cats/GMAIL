@@ -4614,6 +4614,53 @@ class HistorySyncSessionTest(unittest.TestCase):
         self.run_session(api, step)
         self.assertEqual(results[0]["labels"], {"m0": ["INBOX"], "m2": ["INBOX", "UNREAD", "STARRED"]})
 
+    def test_syncs_of_lists_left_meanwhile_are_skipped(self):
+        # Tab twice during a sync: the two lists left asked for syncs that wait on the lock; only the
+        # sync of the list shown still runs, right after the one already under way.
+        import threading
+        import time
+        api = HistoryMailboxApi({f"m{index}": ["INBOX"] for index in range(3)})
+        entered, release, listed = threading.Event(), threading.Event(), []
+        self.addCleanup(release.set)
+        history = api.history
+
+        def slow_history():
+            pages = history()
+            real_list = pages.list
+
+            def list_history(**kwargs):
+                listed.append(None)
+                entered.set()
+                release.wait(10)
+                return real_list(**kwargs)
+            pages.list = list_history
+            return pages
+        api.history = slow_history
+        results, skipped = [], []
+
+        def abandoned(sync):
+            try:
+                sync()
+            except savegmail.SyncSkipped:
+                skipped.append(None)
+
+        def step(sync):
+            first = threading.Thread(target=abandoned, args=(sync,), daemon=True)
+            first.start()
+            self.assertTrue(entered.wait(10))  # under way, holding the lock
+            waiting = [threading.Thread(target=abandoned, args=(sync,), daemon=True) for _ in range(2)]
+            for thread in waiting:
+                thread.start()
+            time.sleep(0.2)  # both wait on the lock
+            threading.Timer(0.2, release.set).start()
+            results.append(sync())  # the list shown
+            for thread in [first, *waiting]:
+                thread.join(10)
+        self.run_session(api, step)
+        self.assertEqual(len(listed), 2)  # the sync under way and the list shown's, not the two left
+        self.assertEqual(len(skipped), 2)
+        self.assertEqual(results[0]["gone"], set())
+
     def test_history_too_old_falls_back_to_the_full_sync(self):
         api = HistoryMailboxApi({f"m{index}": ["INBOX", "UNREAD"] for index in range(3)})
         results = []

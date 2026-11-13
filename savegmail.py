@@ -356,6 +356,10 @@ def sign_in(reason):
     return creds
 
 
+class SyncSkipped(Exception):
+    """A sync not run: a newer list asked for its own meanwhile, so the list that asked for this one is gone."""
+
+
 class WrongAccountError(Exception):
     """Signed in again with another Google account than the one the list shows."""
 
@@ -2306,6 +2310,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                      "labels": list(message.get("labels", []))} for message in messages]
         try:
             result = await in_background(sync, snapshot)
+        except SyncSkipped:
+            pass
         except RefreshError as exc:
             debug(f"Sync failed: {exc}")
             state["signed_out"] = True
@@ -3130,6 +3136,8 @@ def run_interactive_download():
         # (Tab, q, an action) while it runs, so the next one waits for it on the lock.
         sync_service = build("gmail", "v1", credentials=creds)
         sync_lock = threading.Lock()
+        # Each list asks for a sync when it opens: one asked for after it means its list was left meanwhile.
+        sync_order, latest_sync = threading.Lock(), {"ticket": 0}
         view_queries = {view["name"]: view["query"] for view in views}
 
         def reload_session():
@@ -3166,7 +3174,11 @@ def run_interactive_download():
 
         def sync_for(view):
             def sync(loaded):
+                with sync_order:
+                    ticket = latest_sync["ticket"] = latest_sync["ticket"] + 1
                 with sync_lock:
+                    if ticket != latest_sync["ticket"]:
+                        raise SyncSkipped()  # its result would be dropped: let the shown list's sync go first
                     try:
                         return sync_once(loaded)
                     except RefreshError:
