@@ -777,6 +777,47 @@ class PickerTest(unittest.TestCase):
         self.assertIn(" Inbox (1,000+) ", line)
         self.assertIn("newest first", line)
 
+    def test_overfull_header_shortens_and_keeps_the_selection_whole(self):
+        # Filter, sync / sign-in message and selection longer than the line on their own: they get
+        # shorter, the line still fits, ends any cut with …, and "N selected" always shows whole.
+        tabs = [(name, None, "class:tab") for name, _ in savegmail.VIEWS]
+        infos = (" · 7 of ~1,240 emails",)
+        expired = ("class:error", (" · ↻ Gmail session expired, r to sign in", " · ↻ session expired, r to sign in"), 8)
+        hidden = ("2 selected · 1 hidden by the filter ", "2 selected · 1 hidden ")
+        wrong = ("class:error", (" · ↻ signed in as jean.dupont.travail@gmail.com, not jean.dupont.perso@gmail.com,"
+                                 " r to try again", " · ↻ signed in as jean.dupont.travail@gmail.com, r to try again",
+                                 " · ↻ wrong account, r to try again"), 8)
+        cases = [
+            ([("class:dim", " · 1 match "), ("class:accent", ("acme billing",), 8), expired], "1 selected ", 80,
+             ("1 match acme bil", "session expired, r to sign in", "1 selected")),
+            ([("class:dim", " · 1 match "), ("class:accent", ("invoice",), 8), expired], hidden, 100,
+             ("1 match invoice", "↻ Gmail session expired, r to sign in", "2 selected · 1 hidden")),
+            ([("class:dim", " · 1 match "), ("class:accent", ("invoice",), 8),
+              ("class:checked", (" · ↻ 1 new, 1 gone, 1 updated",), 8)], hidden, 80,
+             ("1 match invoice", "↻ 1 new", "2 selected · 1 hidden")),
+            ([("class:dim", " · 1 match "), ("class:accent", ("receipts from the accountant for the 2025 tax-returns",), 8),
+              expired], "", 80, ("1 match receipts", "…", "r to sign in")),
+            ([wrong], "", 80, ("signed in as jean.dupont.travail@gmail.com, r to try again",)),
+            ([("class:dim", " · 1 match "), ("class:accent", ("x" * 200,), 8), expired], hidden, 40,
+             ("…", "2 selected · 1 hidden")),
+        ]
+        for tail, status, columns, wanted in cases:
+            line = "".join(text for _, text in savegmail.header_line(tabs, 0, infos, tail, status, columns))
+            self.assertLessEqual(savegmail.cell_len(line), columns - 1, (columns, line))
+            for part in wanted:
+                self.assertIn(part, line, (columns, line))
+        line = "".join(text for _, text in savegmail.header_line(tabs, 0, infos, [wrong], "", 140))
+        self.assertIn("not jean.dupont.perso@gmail.com, r to try again", line)  # room: nothing shortened
+
+    def test_header_of_the_list_fits_with_filter_session_and_hidden_selection(self):
+        # The real list, 80 columns: 3 selected, a filter that hides 2 of them, an expired session.
+        state = savegmail.new_picker_state()
+        state["signed_out"] = True
+        header = screen_after("a/Subject 1\r", 80, 20, state=state, sign_in=lambda show_url: None).splitlines()[0]
+        self.assertLessEqual(savegmail.cell_len(header), 79, header)
+        for part in ("1 match Subj", "↻ session expired", "3 selected · 2 hidden"):
+            self.assertIn(part, header)
+
     def test_colors_readable_on_any_terminal_theme(self):
         # Rendered in the Trash view: no text in ANSI bright black (the background of Solarized dark),
         # and the cursor row, whose background is fixed, also fixes its text color (light themes).
@@ -1012,6 +1053,7 @@ class PickerTest(unittest.TestCase):
         self.assertTrue(state["signed_out"])
         self.assertEqual(state["sign_in_note"][0],
                          "↻ signed in as other@example.com, not me@example.com, r to try again")
+        self.assertEqual(state["sign_in_note"][2], ("↻ wrong account, r to try again",))  # for a full header
 
     def test_sync_drops_emails_gone_during_a_question(self):
         # The email asked about is deleted elsewhere while d or D waits: the question goes (D: says so until

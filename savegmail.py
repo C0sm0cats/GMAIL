@@ -338,6 +338,10 @@ def sign_in(reason):
 class WrongAccountError(Exception):
     """Signed in again with another Google account than the one the list shows."""
 
+    def __init__(self, message, address=None):
+        super().__init__(message)
+        self.address = address  # the account actually signed in, when known
+
 
 def sign_in_quietly(check=lambda creds: None, timeout=300, show_url=lambda url: None):
     """Browser OAuth sign-in that prints nothing, for use while the list is on screen.
@@ -1321,12 +1325,20 @@ def header_line(tabs, view, infos, tail, status, columns):
     """Fit the picker's one-line header into columns.
 
     tabs are (name, counter text or None, style) per view, view the current one; infos the view info
-    from longest to shortest; tail the filter and sync / sign-in fragments; status the selection
-    text, written at the right edge. tail and status always stay. When the line is full, the info
-    gets shorter first, then the other tabs lose their counters, get abbreviated, and finally only
-    the current tab is left, then without its counter; the info is cut last.
+    from longest to shortest; tail the filter and sync / sign-in fragments, each (style, text), or
+    (style, variants from longest to shortest, min_width) when it can get shorter; status the
+    selection text written at the right edge, or its variants from longest to shortest. tail and
+    status stay. When the line is full, the info gets shorter first, then the other tabs lose their
+    counters, get abbreviated, and finally only the current tab is left, then without its counter;
+    the info is cut last. When tail and status still do not fit, status takes its shorter variants,
+    then each tail fragment in turn takes its shorter variants, then is cut with … down to min_width;
+    whatever is still too long is cut with … before status, whose last variant always shows whole.
     """
-    width = columns - 1 - sum(cell_len(text) for _, text in tail) - (cell_len(status) + 2 if status else 0)
+    statuses = (status,) if isinstance(status, str) else tuple(status)
+    status = statuses[0]
+    fragments = [(part[0], (part[1],), None) if len(part) == 2 else (part[0], tuple(part[1]), part[2])
+                 for part in tail]
+    tail = [(style, variants[0]) for style, variants, _ in fragments]
 
     def tab_parts(level):
         parts = []
@@ -1341,6 +1353,27 @@ def header_line(tabs, view, infos, tail, status, columns):
                 parts.append((style, f" {name.split()[0][:3]} "))
         return parts
 
+    def spare():
+        """Room left once tail, status and the current tab alone are on the line."""
+        return (columns - 1 - sum(cell_len(text) for _, text in tab_parts(4))
+                - sum(cell_len(text) for _, text in tail) - (cell_len(status) + 2 if status else 0))
+
+    for status in statuses:
+        if spare() >= 0:
+            break
+    for position, (style, variants, _) in enumerate(fragments):
+        for variant in variants:
+            if spare() >= 0:
+                break
+            tail[position] = (style, variant)
+    for position, (style, _, min_width) in enumerate(fragments):
+        if spare() < 0 and min_width is not None:
+            text = tail[position][1]
+            lead = text[:len(text) - len(text.lstrip())]
+            kept = max(min_width, cell_len(text) + spare()) - cell_len(lead)
+            if kept < cell_len(text) - cell_len(lead):
+                tail[position] = (style, lead + fit(text, kept).rstrip())
+    width = columns - 1 - sum(cell_len(text) for _, text in tail) - (cell_len(status) + 2 if status else 0)
     for level in range(5):
         parts = tab_parts(level)
         room = width - sum(cell_len(text) for _, text in parts)
@@ -1349,11 +1382,12 @@ def header_line(tabs, view, infos, tail, status, columns):
             break
     else:
         info = fit(infos[-1], max(0, room)).rstrip()
-    parts = parts + [("class:view", info)] + list(tail)
-    if status:
-        gap = max(2, columns - sum(cell_len(text) for _, text in parts) - cell_len(status) - 1)
-        parts += [("", " " * gap), ("class:checked", status)]
-    return parts
+    parts = parts + [("class:view", info)] + tail
+    if not status:
+        return clip_line(parts, columns)
+    parts = clip_line(parts, columns - cell_len(status) - 2)
+    gap = max(2, columns - sum(cell_len(text) for _, text in parts) - cell_len(status) - 1)
+    return parts + [("", " " * gap), ("class:checked", status)]
 
 
 def clip_line(parts, columns):
@@ -1766,24 +1800,30 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         order = "largest first" if state["sort"] == "size" else "newest first"
         tail = []
         if state["query"]:
-            tail = [("class:dim", f" · {len(indexes)} match "), ("class:accent", state["query"])]
+            tail = [("class:dim", f" · {len(indexes)} match "), ("class:accent", (state["query"],), 8)]
+        # On a full line, these get shorter in this order (see header_line): the selection, the
+        # filter, then the sync / sign-in message.
         if state["signing_in"]:
-            tail.append(("class:error", " · ↻ sign in to Gmail in your browser…"))
+            tail.append(("class:error", (" · ↻ sign in to Gmail in your browser…", " · ↻ signing in…"), 8))
         elif state["signed_out"] and state["sign_in_note"] and time.monotonic() - state["sign_in_note"][1] < 10:
-            tail.append(("class:error", f" · {state['sign_in_note'][0]}"))
+            note, _, shorter = state["sign_in_note"]
+            tail.append(("class:error", tuple(f" · {text}" for text in (note, *shorter)), 8))
         elif state["signed_out"]:
-            tail.append(("class:error", " · ↻ Gmail session expired" + ", r to sign in" * bool(sign_in)))
+            again = ", r to sign in" * bool(sign_in)
+            tail.append(("class:error", (f" · ↻ Gmail session expired{again}", f" · ↻ session expired{again}"), 8))
         elif state["syncing"]:
             tail.append(("class:dim", " · ↻"))
         elif state["sync_note"] and time.monotonic() - state["sync_note"][2] < 10:
             style, text, _ = state["sync_note"]
-            tail.append((style, f" · {text}"))
+            tail.append((style, (f" · {text}",), 8))
         selected = len(state["selected"])
         status = ""
         if selected:
             status = f"{selected} selected "
             if hidden(state["selected"]):
-                status = f"{selected} selected · {hidden(state['selected'])} hidden by the filter "
+                count_hidden = hidden(state["selected"])
+                status = (f"{selected} selected · {count_hidden} hidden by the filter ",
+                          f"{selected} selected · {count_hidden} hidden ")
         # The selection count, the filter and the sync / sign-in state always show: the tabs and
         # the view info make room for them (see header_line).
         infos = (f" · {full_count} · {order}", f" · {full_count}", f" · {count}")
@@ -2196,7 +2236,11 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         except Exception as exc:
             debug(f"Sign-in failed: {exc}")
             failure = str(exc) if isinstance(exc, WrongAccountError) else "sign-in failed"
-            state["sign_in_note"] = (f"↻ {failure}, r to try again", time.monotonic())
+            shorter = ()  # for a full header, longest first
+            if isinstance(exc, WrongAccountError):
+                shorter = (f"↻ signed in as {exc.address}, r to try again",) * bool(exc.address)
+                shorter += ("↻ wrong account, r to try again",)
+            state["sign_in_note"] = (f"↻ {failure}, r to try again", time.monotonic(), shorter)
         else:
             state["signed_out"] = False
         finally:
@@ -2949,7 +2993,7 @@ def interactive_download_main():
             profile = build("gmail", "v1", credentials=fresh).users().getProfile(userId=user_id).execute()
             address = profile.get("emailAddress", user_id)
             if address.lower() != account.lower():
-                raise WrongAccountError(f"signed in as {address}, not {account}")
+                raise WrongAccountError(f"signed in as {address}, not {account}", address)
 
         def adopt(fresh):
             creds.token, creds._refresh_token, creds.expiry = fresh.token, fresh.refresh_token, fresh.expiry
