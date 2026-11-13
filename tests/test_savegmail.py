@@ -2236,6 +2236,59 @@ class AttachmentListTest(unittest.TestCase):
         # Appended to the parsed page, so the email's unclosed comment cannot swallow it.
         self.assertNotIn("IMG_", browser.pages[0].html)
 
+    def test_attachment_list_keeps_its_colors_and_direction_in_a_dark_rtl_email(self):
+        import base64
+        import tempfile
+        from email.message import EmailMessage
+        from playwright.sync_api import sync_playwright
+        msg = EmailMessage()
+        msg["Subject"] = "Dark"
+        msg["From"] = "s@example.com"
+        msg.set_content("alt")
+        msg.add_alternative("<html dir='rtl'><body bgcolor='#000000' style='background-color:#000000'>"
+                            "<p style='color:#fff'>مرحبا</p></body></html>", subtype="html")
+        for name in ["2026-10 invoice.pdf", "فاتورة.pdf"]:
+            msg.add_attachment(b"x", maintype="application", subtype="octet-stream", filename=name)
+        styles = []
+
+        class SpyBrowser:
+            """Real Chromium; notes the computed style of the attachment list when the page is printed."""
+            def __init__(self, browser):
+                self.browser = browser
+
+            def new_page(self, **kwargs):
+                page = self.browser.new_page(**kwargs)
+                pdf = page.pdf
+
+                def spy_pdf(**pdf_kwargs):
+                    styles.append(page.evaluate("""() => {
+                        const block = [...document.body.children].pop();
+                        const style = el => getComputedStyle(el);
+                        return [style(block).backgroundColor, style(block).direction,
+                                [...block.querySelectorAll('a')].map(a => style(a).color),
+                                [...block.querySelectorAll('li')].map(li => style(li).direction)];
+                    }"""))
+                    return pdf(**pdf_kwargs)
+
+                page.pdf = spy_pdf
+                return page
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(channel="chromium")
+            except Exception as error:  # no Playwright Chromium here; never install it from a test
+                self.skipTest(f"Chromium unavailable: {error}")
+            try:
+                with tempfile.TemporaryDirectory() as save_dir:
+                    savegmail.save_email_and_attachments(
+                        FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1",
+                        save_dir, SpyBrowser(browser))
+            finally:
+                browser.close()
+        # Its own white background and dark links, not the email's black; left to right, each name in
+        # its own direction ("2026-10 invoice.pdf" read as written, the Arabic name right to left).
+        self.assertEqual(styles, [["rgb(255, 255, 255)", "ltr", ["rgb(26, 13, 171)"] * 2, ["ltr", "rtl"]]])
+
 
 class SplitBodyTest(unittest.TestCase):
     """A body split into several text parts around an attachment is rendered whole, in order."""

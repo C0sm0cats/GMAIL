@@ -776,9 +776,12 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
 
     # The attachment list is printed once, at the end of the email, in the 10px text of the header:
     # in the footer template, Chromium would repeat it on every page and take that room from the body.
+    # Appended to the email's body, it would take its dark background, link colors and right-to-left
+    # direction: it sets its own, and each name keeps the direction of its own script.
     block_style = ("font-family: Arial, sans-serif; font-size: 10px; line-height: normal; color: #666;"
+                   " background: #fff; direction: ltr;"
                    " text-align: center; white-space: normal; overflow-wrap: anywhere; clear: both;"
-                   " margin: 16px 0 0; padding: 8px 12px 0; border-top: 1px solid #ccc;")
+                   " margin: 16px 0 0; padding: 8px 12px; border-top: 1px solid #ccc;")
     if attachments_files:
         attachments_html = f"<div style='{block_style}'>\n<div>Attachments:</div>\n"
         attachments_html += "<ul style='list-style-type: none; padding: 0; margin: 0;'>\n"
@@ -787,8 +790,9 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
             attachment_url = pathlib.Path(os.path.abspath(attachment_path)).as_uri()  # file:///C:/… on Windows
             # Previews don't write attachments, so there is no file to link to.
             name = html.escape(attachment)
-            label = f"<a href='{html.escape(attachment_url)}'>{name}</a>" if save_attachments else name
-            attachments_html += f"  <li style='margin: 0; padding: 0;'>{label}</li>\n"
+            label = (f"<a href='{html.escape(attachment_url)}' style='color: #1a0dab;'>{name}</a>"
+                     if save_attachments else name)
+            attachments_html += f"  <li dir='auto' style='margin: 0; padding: 0;'>{label}</li>\n"
         attachments_html += "</ul>\n</div>\n"
     else:
         attachments_html = f"<div style='{block_style}'>No attachments for this mail</div>\n"
