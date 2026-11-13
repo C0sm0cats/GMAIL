@@ -3765,6 +3765,123 @@ class LoadMoreSessionTest(unittest.TestCase):
         self.assertEqual(queries[1:], ["before:8001", "before:7001", "before:5001"])
 
 
+class FilteredMailboxApi(HistoryMailboxApi):
+    """HistoryMailboxApi whose messages.list applies the search: in:, is:, from:, before:, includeSpamTrash."""
+
+    def __init__(self, mailbox):
+        # mailbox: [(id, labels, sender, internalDate)], any order; listings come newest first.
+        super().__init__({msg_id: labels for msg_id, labels, _, _ in mailbox})
+        self.senders = {msg_id: sender for msg_id, _, sender, _ in mailbox}
+        self.dates = {msg_id: date for msg_id, _, _, date in mailbox}
+
+    def matches(self, msg_id, q, include_spam_trash):
+        labels = self.mail[msg_id]
+        if not include_spam_trash and {"TRASH", "SPAM"} & set(labels):
+            return False
+        for term in q.replace("(", " ").replace(")", " ").split():
+            negated, term = term.startswith("-"), term.lstrip("-")
+            key, _, value = term.partition(":")
+            if key == "in":
+                hit = value.upper() in labels
+            elif key == "is":
+                hit = {"unread": "UNREAD", "starred": "STARRED"}.get(value, value.upper()) in labels
+            elif key == "from":
+                hit = value in self.senders[msg_id]
+            elif key == "before":
+                hit = self.dates[msg_id] < int(value) * 1000
+            else:
+                raise AssertionError(f"search term the fake does not know: {term}")
+            if hit == negated:
+                return False
+        return True
+
+    def list(self, userId, q="", maxResults=100, pageToken=None, fields=None, includeSpamTrash=False, **kwargs):
+        if not q and maxResults > 1:
+            self.lists += 1
+        ids = sorted((msg_id for msg_id in self.mail if self.matches(msg_id, q, includeSpamTrash)),
+                     key=lambda msg_id: self.dates[msg_id], reverse=True)
+        start = int(pageToken or 0)
+        page = ids[start:start + maxResults]
+        result = {"messages": [{"id": msg_id} for msg_id in page], "resultSizeEstimate": len(ids)}
+        if start + maxResults < len(ids):
+            result["nextPageToken"] = str(start + maxResults)
+        return FakeResult(result)
+
+    def get(self, userId, id, format, fields):
+        detail = super().get(userId, id, format, fields).execute()
+        detail.update(internalDate=str(self.dates[id]), payload={"headers": [
+            {"name": "From", "value": self.senders[id]}, {"name": "Subject", "value": f"Subject {id}"}]})
+        return FakeResult(detail)
+
+
+class ViewFilterSessionTest(unittest.TestCase):
+    """m and the background sync keep the view's search (in:trash, --query): no other email joins the list."""
+
+    # Newest first. Under --query from:news, the Trash view holds t1, t2, t3; the rest is alive or not news.
+    MAILBOX = [("live1", ["INBOX"], "News <news@example.com>", 10_000_000),
+               ("t1", ["TRASH"], "News <news@example.com>", 9_000_000),
+               ("other1", ["TRASH"], "Bob <bob@example.com>", 8_500_000),
+               ("live2", ["INBOX"], "News <news@example.com>", 8_000_000),
+               ("t2", ["TRASH"], "News <news@example.com>", 7_000_000),
+               ("live3", ["INBOX"], "News <news@example.com>", 6_000_000),
+               ("other2", ["TRASH"], "Bob <bob@example.com>", 5_500_000),
+               ("t3", ["TRASH"], "News <news@example.com>", 5_000_000)]
+
+    def run_trash_session(self, api, step):
+        """Open the Trash view under --query from:news --max 2, then step(messages, load_more, sync)."""
+        import io
+        import tempfile
+        from unittest import mock
+        from rich.console import Console
+        save_dir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, save_dir, True)
+        shown = []
+
+        def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, *rest):
+            if views[view] != "Trash":
+                return "prev_view", []  # All mail is first, Trash last
+            if not shown:
+                shown.append([message["id"] for message in messages])
+                step(messages, load_more, sync)
+            return "quit", []
+
+        with mock.patch.multiple(
+            savegmail, authenticate=lambda: object(), build=lambda *a, **k: api, user_labels=lambda *a: {},
+            ask_user_to_select_messages=ask, sync_playwright=lambda: FakePlaywright(),
+            launch_browser=lambda *a, **k: mock.Mock(), open_quietly=lambda url: True,
+            console=Console(file=io.StringIO()),
+        ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir, "--max", "2",
+                                           "--query", "from:news"]):
+            savegmail.interactive_download_main()
+        self.assertEqual(shown, [["t1", "t2"]])
+
+    def test_m_keeps_the_view_filter(self):
+        api = FilteredMailboxApi(self.MAILBOX)
+        loads = []
+
+        def step(messages, load_more, sync):
+            more = True
+            while more and len(loads) < 5:
+                older, more, loaded = load_more()  # as the list does on m
+                loads.append([message["id"] for message in older])
+                messages.extend(older)
+                loaded()
+        self.run_trash_session(api, step)
+        self.assertEqual(loads, [["t3"]])  # neither live3 (Inbox) nor other2 (not from news)
+
+    def test_sync_keeps_the_view_filter(self):
+        api = FilteredMailboxApi(self.MAILBOX)
+        results = []
+
+        def step(messages, load_more, sync):
+            api.change("t1", ["TRASH", "STARRED"])  # starred on the phone: the sync looks at Gmail again
+            results.append(sync([dict(message) for message in messages]))
+        self.run_trash_session(api, step)
+        self.assertEqual(results[0]["new"], [])  # neither live1 (Inbox) nor other1 (not from news)
+        self.assertEqual(results[0]["gone"], set())
+        self.assertEqual(results[0]["labels"], {"t1": ["TRASH", "STARRED"]})
+
+
 class MaxOptionTest(unittest.TestCase):
     """--max below 1 is refused before sign-in, instead of listing nothing without a word."""
 
