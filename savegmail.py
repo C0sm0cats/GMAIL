@@ -24,6 +24,7 @@ import io
 import contextlib
 import shlex
 import shutil
+import signal
 import time
 import tempfile
 import threading
@@ -169,6 +170,17 @@ def measure_pdf_margins(browser, header_template, footer_template):
 
 class BrowserStartError(Exception):
     """Chromium could not be started (missing display or system libraries, failed install, ...)."""
+
+
+class BrowserStartStopped(Exception):
+    """Ctrl+C while Chromium was starting: nothing rendered nor changed yet."""
+
+
+class StoppedError(Exception):
+    """An email left as it was because Ctrl+C stopped the batch calls before its turn."""
+
+    def __init__(self):
+        super().__init__("Stopped (Ctrl+C)")
 
 
 def chromium_start_reason(error):
@@ -906,12 +918,30 @@ def empty_trash(service):
 API_BATCH_SIZE = 50  # Gmail throttles larger batches
 
 
-def run_batched(service, ids, make_request):
+def run_batched(service, ids, make_request, stoppable=False):
     """Run make_request(id) for every id in Gmail batch calls, retrying failed entries one by one.
 
-    Returns ({id: response}, {id: exception}).
+    Returns ({id: response}, {id: exception}). stoppable: Ctrl+C (in the main thread) lets the call in
+    progress finish, so every id done is known, then stops: the ids not sent fail with StoppedError.
     """
     responses, errors = {}, {}
+    stopped = []
+    previous_handler = None
+    if stoppable and threading.current_thread() is threading.main_thread():
+        previous_handler = signal.signal(signal.SIGINT, lambda signum, frame: stopped.append(signum))
+    try:
+        run_batched_calls(service, ids, make_request, responses, errors, stopped)
+    finally:
+        if previous_handler is not None:
+            signal.signal(signal.SIGINT, previous_handler)
+    for msg_id in ids:
+        if msg_id not in responses and msg_id not in errors:
+            errors[msg_id] = StoppedError()
+    return responses, errors
+
+
+def run_batched_calls(service, ids, make_request, responses, errors, stopped):
+    """run_batched's calls, until stopped (a list Ctrl+C fills) is no longer empty."""
 
     def collect(request_id, response, exception):
         if exception is None:
@@ -920,6 +950,8 @@ def run_batched(service, ids, make_request):
             errors[request_id] = exception
 
     for start in range(0, len(ids), API_BATCH_SIZE):
+        if stopped:
+            return
         chunk = ids[start:start + API_BATCH_SIZE]
         batch = service.new_batch_http_request(callback=collect)
         for msg_id in chunk:
@@ -936,6 +968,8 @@ def run_batched(service, ids, make_request):
     # Retry throttled/failed batch entries one by one.
     pending = list(errors)
     for index, msg_id in enumerate(pending):
+        if stopped:
+            return
         try:
             responses[msg_id] = make_request(msg_id).execute()
             del errors[msg_id]
@@ -946,7 +980,6 @@ def run_batched(service, ids, make_request):
                 # Session expired or network down: the other retries would fail the same way.
                 errors.update({other: exc for other in pending[index + 1:]})
                 break
-    return responses, errors
 
 
 def user_labels(service, user_id):
@@ -1122,13 +1155,15 @@ def delete_messages(service, user_id, ids):
 
 def trash_messages(service, user_id, ids):
     """Move messages to the Gmail trash. Returns {id: exception} for the ones that failed."""
-    _, errors = run_batched(service, ids, lambda msg_id: service.users().messages().trash(userId=user_id, id=msg_id))
+    _, errors = run_batched(service, ids, lambda msg_id: service.users().messages().trash(userId=user_id, id=msg_id),
+                            stoppable=True)
     return errors
 
 
 def untrash_messages(service, user_id, ids):
     """Restore messages from the Gmail trash. Returns {id: exception} for the ones that failed."""
-    _, errors = run_batched(service, ids, lambda msg_id: service.users().messages().untrash(userId=user_id, id=msg_id))
+    _, errors = run_batched(service, ids, lambda msg_id: service.users().messages().untrash(userId=user_id, id=msg_id),
+                            stoppable=True)
     return errors
 
 
@@ -2890,6 +2925,9 @@ def interactive_download_main():
                 playwright = playwright or sync_playwright().start()
                 with console.status("[dim]Preparing Chromium…[/]"):
                     browser = launch_browser(playwright, headed=args.headed)
+            except KeyboardInterrupt:
+                browser = None
+                raise BrowserStartStopped() from None
             except Exception as error:
                 browser = None
                 debug(f"Chromium could not start: {error}")
@@ -3408,6 +3446,9 @@ def interactive_download_main():
                     if len(saved) + len(failed) < len(chosen):
                         notice.append(stopped_notice(len(saved) + len(failed), len(chosen)))
                     notice += failure_notice(chosen, failed)
+            except BrowserStartStopped:
+                # Ctrl+C on "Preparing Chromium…": nothing was rendered nor changed, selection and undo kept.
+                notice = [stopped_notice(0, len(chosen))]
             except BrowserStartError as exc:
                 # Nothing was rendered nor changed: back to the list, the selection and undo kept.
                 # The reason is one line (the notice wraps it), the full Playwright log went to debug.

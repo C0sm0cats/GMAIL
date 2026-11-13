@@ -309,6 +309,29 @@ class RunBatchedTest(unittest.TestCase):
         self.assertEqual(set(errors), {"7"})
         self.assertEqual(len(responses), 119)
 
+    def test_ctrl_c_finishes_the_batch_then_stops(self):
+        import signal
+
+        class CtrlCBatch(FakeBatch):
+            def execute(self):
+                signal.raise_signal(signal.SIGINT)  # Ctrl+C while Gmail answers the first batch
+                super().execute()
+
+        service = FakeService()
+        service.new_batch_http_request = lambda callback: CtrlCBatch(callback, service.sizes)
+        ids = [str(i) for i in range(120)]
+        failures = {"3": 1}  # its retry is not made either: the user asked to stop
+        handler = signal.getsignal(signal.SIGINT)
+        responses, errors = savegmail.run_batched(service, ids, lambda msg_id: FakeRequest(msg_id, failures),
+                                                  stoppable=True)
+        self.assertEqual(service.sizes, [50])
+        self.assertEqual(sorted(responses, key=int), [str(i) for i in range(50) if i != 3])
+        self.assertEqual(sorted(errors, key=int), ["3"] + ids[50:])
+        self.assertEqual(str(errors["50"]), "Stopped (Ctrl+C)")
+        self.assertIs(signal.getsignal(signal.SIGINT), handler)
+        with self.assertRaises(KeyboardInterrupt):  # loading emails (stoppable=False) still stops at once
+            savegmail.run_batched(service, ids, lambda msg_id: FakeRequest(msg_id, {}))
+
 
 class FakeListService(FakeService):
     """Gmail list (newest first, paged) + metadata, for refresh_messages."""
@@ -336,10 +359,12 @@ class FakeListService(FakeService):
 
 
 class FakeResult:
-    def __init__(self, value):
-        self.value = value
+    def __init__(self, value, effect=None):
+        self.value, self.effect = value, effect
 
     def execute(self):
+        if self.effect is not None:
+            self.effect()
         return self.value
 
 
@@ -2760,6 +2785,39 @@ class BatchCallFailureTest(unittest.TestCase):
         self.assertIn("could not move to trash", failed["x"])
         self.assertEqual(list(files), ["y"])
 
+    def test_ctrl_c_while_moving_to_trash_keeps_the_rest_in_gmail(self):
+        import io
+        import signal
+        import tempfile
+        from unittest import mock
+
+        def fake_save(service, user_id, msg_id, save_dir, browser, on_step):
+            path = os.path.join(save_dir, f"{msg_id}.pdf")
+            open(path, "w").close()
+            return {"files": [path], "attachments": 0}
+
+        class CtrlCBatch(FakeBatch):
+            def execute(self):
+                signal.raise_signal(signal.SIGINT)  # Ctrl+C on "moving to trash…", during the first call
+                super().execute()
+
+        messages = [{"id": msg_id, "from": "S <s@example.com>", "subject": msg_id, "snippet": "",
+                     "internalDate": 1_700_000_000_000} for msg_id in ("x", "y")]
+        service = FakeSaveService(raw="")
+        service.new_batch_http_request = lambda callback: CtrlCBatch(callback, service.sizes)
+        with tempfile.TemporaryDirectory() as save_dir, \
+                mock.patch.object(savegmail, "API_BATCH_SIZE", 1), \
+                mock.patch.object(savegmail, "save_email_and_attachments", fake_save), \
+                mock.patch.object(savegmail, "console", savegmail.Console(file=io.StringIO())):
+            try:
+                saved, _, failed, files = savegmail.save_messages(service, "me", messages, save_dir, None, True)
+            except KeyboardInterrupt:  # escaping, it would stop the whole test run
+                self.fail("Ctrl+C escaped save_messages")
+            self.assertEqual(sorted(os.listdir(save_dir)), ["x.pdf"])
+        self.assertEqual(service.trashed, ["x"])
+        self.assertEqual([message["id"] for message in saved], ["x"])
+        self.assertEqual(failed, {"y": "could not move to trash: Stopped (Ctrl+C)"})
+
     def test_trash_batch_failure_returns_errors(self):
         errors = savegmail.trash_messages(FailingBatchService(), "me", ["x", "y"])
         self.assertEqual(set(errors), {"x", "y"})
@@ -3020,6 +3078,34 @@ class FakeMailboxApi(FakeBatchApi):
         return None
 
 
+class FakeTrashApi(FakeBatchApi):
+    """FakeBatchApi with Gmail's trash / untrash in batch calls; Ctrl+C comes during the first batch call."""
+
+    real_calls = FakeBatchApi.real_calls | {"trash_messages", "untrash_messages"}
+
+    def __init__(self):
+        super().__init__()
+        self.batches = []
+
+    def trash(self, userId, id):
+        return FakeResult(None, lambda: self.gmail.places.__setitem__(id, "trash"))
+
+    def untrash(self, userId, id):
+        return FakeResult(None, lambda: self.gmail.places.__setitem__(id, "inbox"))
+
+    def new_batch_http_request(self, callback):
+        import signal
+        api = self
+
+        class Batch(FakeBatch):
+            def execute(self):
+                if not api.batches:
+                    signal.raise_signal(signal.SIGINT)
+                api.batches.append(len(self.items))
+                super().execute()
+        return Batch(callback, [])
+
+
 class GmailCallSizeTest(unittest.TestCase):
     """Gmail takes at most 1000 ids per batchDelete / batchModify."""
 
@@ -3195,6 +3281,36 @@ class UndoAfterDeleteTest(unittest.TestCase):
         self.assertEqual(gmail.places["A"], "trash")
         self.assertEqual(left, ["A-att.bin", "A.pdf"])
         self.assertEqual(offered[-1], "save+trash (1)")
+
+    def test_ctrl_c_during_trash_keeps_undo_for_the_ones_moved(self):
+        from unittest import mock
+        places = {name: "inbox" for name in "ABCDE"}
+        api = FakeTrashApi()
+        with mock.patch.object(savegmail, "API_BATCH_SIZE", 2):
+            try:
+                gmail, left, offered = self.run_session(places, [("trash", list("ABCDE")), ("undo", [])], api=api)
+            except KeyboardInterrupt:  # escaping, it would stop the whole test run
+                self.fail("Ctrl+C on d closed the program")
+        # The first call (2 emails) finishes, the others are not sent; u then puts back those 2.
+        self.assertEqual(api.batches, [2, 2])
+        self.assertEqual(len(self.shown[1]), 3)
+        self.assertEqual(self.notices[1][0], " ✓ 2 emails moved to trash (not saved) · u undo")
+        self.assertRegex(self.notices[1][1], r"^ ✗ Subject [A-E] · Stopped \(Ctrl\+C\)$")
+        self.assertEqual(offered[1], "trash (2)")
+        self.assertEqual(gmail.places, places)
+
+    def test_ctrl_c_while_chromium_starts_keeps_selection_and_undo(self):
+        def launch(*args, **kwargs):
+            raise KeyboardInterrupt
+        try:
+            gmail, left, offered = self.run_session({"A": "inbox", "B": "inbox"},
+                                                    [("trash", ["A"]), ("download", ["B"])], launch=launch)
+        except KeyboardInterrupt:  # escaping, it would stop the whole test run
+            self.fail("Ctrl+C on Preparing Chromium… closed the program")
+        self.assertEqual(self.notices[-1], [" ✗ Stopped after 0 of 1 · Ctrl+C"])
+        self.assertEqual(offered[-1], "trash (1)")
+        self.assertEqual(gmail.places, {"A": "trash", "B": "inbox"})
+        self.assertIn("Done", self.output.getvalue())
 
     def test_crashed_chromium_is_started_again(self):
         from unittest import mock
