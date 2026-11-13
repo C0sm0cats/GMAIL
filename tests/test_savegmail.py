@@ -1741,6 +1741,61 @@ class LongLineTest(unittest.TestCase):
         self.assertLessEqual(widths["html"], 794)
 
 
+class BlurEffectTest(unittest.TestCase):
+    """A tall element with a blur or soft shadow took a minute per printed page: a 1 KB email blocked for hours."""
+
+    def test_blurs_and_shadows_are_dropped_before_printing(self):
+        import base64
+        import tempfile
+        from email.message import EmailMessage
+        from playwright.sync_api import sync_playwright
+        msg = EmailMessage()
+        msg["Subject"] = "Blur"
+        msg["From"] = "s@example.com"
+        msg.set_content(
+            '<style>p::before { content: "a"; filter: blur(9px); box-shadow: 0 0 90px red; }</style>'
+            '<div id="d" style="height: 2970mm; filter: blur(80px); backdrop-filter: blur(9px); '
+            'box-shadow: 0 0 100px red, 1px 1px 100px red; text-shadow: 0 0 50px red">x</div><p>p</p>'
+            '<svg><filter id="f"><feGaussianBlur stdDeviation="80"/></filter>'
+            '<rect id="r" width="9" height="9" filter="url(#f)"/></svg>', subtype="html")
+        styles = []
+
+        class StyleRecordingBrowser:
+            # The real page, with the computed effects recorded when it is printed.
+            def __init__(self, browser):
+                self.browser = browser
+
+            def new_page(self, **kwargs):
+                page = self.browser.new_page(**kwargs)
+                real_pdf = page.pdf
+
+                def pdf(**options):
+                    styles.append(page.evaluate("""() => {
+                        const d = getComputedStyle(document.getElementById('d'));
+                        const b = getComputedStyle(document.querySelector('p'), '::before');
+                        return [d.filter, d.backdropFilter, d.boxShadow, d.textShadow, b.filter, b.boxShadow,
+                                getComputedStyle(document.getElementById('r')).filter];
+                    }"""))
+                    return real_pdf(**options)
+
+                page.pdf = pdf
+                return page
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(channel="chromium")
+            except Exception as error:  # no Playwright Chromium here; never install it from a test
+                self.skipTest(f"Chromium unavailable: {error}")
+            try:
+                with tempfile.TemporaryDirectory() as save_dir:
+                    savegmail.save_email_and_attachments(
+                        FakeRawService(base64.urlsafe_b64encode(msg.as_bytes()).decode()), "me", "id1",
+                        save_dir, StyleRecordingBrowser(browser))
+            finally:
+                browser.close()
+        self.assertEqual(styles, [["none"] * 7])
+
+
 class MalformedAddressTest(unittest.TestCase):
     """Python's address parser raises on some malformed addresses: the email is still saved, with the raw value."""
 

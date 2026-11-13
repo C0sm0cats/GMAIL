@@ -100,7 +100,11 @@ MAX_PDF_PAGES = 1000
 IMAGE_WAIT_SECONDS = 15
 
 # Added to every email page before printing; !important wins over a sender's own white-space: pre.
-PRINT_WRAP_CSS = "pre { white-space: pre-wrap !important; overflow-wrap: anywhere !important; }"
+# Blurs and soft shadows are rasterized on every printed page (a minute per page for a 1 KB email): drop them,
+# along with the filter attribute of inline SVG.
+PRINT_WRAP_CSS = ("pre { white-space: pre-wrap !important; overflow-wrap: anywhere !important; }"
+                  " *, *::before, *::after { filter: none !important; backdrop-filter: none !important;"
+                  " box-shadow: none !important; text-shadow: none !important; }")
 
 
 def new_email_page(browser, resources=None):
