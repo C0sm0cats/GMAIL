@@ -3660,6 +3660,27 @@ class RestoreKeyTest(unittest.TestCase):
         self.assertEqual(self.notices[2][0], " ↶ 1 email restored from trash")
         self.assertNotIn("Done", self.output.getvalue())
 
+    def test_restore_takes_the_emails_off_the_trash_list_and_the_selection(self):
+        # Sort the trash: select the emails to keep, R, then D on the one left under the cursor.
+        gmail, left, offered = self.run_session({"t0": "trash", "t1": "trash", "t2": "trash"}, [
+            ("prev_view", []), ("restore", {"select": ["t1", "t2"], "cursor": "t0"}), ("delete", {"cursor": "t0"})])
+        self.assertEqual(self.shown[2], ["t0"])
+        self.assertEqual(self.selected[2], [])
+        self.assertEqual(gmail.places, {"t0": "gone", "t1": "inbox", "t2": "inbox"})
+
+    def test_unarchive_and_not_spam_take_the_emails_off_their_list(self):
+        # Tab twice: Archived; Shift+Tab twice: Spam. R on two selected emails, then D on the one left.
+        for place, views, action in [("archive", [("next_view", [])] * 2, "unarchive"),
+                                     ("spam", [("prev_view", [])] * 2, "not_spam")]:
+            with self.subTest(place=place):
+                gmail, left, offered = self.run_session(
+                    {"x0": place, "x1": place, "x2": place},
+                    views + [(action, {"select": ["x1", "x2"], "cursor": "x0"}), ("delete", {"cursor": "x0"})],
+                    api=SpamMailboxApi(), gmail_class=ViewGmail)
+                self.assertEqual(self.shown[3], ["x0"])
+                self.assertEqual(self.selected[3], [])
+                self.assertEqual(gmail.places, {"x0": "gone", "x1": "inbox", "x2": "inbox"})
+
 
 class SyncedMailboxApi(FakeService):
     """Gmail API over {id: labels}: messages.get gives the labels, labels.get and messages.list the counters."""
