@@ -933,11 +933,16 @@ def user_labels(service, user_id):
     return {label["id"]: label["name"] for label in labels if label.get("type") == "user"}
 
 
-def current_labels(service, user_id, ids):
-    """{id: labels} as Gmail has them now (read / unread, star, Inbox…)."""
-    details, _ = run_batched(service, list(ids), lambda msg_id:
-                             service.users().messages().get(userId=user_id, id=msg_id, format="minimal",
-                                                            fields="id,labelIds"))
+def current_labels(service, user_id, ids, failed=None):
+    """{id: labels} as Gmail has them now (read / unread, star, Inbox…).
+
+    The ids Gmail would not read are added to the set failed, when given.
+    """
+    details, errors = run_batched(service, list(ids), lambda msg_id:
+                                  service.users().messages().get(userId=user_id, id=msg_id, format="minimal",
+                                                                 fields="id,labelIds"))
+    if failed is not None:
+        failed.update(errors)
     return {msg_id: detail["labelIds"] for msg_id, detail in details.items() if "labelIds" in detail}
 
 
@@ -964,11 +969,12 @@ def history_changes(service, user_id, start):
             return changed, response.get("historyId", start)
 
 
-def sync_changes(service, user_id, view, loaded):
+def sync_changes(service, user_id, view, loaded, failed=None):
     """What changed in Gmail for a view since its history id: (new, gone ids, relabeled, new history id).
 
     relabeled lists the loaded ids whose labels may have changed: only those Gmail's history lists, and
     nothing is listed when nothing changed. Without a history id, or one too old (404), every loaded email.
+    New emails Gmail would not read are added to the set failed, when given.
     """
     changed, history = None, None
     if view.get("history"):
@@ -983,18 +989,19 @@ def sync_changes(service, user_id, view, loaded):
     elif not changed:
         return [], set(), [], history
     new, gone = refresh_messages(service, user_id, view["query"], loaded,
-                                 since=view["floor"] if view["more"] else None, in_trash=view["in_trash"])
+                                 since=view["floor"] if view["more"] else None, in_trash=view["in_trash"],
+                                 failed=failed)
     relabeled = [message["id"] for message in loaded
                  if message["id"] not in gone and (changed is None or message["id"] in changed)]
     return new, gone, relabeled, history
 
 
-def refresh_labels(service, user_id, messages):
+def refresh_labels(service, user_id, messages, failed=None):
     """Re-read the labels of loaded emails, changed in Gmail meanwhile.
 
-    Updates messages in place; returns how many changed.
+    Updates messages in place; returns how many changed. The ids Gmail would not read go to failed.
     """
-    fresh = current_labels(service, user_id, [message["id"] for message in messages])
+    fresh = current_labels(service, user_id, [message["id"] for message in messages], failed=failed)
     changed = 0
     for message in messages:
         labels = fresh.get(message["id"])
@@ -1177,11 +1184,12 @@ def list_options(in_trash):
     return {"includeSpamTrash": True} if in_trash else {}
 
 
-def list_candidate_messages(service, user_id, query="", max_results=50, page_token=None, in_trash=False):
+def list_candidate_messages(service, user_id, query="", max_results=50, page_token=None, in_trash=False,
+                            failed=None):
     """Return (messages sorted newest first, token for the next older page or None).
 
     Empty query means: list all visible Gmail messages, letting the user choose
-    which ones to download afterwards.
+    which ones to download afterwards. The ids Gmail would not read are added to the set failed, when given.
     """
     ids = []
     while len(ids) < max_results:
@@ -1197,7 +1205,9 @@ def list_candidate_messages(service, user_id, query="", max_results=50, page_tok
         if not page_token:
             break
 
-    details, _ = run_batched(service, ids, lambda msg_id: metadata_request(service, user_id, msg_id))
+    details, errors = run_batched(service, ids, lambda msg_id: metadata_request(service, user_id, msg_id))
+    if failed is not None:
+        failed.update(errors)
     detailed_messages = [to_candidate(details[msg_id]) for msg_id in ids if msg_id in details]
     detailed_messages.sort(key=lambda item: item["internalDate"], reverse=True)
     return detailed_messages, page_token
@@ -1513,12 +1523,13 @@ def sender_name(sender):
     return name.strip().strip('"') or address or "—"
 
 
-def refresh_messages(service, user_id, query, loaded, since=None, page_size=100, in_trash=False):
+def refresh_messages(service, user_id, query, loaded, since=None, page_size=100, in_trash=False, failed=None):
     """Re-sync loaded emails with Gmail.
 
     since is the internalDate the loaded range goes down to: older emails are left to load_more. With
     since=None (nothing older to load) the whole query is synced.
-    Returns (new messages, ids of loaded messages Gmail no longer lists).
+    Returns (new messages, ids of loaded messages Gmail no longer lists); the ids of new emails Gmail
+    would not read are added to the set failed, when given.
     """
     known = {message["id"] for message in loaded}
     seen, new, page_token = set(), [], None
@@ -1535,7 +1546,9 @@ def refresh_messages(service, user_id, query, loaded, since=None, page_size=100,
             last = max(position for position, msg_id in enumerate(ids) if msg_id in known)
             candidates = [msg_id for msg_id in ids[:last + 1] if msg_id not in known]
             crossed = True
-        details, _ = run_batched(service, candidates, lambda msg_id: metadata_request(service, user_id, msg_id))
+        details, errors = run_batched(service, candidates, lambda msg_id: metadata_request(service, user_id, msg_id))
+        if failed is not None:
+            failed.update(errors)
         for msg_id in candidates:
             if msg_id not in details:
                 continue
@@ -2887,8 +2900,10 @@ def interactive_download_main():
             with console.status(f"[dim]Fetching {view['name']}…[/]"):
                 # Before the listing: the syncs ask Gmail's history what changed since then.
                 history = history_id(service, user_id)
+                failed = set()
                 loaded, token = list_candidate_messages(
-                    service, user_id, query=view["query"], max_results=args.max, in_trash=view["in_trash"]
+                    service, user_id, query=view["query"], max_results=args.max, in_trash=view["in_trash"],
+                    failed=failed,
                 )
                 view["total"] = estimate_total(service, user_id, view["query"], view["in_trash"]) if token else None
             view["messages"][:] = loaded
@@ -2896,7 +2911,9 @@ def interactive_download_main():
             # stays right after refreshes and after emails were trashed during the session.
             view["floor"] = min((message["internalDate"] for message in loaded), default=None)
             view["more"] = token is not None
-            view["loaded"], view["stale"], view["history"] = True, False, history
+            # An email Gmail would not read is missing from the list: without a history id, the next sync
+            # re-lists the whole view and brings it.
+            view["loaded"], view["stale"], view["history"] = True, False, None if failed else history
 
         def load_more_for(view):
             # Runs in a worker thread the list may abandon: it uses the sync connection (the main one
@@ -2904,9 +2921,10 @@ def interactive_download_main():
             def load_more():
                 with sync_lock:
                     before = f"before:{view['floor'] // 1000 + 1}"  # Gmail dates are in seconds; duplicates dropped
+                    failed = set()
                     older, token = list_candidate_messages(
                         sync_service, user_id, query=f"{view['query']} {before}".strip(), max_results=args.max,
-                        in_trash=view["in_trash"],
+                        in_trash=view["in_trash"], failed=failed,
                     )
                 known = {message["id"] for message in view["messages"]}
                 older = [message for message in older if message["id"] not in known]
@@ -2915,6 +2933,8 @@ def interactive_download_main():
                     if older:
                         view["floor"] = min(view["floor"], min(message["internalDate"] for message in older))
                     view["more"] = token is not None
+                    if failed:
+                        view["history"] = None  # the next sync re-lists the view and brings the missing ones
                 return older, token is not None, loaded
             return load_more
 
@@ -2928,9 +2948,11 @@ def interactive_download_main():
 
         def refresh_view(view, quiet=False):
             """Re-sync a view with Gmail; returns its notice lines (none if quiet and nothing changed)."""
+            failed = set()
             try:
                 with console.status("[dim]Checking Gmail…[/]"):
-                    new, removed, relabeled, history = sync_changes(service, user_id, view, view["messages"])
+                    new, removed, relabeled, history = sync_changes(service, user_id, view, view["messages"],
+                                                                    failed=failed)
                     if view["more"]:
                         view["total"] = estimate_total(service, user_id, view["query"], view["in_trash"])
             except GMAIL_ERRORS as exc:
@@ -2940,11 +2962,13 @@ def interactive_download_main():
                 # Read / unread, stars… changed in Gmail meanwhile (web, phone, o).
                 relabeled = set(relabeled)
                 updated = refresh_labels(service, user_id, [message for message in view["messages"]
-                                                            if message["id"] in relabeled])
+                                                            if message["id"] in relabeled], failed=failed)
             except GMAIL_ERRORS as exc:
                 debug(f"Could not refresh labels: {exc}")
                 updated = 0
-            view["history"] = history
+                failed.update(relabeled)
+            if not failed:  # otherwise the next sync asks Gmail's history from the same point and reads them again
+                view["history"] = history
             known = {message["id"] for message in view["messages"]}
             view["messages"].extend(message for message in new if message["id"] not in known)
             view["messages"].sort(key=lambda message: message["internalDate"], reverse=True)
@@ -3012,18 +3036,20 @@ def interactive_download_main():
                         return sync_once(loaded)
 
             def sync_once(loaded):
-                new, gone, relabeled, history = sync_changes(sync_service, user_id, view, loaded)
-                labels = current_labels(sync_service, user_id, relabeled)
+                failed = set()
+                new, gone, relabeled, history = sync_changes(sync_service, user_id, view, loaded, failed=failed)
+                labels = current_labels(sync_service, user_id, relabeled, failed=failed)
                 # Labels created or renamed in Gmail meanwhile: their names, only when an email changed.
                 names = user_labels(sync_service, user_id) if new or labels else {}
                 total = view["total"]
                 if view["more"]:
                     total = estimate_total(sync_service, user_id, view["query"], view["in_trash"])
                     view["total"] = total
-                # The list may drop this result (Tab, q, an action): the history id only moves once it is applied.
+                # The list may drop this result (Tab, q, an action): the history id only moves once it is applied,
+                # and stays when Gmail would not read an email, so the next sync reads it again.
                 return {"new": new, "gone": gone, "labels": labels, "total": total, "user_labels": names,
                         "badges": view_badges(sync_service, user_id, view_queries, bool(args.query)),
-                        "applied": lambda: view.update(history=history)}
+                        "applied": (lambda: None) if failed else (lambda: view.update(history=history))}
             return sync
 
         badges = {}  # tab counters, filled and kept current by the background sync

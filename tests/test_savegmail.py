@@ -2850,7 +2850,8 @@ class FakeGmail:
                 "snippet": "", "internalDate": 1_700_000_000_000,
                 "labels": ["INBOX"] if self.places.get(msg_id) == "inbox" else []}
 
-    def list_candidate_messages(self, service, user_id, query="", max_results=50, page_token=None, in_trash=False):
+    def list_candidate_messages(self, service, user_id, query="", max_results=50, page_token=None, in_trash=False,
+                                failed=None):
         wanted = {"trash"} if in_trash else {"inbox", "archive"}
         return [self.message(msg_id) for msg_id, place in self.places.items() if place in wanted], None
 
@@ -3114,7 +3115,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
         with mock.patch.multiple(
             savegmail, authenticate=lambda: object(), build=lambda *a, **k: api or FakeSessionService(),
             user_labels=lambda *a: {}, ask_user_to_select_messages=ask,
-            refresh_messages=lambda *a, **k: ([], set()), refresh_labels=lambda *a: 0,
+            refresh_messages=lambda *a, **k: ([], set()), refresh_labels=lambda *a, **k: 0,
             sync_playwright=lambda: FakePlaywright(), launch_browser=launch or (lambda *a, **k: mock.Mock()),
             open_quietly=lambda url: opens, console=Console(file=self.output), **fakes,
         ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir, *args]):
@@ -3586,7 +3587,8 @@ class EmptyTrashCommandTest(unittest.TestCase):
 class ViewGmail(FakeGmail):
     """FakeGmail whose Spam and Trash views list only the spam or the trash, like their Gmail search."""
 
-    def list_candidate_messages(self, service, user_id, query="", max_results=50, page_token=None, in_trash=False):
+    def list_candidate_messages(self, service, user_id, query="", max_results=50, page_token=None, in_trash=False,
+                                failed=None):
         wanted = {"in:spam": {"spam"}, "in:trash": {"trash"}}.get(query, {"inbox", "archive"})
         return [self.message(msg_id) for msg_id, place in self.places.items() if place in wanted], None
 
@@ -3938,6 +3940,7 @@ class HistoryMailboxApi(SyncedMailboxApi):
         self.history_id, self.events, self.gets, self.lists, self.oldest = 100, [], [], 0, 0
         self.names = {}  # your own labels, {id: name}, as labels.list gives them
         self.page = None
+        self.refused = {}  # {id: how many more messages.get calls Gmail answers 429}
 
     def change(self, msg_id, labels, kind="labelsRemoved"):
         self.mail[msg_id] = labels
@@ -3959,6 +3962,9 @@ class HistoryMailboxApi(SyncedMailboxApi):
 
     def get(self, userId, id, format, fields):
         self.gets.append(id)
+        if self.refused.get(id):
+            self.refused[id] -= 1
+            return RefusedRequest()
         return super().get(userId, id, format, fields)
 
     def list(self, userId, q="", maxResults=100, **kwargs):
@@ -3985,10 +3991,16 @@ class HistoryMailboxApi(SyncedMailboxApi):
         return History()
 
 
+class RefusedRequest:
+    def execute(self):
+        from unittest import mock
+        raise savegmail.HttpError(mock.Mock(status=429, reason="Too Many Requests"), b"rateLimitExceeded")
+
+
 class HistorySyncSessionTest(unittest.TestCase):
     """The background sync asks Gmail's history what changed instead of re-reading every loaded email."""
 
-    def run_session(self, api, step):
+    def run_session(self, api, step, real_listing=False):
         import io
         import tempfile
         from unittest import mock
@@ -4010,11 +4022,50 @@ class HistorySyncSessionTest(unittest.TestCase):
 
         with mock.patch.multiple(
             savegmail, authenticate=lambda: object(), build=lambda *a, **k: api, user_labels=lambda *a: dict(api.names),
-            list_candidate_messages=listed, ask_user_to_select_messages=ask, sync_playwright=lambda: FakePlaywright(),
+            list_candidate_messages=savegmail.list_candidate_messages if real_listing else listed,
+            ask_user_to_select_messages=ask, sync_playwright=lambda: FakePlaywright(),
             launch_browser=lambda *a, **k: mock.Mock(), open_quietly=lambda url: True,
             console=Console(file=io.StringIO()),
         ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir]):
             savegmail.interactive_download_main()
+
+    def test_sync_rereads_an_email_gmail_refused_to_read(self):
+        api = HistoryMailboxApi({f"m{index}": ["INBOX", "UNREAD"] for index in range(3)})
+        results = []
+
+        def step(sync):
+            api.change("m1", ["INBOX", "STARRED"])  # read and starred on the phone
+            api.refused["m1"] = 2  # 429 in the batch and on the one-by-one retry
+            results.append(sync())
+            results[-1]["applied"]()
+            results.append(sync())  # Gmail answers again
+            results[-1]["applied"]()
+            results.append(sync())
+        self.run_session(api, step)
+        refused, retried, after = results
+        self.assertEqual(refused["labels"], {})
+        self.assertEqual(retried["labels"], {"m1": ["INBOX", "STARRED"]})
+        self.assertEqual(after["labels"], {})
+
+    def test_sync_rereads_a_new_email_gmail_refused_to_read(self):
+        api = HistoryMailboxApi({f"m{index}": ["INBOX"] for index in range(3)})
+        results = []
+
+        def step(sync):
+            api.receive("m9", ["INBOX", "UNREAD"])
+            api.refused["m9"] = 2
+            results.append(sync())
+            results[-1]["applied"]()
+            results.append(sync())
+        self.run_session(api, step)
+        self.assertEqual([[message["id"] for message in result["new"]] for result in results], [[], ["m9"]])
+
+    def test_sync_brings_an_email_gmail_refused_to_read_at_load(self):
+        api = HistoryMailboxApi({f"m{index}": ["INBOX"] for index in range(4)})
+        api.refused["m2"] = 2  # metadata refused while the view loads
+        results = []
+        self.run_session(api, lambda sync: results.append(sync()), real_listing=True)
+        self.assertEqual([message["id"] for message in results[0]["new"]], ["m2"])
 
     def test_sync_rereads_only_emails_changed_in_gmail(self):
         api = HistoryMailboxApi({f"m{index}": ["INBOX", "UNREAD"] for index in range(300)})
@@ -4109,7 +4160,7 @@ class LoadMoreSessionTest(unittest.TestCase):
         self.addCleanup(__import__("shutil").rmtree, save_dir, True)
         first, loads, queries = [], [], []
 
-        def listed(service, user_id, query="", max_results=50, page_token=None, in_trash=False):
+        def listed(service, user_id, query="", max_results=50, page_token=None, in_trash=False, failed=None):
             # Gmail's before:<epoch seconds> is exclusive; no page token here, m relies on before: only.
             queries.append(query)
             match = re.search(r"before:(\d+)", query)
@@ -4564,9 +4615,11 @@ class QueryGmail(FakeGmail):
         sender = "bank" if msg_id.startswith("bank") else "other"
         return dict(super().message(msg_id), **{"from": f"S <{sender}@example.com>"})
 
-    def list_candidate_messages(self, service, user_id, query="", max_results=50, page_token=None, in_trash=False):
+    def list_candidate_messages(self, service, user_id, query="", max_results=50, page_token=None, in_trash=False,
+                                failed=None):
         self.queries.append(query)
-        found, token = super().list_candidate_messages(service, user_id, query, max_results, page_token, in_trash)
+        found, token = super().list_candidate_messages(service, user_id, query, max_results, page_token, in_trash,
+                                                       failed)
         if "(from:bank)" in query.split():
             found = [message for message in found if message["from"] == "S <bank@example.com>"]
         return found, token
