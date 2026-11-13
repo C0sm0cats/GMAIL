@@ -3300,6 +3300,24 @@ class UndoAfterDeleteTest(unittest.TestCase):
             self.assertEqual(os.listdir(os.path.join(home, "Third")), [])
             self.assertEqual(self.output.getvalue().strip().splitlines()[-1].strip(), "→ ~/First · ~/Second")
 
+    def test_relative_download_folder_then_f_enter_is_one_folder(self):
+        # --download-path archive, s, f then enter on the folder shown, s: both saves are in one folder,
+        # so the Done summary lists it once, not as "archive" and its absolute path.
+        import tempfile
+        from unittest import mock
+        home, cwd = tempfile.mkdtemp(), tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, home, True)
+        self.addCleanup(__import__("shutil").rmtree, cwd, True)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(cwd)
+        archive = os.path.join(os.getcwd(), "archive")
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            self.run_session({"A": "inbox", "B": "inbox"},
+                             [("save", ["A"]), ("folder", None), ("save", ["B"])],
+                             args=["--download-path", "archive"])
+        self.assertEqual(sorted(os.listdir(archive)), ["A-att.bin", "A.pdf", "B-att.bin", "B.pdf"])
+        self.assertEqual(self.output.getvalue().strip().splitlines()[-1].strip(), "→ " + archive)
+
     def test_partial_delete_keeps_the_deleted_emails_files(self):
         ids = [f"m{i}" for i in range(1500)]
         api = FakeBatchApi(fail_on=2)

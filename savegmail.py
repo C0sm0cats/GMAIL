@@ -2859,7 +2859,7 @@ def interactive_download_main():
         parser.error("--headed needs a graphical display (DISPLAY or WAYLAND_DISPLAY is not set)")
 
     try:
-        save_dir = make_download_folder(args.download_path)
+        save_dir = os.path.abspath(make_download_folder(args.download_path))
     except OSError as error:
         if not args.download_path:
             console.print("[red]✗[/] Empty download folder (--download-path).")
