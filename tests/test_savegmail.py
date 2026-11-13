@@ -243,6 +243,22 @@ class TextHelpersTest(unittest.TestCase):
         self.assertFalse(flag(html))
         self.assertFalse(flag(MIMEText("hi")))
 
+    def test_header_names_are_case_insensitive(self):
+        # Gmail returns header names as the sender wrote them (Content-Id, subject, FROM).
+        detail = {"id": "1", "payload": {"mimeType": "multipart/mixed", "headers": [
+            {"name": "subject", "value": "Facture mars"}, {"name": "FROM", "value": "Shop <s@shop.fr>"}],
+            "parts": [{"mimeType": "text/html", "filename": "", "headers": []},
+                      {"mimeType": "image/gif", "filename": "logo.gif", "headers": [
+                          {"name": "Content-Id", "value": "<logo>"},
+                          {"name": "Content-disposition", "value": "inline; filename=logo.gif"}]},
+                      {"mimeType": "application/pdf", "filename": "", "headers": [
+                          {"name": "Content-disposition", "value": "attachment"}]}]}}
+        candidate = savegmail.to_candidate(detail)
+        self.assertEqual((candidate["subject"], candidate["from"]), ("Facture mars", "Shop <s@shop.fr>"))
+        self.assertTrue(candidate["attachment"])  # the unnamed PDF
+        detail["payload"]["parts"].pop()
+        self.assertFalse(savegmail.to_candidate(detail)["attachment"])  # the inline logo alone
+
 
 class FakeRequest:
     def __init__(self, msg_id, failures):
