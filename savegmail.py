@@ -2791,11 +2791,13 @@ def make_download_folder(path):
 
 
 def typed_folder(text):
-    """The folder typed in f: a path dropped or pasted between quotes is unquoted, $VARS and ~ expand.
+    """The folder typed in f: a path dropped or pasted between quotes or with \\-escaped spaces is unquoted,
+    $VARS and ~ expand.
 
     OSError if the quotes don't hold exactly one path."""
     text = text.strip()
-    if text[:1] in {"'", '"'}:  # a terminal drops a folder as a quoted shell word
+    # A terminal drops a folder as a quoted shell word (GNOME Terminal), or with \ before each space (macOS).
+    if text[:1] in {"'", '"'} or (os.sep == "/" and "\\" in text):
         try:
             parts = shlex.split(text)
         except ValueError as error:

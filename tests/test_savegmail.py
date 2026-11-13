@@ -4678,6 +4678,24 @@ class TypedFolderTest(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    @unittest.skipIf(os.sep != "/", "\\ separates folders on Windows")
+    def test_backslash_escaped_folder_is_unescaped(self):
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as work, \
+                mock.patch.dict(os.environ, {"HOME": home}):
+            archive = os.path.join(work, "My Archive")
+            os.mkdir(archive)
+            for typed, expected in ((work + "/My\\ Archive", archive),  # macOS Terminal drop
+                                    (work + "/My\\ Archive ", archive),
+                                    ("~/Bob\\'s\\ mail", os.path.join(home, "Bob's mail")),
+                                    ("$HOME/My\\ Archive", os.path.join(home, "My Archive")),
+                                    ("~/Bob's mail", os.path.join(home, "Bob's mail"))):
+                with self.subTest(typed=typed):
+                    self.assertEqual(savegmail.make_download_folder(savegmail.typed_folder(typed)), expected)
+            self.assertEqual(os.listdir(work), ["My Archive"])
+
 
 class QueryExclusionTest(unittest.TestCase):
     """--query accepts a lone exclusion term (-in:inbox) instead of stopping with "expected one argument"."""
