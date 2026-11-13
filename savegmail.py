@@ -1994,9 +1994,11 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             shown = fit(text, left).rstrip() if cell_len(text) > left else text
             fragments.append((f"class:tag.{kind}", shown))
             left -= cell_len(shown)
-            if left >= 3:
-                fragments.append(("class:dim", " · "))
-                left -= 3
+            if left < 4:
+                # No room for " · " and something after it: blank rather than glue or a stray "…".
+                return fragments + [("", " " * left)]
+            fragments.append(("class:dim", " · "))
+            left -= 3
         if left > 0:
             fragments.append(("class:dim", fit(row["snippet"], left)))
         return fragments

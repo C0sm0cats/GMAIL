@@ -654,6 +654,24 @@ class PickerTest(unittest.TestCase):
                 self.assertIn(shown, line, (columns, line))
                 self.assertEqual(savegmail.cell_len(line), columns, (columns, line))
 
+    def test_label_ending_near_the_preview_edge_is_neither_glued_nor_cut(self):
+        # A label ending 1 to 3 columns before the preview's edge: no "…" after a whole label (87 columns
+        # here), no start of the next label glued to it (88), no " · " with nothing after it (89).
+        from unittest import mock
+        labels = {"Label_1": "Accounting/Receipts", "Label_2": "Clients/Acme Energy/2026 contracts"}
+        messages = [dict(message, labels=["INBOX", "CATEGORY_UPDATES", "Label_1", "Label_2"])
+                    for message in make_messages(3)]
+        with mock.patch.object(savegmail, "USER_LABELS", labels):
+            for columns in range(86, 96):
+                lines = [line for line in screen_after("", columns, 24, messages=messages).split("\n")
+                         if "Updates" in line]
+                self.assertEqual(len(lines), 3, (columns, lines))
+                for line in lines:
+                    self.assertIn("Updates · Accounting/Receipts", line, (columns, line))
+                    self.assertNotIn("Receipts…", line, (columns, line))
+                    self.assertNotIn("ReceiptsC", line, (columns, line))
+                    self.assertFalse(line.endswith("·"), (columns, line))
+
     def test_narrow_footer_keeps_main_keys_and_typed_input(self):
         # 80×24 (the default terminal) and below: every footer line fits, the save, view, help and
         # quit keys keep their label, and what is typed (D, T, f, /) stays visible with its cursor.
