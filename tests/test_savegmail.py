@@ -3528,6 +3528,18 @@ class EmptyTrashCommandTest(unittest.TestCase):
                 self.assertEqual(calls, [("batchDelete", 2)])
                 self.assertIn("2 message(s) permanently deleted from trash.", output)
 
+    def test_confirmation_shows_the_number_of_emails_in_the_trash(self):
+        import io
+        from unittest import mock
+        from rich.console import Console
+        prompts = []
+        test_console = Console(file=io.StringIO(), width=200)
+        test_console.input = lambda prompt: prompts.append(prompt) or "n"
+        ids = [str(i) for i in range(500)]
+        with mock.patch.multiple(savegmail, console=test_console, list_trash_ids=lambda *a: ids):
+            savegmail.empty_trash(FakeBatchApi())
+        self.assertIn("Permanently delete [bold]500[/] message(s) from trash?", prompts[0])
+
 
 class ViewGmail(FakeGmail):
     """FakeGmail whose Spam and Trash views list only the spam or the trash, like their Gmail search."""
@@ -4564,6 +4576,12 @@ class TypedSelectionTest(unittest.TestCase):
         shown = {line.split()[0]: line for line in output.splitlines() if line.strip()}
         subject = next(m["subject"] for m in messages if m["id"] == chosen[0])
         self.assertIn(subject, shown["2"])
+
+    def test_confirmations_show_the_number_of_emails_chosen(self):
+        prompts = self.select(["D 1-3", "no", "q"])[2]
+        self.assertIn("Permanently delete 3 email(s)?", prompts[1])
+        prompts = self.select(["d 1,3", "n", "q"])[2]
+        self.assertIn("Move 2 email(s) to trash without saving?", prompts[1])
 
 
 # FAKE_CHROMIUM: unset, Chromium starts; "missing", it starts once `playwright install chromium`
