@@ -2,6 +2,7 @@ import os
 import pathlib
 import base64
 import codecs
+import quopri
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
 import asyncio
 from datetime import datetime, timezone
@@ -637,7 +638,16 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
 
     def attachment_bytes(part):
         if part.is_multipart():  # message/rfc822 and other message/* types: get_payload(decode=True) is None
-            return b"".join(sub.as_bytes() for sub in part.get_payload())
+            # The attached email as sent: refolding its long headers would parse them whole, uncapped
+            # (several GB of memory for a few hundred KB of encoded-words).
+            data = b"".join(sub.as_bytes(policy=sub.policy.clone(refold_source="none"))
+                            for sub in part.get_payload())
+            cte = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+            if cte == "base64":  # allowed for message/global, sent anyway for message/rfc822 by some mailers
+                return base64.b64decode(data)
+            if cte == "quoted-printable":
+                return quopri.decodestring(data)
+            return data
         return part.get_payload(decode=True)
 
     for part in walk(msg):

@@ -2286,6 +2286,48 @@ class PdfFileNameTest(unittest.TestCase):
             inner_pdf = next(part for part in saved.iter_attachments())
             self.assertEqual(inner_pdf.get_content(), b"%PDF-INNER")
 
+    def save_attached_email(self, content_type, encoding, inner, filename):
+        import base64
+        import tempfile
+        from unittest import mock
+        cte = f"Content-Transfer-Encoding: {encoding}\r\n" if encoding else ""
+        raw = (b"From: a@example.com\r\nSubject: Fwd\r\nMIME-Version: 1.0\r\n"
+               b"Content-Type: multipart/mixed; boundary=B\r\n\r\n"
+               b"--B\r\nContent-Type: text/plain\r\n\r\nsee attached\r\n--B\r\n"
+               + f"Content-Type: {content_type}\r\n{cte}"
+                 f"Content-Disposition: attachment; filename=\"{filename}\"\r\n\r\n".encode()
+               + inner + b"\r\n--B--\r\n")
+        with tempfile.TemporaryDirectory() as save_dir, \
+                mock.patch.object(savegmail, "measure_pdf_margins", return_value={}):
+            savegmail.save_email_and_attachments(FakeRawService(base64.urlsafe_b64encode(raw).decode()),
+                                                 "me", "id1", save_dir, FakePdfBrowser())
+            return self.read(os.path.join(save_dir, filename))
+
+    def test_encoded_attached_email_saved_decoded(self):
+        import base64
+        import quopri
+        inner = ("From: Alice <alice@example.com>\r\nSubject: Réunion budget\r\nMIME-Version: 1.0\r\n"
+                 "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"
+                 "INNERBODY café crème\r\n").encode()
+        for content_type, encoding, body, filename in [
+                ("message/rfc822", "base64", base64.encodebytes(inner), "fwd.eml"),
+                ("message/rfc822", "quoted-printable", quopri.encodestring(inner), "fwd.eml"),
+                ("message/global", "base64", base64.encodebytes(inner), "fwd.u8msg")]:
+            with self.subTest(content_type=content_type, encoding=encoding):
+                saved = self.save_attached_email(content_type, encoding, body, filename)
+                # The file is the attached email itself, not its base64 or quoted-printable text.
+                self.assertEqual(saved.replace(b"\r\n", b"\n"), inner.replace(b"\r\n", b"\n"))
+
+    def test_attached_email_long_header_written_as_sent(self):
+        words = ["=?utf-8?q?ab?="] * 2000
+        subject = "\r\n ".join(" ".join(words[i:i + 40]) for i in range(0, len(words), 40))  # 600-char lines
+        inner = (f"From: x@example.com\r\nSubject: {subject}\r\nMIME-Version: 1.0\r\n"
+                 "Content-Type: text/plain\r\n\r\nhi\r\n").encode()
+        saved = self.save_attached_email("message/rfc822", None, inner, "fwd.eml")
+        # Not refolded: refolding parses the header whole, uncapped (several GB for a few hundred KB),
+        # and rewrites it.
+        self.assertIn(subject.replace("\r\n", "\n").encode(), saved.replace(b"\r\n", b"\n"))
+
 
 class AttachmentPartTest(unittest.TestCase):
     """Which parts of an email are files written next to its PDF."""
