@@ -3,6 +3,8 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The launcher installs Chromium inside the .venv (run-savegmail.sh); the tests use that one.
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
 
 import savegmail  # noqa: E402
 
@@ -1433,6 +1435,19 @@ class BrowserSandboxTest(unittest.TestCase):
         self.assertTrue(all(call.kwargs["headless"] is False for call in fake.chromium.launch.call_args_list))
         warn.assert_called_once()
         self.assertIn("sandbox", warn.call_args.args[0])
+
+    def test_tests_use_the_venv_chromium_without_the_variable(self):
+        import subprocess
+        tests_dir = os.path.dirname(os.path.abspath(__file__))
+        env = {key: value for key, value in os.environ.items() if key != "PLAYWRIGHT_BROWSERS_PATH"}
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import test_savegmail, os, playwright; "
+                "from playwright.sync_api import sync_playwright\n"
+                "with sync_playwright() as p: path = p.chromium.executable_path\n"
+                "print(path.startswith(os.path.dirname(playwright.__file__) + os.sep))")
+        result = subprocess.run([sys.executable, "-c", code, tests_dir], env=env,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "True")
 
     def test_real_chromium_renderers_are_sandboxed(self):
         from unittest import mock
