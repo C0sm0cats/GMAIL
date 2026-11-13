@@ -3313,6 +3313,24 @@ class ActionTargetsTest(unittest.TestCase):
         self.assertEqual(api.gmail.places, {"m0": "inbox", "m1": "archive", "t1": "gone"})
         self.assertIn("1 message(s) permanently deleted from trash.", output.getvalue())
 
+    def test_trash_command_keeps_an_email_restored_during_the_question(self):
+        import io
+        from unittest import mock
+        from rich.console import Console
+        api = FakeMailboxApi()
+        api.gmail = FakeGmail({"a": "trash", "b": "trash", "c": "inbox"}, save_dir=None)
+        output = io.StringIO()
+        test_console = Console(file=output, width=200)
+
+        def restore_b_then_confirm(prompt):
+            api.gmail.places["b"] = "inbox"  # restored from Gmail web while the question waits
+            return "y"
+        test_console.input = restore_b_then_confirm
+        with mock.patch.object(savegmail, "console", test_console):
+            savegmail.empty_trash(api)
+        self.assertEqual(api.gmail.places, {"a": "gone", "b": "inbox", "c": "inbox"})
+        self.assertIn("1 message(s) permanently deleted from trash.", output.getvalue())
+
 
 class SpamMailboxApi(FakeMailboxApi):
     """FakeMailboxApi where an email only leaves the Spam when SPAM is removed, as in Gmail's Spam view."""

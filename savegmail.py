@@ -813,8 +813,16 @@ def empty_trash(service):
             return
 
         with console.status("[dim]Deleting…[/]"):
-            delete_messages(service, 'me', ids)
+            # Only what is still in the trash: an email restored while the question waited stays,
+            # one trashed meanwhile was not counted in the question.
+            still_in_trash = set(list_trash_ids(service, 'me'))
+            ids = [msg_id for msg_id in ids if msg_id in still_in_trash]
+            if ids:
+                delete_messages(service, 'me', ids)
 
+        if not ids:
+            console.print("[dim]Nothing left to delete: the trash was emptied meanwhile.[/]")
+            return
         console.print(f"[green]✓[/] {len(ids)} message(s) permanently deleted from trash.")
 
     except PartialBatchError as e:
