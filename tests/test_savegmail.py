@@ -2873,6 +2873,16 @@ class FakeSaveService(FakeService):
                 return {"id": id}
         return Request()
 
+    def batchModify(self, userId, body):
+        service = self
+
+        class Request:
+            def execute(self):
+                if "TRASH" in body["addLabelIds"]:
+                    service.trashed.extend(body["ids"])
+                return {}
+        return Request()
+
 
 class SaveMessagesAttachmentTest(unittest.TestCase):
     def test_enter_writes_attachment_before_trashing(self):
@@ -2922,6 +2932,15 @@ class FailingBatchService(FakeSaveService):
             def execute(self):
                 raise savegmail.HttpError(mock.Mock(status=503, reason="Backend Error"), b"Backend Error")
         return Batch()
+
+    def batchModify(self, userId, body):
+        from unittest import mock
+        error = self.error or savegmail.HttpError(mock.Mock(status=503, reason="Backend Error"), b"Backend Error")
+
+        class Request:
+            def execute(self):
+                raise error
+        return Request()
 
     def trash(self, userId, id):
         service = self
@@ -2973,17 +2992,21 @@ class BatchCallFailureTest(unittest.TestCase):
             open(path, "w").close()
             return {"files": [path], "attachments": 0}
 
-        class CtrlCBatch(FakeBatch):
-            def execute(self):
-                signal.raise_signal(signal.SIGINT)  # Ctrl+C on "moving to trash…", during the first call
-                super().execute()
+        class CtrlCService(FakeSaveService):
+            def batchModify(self, userId, body):
+                request = super().batchModify(userId, body)
+
+                class Request:
+                    def execute(self):
+                        signal.raise_signal(signal.SIGINT)  # Ctrl+C on "moving to trash…", during the first call
+                        return request.execute()
+                return Request()
 
         messages = [{"id": msg_id, "from": "S <s@example.com>", "subject": msg_id, "snippet": "",
                      "internalDate": 1_700_000_000_000} for msg_id in ("x", "y")]
-        service = FakeSaveService(raw="")
-        service.new_batch_http_request = lambda callback: CtrlCBatch(callback, service.sizes)
+        service = CtrlCService(raw="")
         with tempfile.TemporaryDirectory() as save_dir, \
-                mock.patch.object(savegmail, "API_BATCH_SIZE", 1), \
+                mock.patch.object(savegmail, "TRASH_BLOCK", 1), \
                 mock.patch.object(savegmail, "save_email_and_attachments", fake_save), \
                 mock.patch.object(savegmail, "console", savegmail.Console(file=io.StringIO())):
             try:
@@ -3005,6 +3028,83 @@ class BatchCallFailureTest(unittest.TestCase):
         errors = savegmail.trash_messages(service, "me", ["x", "y", "z"])
         self.assertEqual(set(errors), {"x", "y", "z"})
         self.assertEqual(service.trashed, ["tried x"])
+
+
+class TrashBatchModifyTest(unittest.TestCase):
+    """d, enter, u and R (Trash view) move emails with batchModify ±TRASH, TRASH_BLOCK ids per call."""
+
+    class Api:
+        def __init__(self, refused=(), ctrl_c_on=None):
+            self.calls, self.per_id, self.refused, self.ctrl_c_on = [], [], set(refused), ctrl_c_on
+
+        def users(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def batchModify(self, userId, body):
+            import signal
+            from unittest import mock
+            api = self
+
+            class Request:
+                def execute(self):
+                    api.calls.append((body["addLabelIds"], body["removeLabelIds"], len(body["ids"])))
+                    if len(api.calls) == api.ctrl_c_on:
+                        signal.raise_signal(signal.SIGINT)
+                    if api.refused & set(body["ids"]):
+                        raise savegmail.HttpError(mock.Mock(status=400, reason="Bad Request"), b"Invalid id")
+                    return {}
+            return Request()
+
+        def trash(self, userId, id):
+            return self.one("trash", id)
+
+        def untrash(self, userId, id):
+            return self.one("untrash", id)
+
+        def one(self, name, msg_id):
+            from unittest import mock
+            api = self
+
+            class Request:
+                def execute(self):
+                    api.per_id.append((name, msg_id))
+                    if msg_id in api.refused:
+                        raise savegmail.HttpError(mock.Mock(status=404, reason="Not Found"), b"Not Found")
+                    return {"id": msg_id}
+            return Request()
+
+        def new_batch_http_request(self, callback):
+            return FakeBatch(callback, [])
+
+    ids = [str(i) for i in range(1000)]
+
+    def test_thousand_emails_take_five_calls(self):
+        api = self.Api()
+        self.assertEqual(savegmail.trash_messages(api, "me", self.ids), {})
+        self.assertEqual(savegmail.untrash_messages(api, "me", self.ids), {})
+        self.assertEqual(api.calls, [(["TRASH"], [], 200)] * 5 + [([], ["TRASH"], 200)] * 5)
+        self.assertEqual(api.per_id, [])
+
+    def test_refused_block_is_redone_one_by_one(self):
+        api = self.Api(refused={"250"})
+        errors = savegmail.trash_messages(api, "me", self.ids)
+        self.assertEqual(list(errors), ["250"])
+        self.assertIsInstance(errors["250"], savegmail.HttpError)
+        self.assertEqual(len(api.calls), 5)
+        self.assertEqual(sorted(msg_id for _, msg_id in api.per_id), sorted(self.ids[200:400] + ["250"], key=int))
+
+    def test_ctrl_c_finishes_the_block_then_stops(self):
+        import signal
+        api = self.Api(ctrl_c_on=1)
+        handler = signal.getsignal(signal.SIGINT)
+        errors = savegmail.untrash_messages(api, "me", self.ids)
+        self.assertEqual(api.calls, [([], ["TRASH"], 200)])
+        self.assertEqual(sorted(errors, key=int), self.ids[200:])
+        self.assertIsInstance(errors["200"], savegmail.StoppedError)
+        self.assertIs(signal.getsignal(signal.SIGINT), handler)
 
 
 class SaveCleanupTest(unittest.TestCase):
@@ -3256,13 +3356,31 @@ class FakeMailboxApi(FakeBatchApi):
 
 
 class FakeTrashApi(FakeBatchApi):
-    """FakeBatchApi with Gmail's trash / untrash in batch calls; Ctrl+C comes during the first batch call."""
+    """FakeBatchApi with Gmail's trash / untrash (batchModify ±TRASH, or per id in batch calls); Ctrl+C
+    (stop_signal) comes during the first call that moves emails to or from the trash."""
 
     real_calls = FakeBatchApi.real_calls | {"trash_messages", "untrash_messages"}
+    stop_signal = __import__("signal").SIGINT
 
     def __init__(self):
         super().__init__()
         self.batches = []
+
+    def batchModify(self, userId, body):
+        import signal
+        if "TRASH" not in body["addLabelIds"] + body["removeLabelIds"]:
+            return super().batchModify(userId, body)
+        place = "trash" if "TRASH" in body["addLabelIds"] else "inbox"
+        request = self.request("batchModify", body["ids"], lambda msg_id: place)
+        api, ids = self, body["ids"]
+
+        class Request:
+            def execute(self):
+                if not api.batches:
+                    signal.raise_signal(api.stop_signal)
+                api.batches.append(len(ids))
+                return request.execute()
+        return Request()
 
     def trash(self, userId, id):
         return FakeResult(None, lambda: self.gmail.places.__setitem__(id, "trash"))
@@ -3480,7 +3598,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
         from unittest import mock
         places = {name: "inbox" for name in "ABCDE"}
         api = FakeTrashApi()
-        with mock.patch.object(savegmail, "API_BATCH_SIZE", 2):
+        with mock.patch.object(savegmail, "TRASH_BLOCK", 2):
             try:
                 gmail, left, offered = self.run_session(places, [("trash", list("ABCDE")), ("undo", [])], api=api)
             except KeyboardInterrupt:  # escaping, it would stop the whole test run
@@ -3541,21 +3659,12 @@ class UndoAfterDeleteTest(unittest.TestCase):
         from unittest import mock
 
         class HangupTrashApi(FakeTrashApi):
-            def new_batch_http_request(self, callback):
-                api = self
-
-                class Batch(FakeBatch):
-                    def execute(self):
-                        if not api.batches:
-                            signal.raise_signal(signal.SIGHUP)
-                        api.batches.append(len(self.items))
-                        super().execute()
-                return Batch(callback, [])
+            stop_signal = signal.SIGHUP
 
         unhandled, _ = self.catch_unhandled_hangups()
         places = {name: "inbox" for name in "ABCDE"}
         api = HangupTrashApi()
-        with mock.patch.object(savegmail, "API_BATCH_SIZE", 2):
+        with mock.patch.object(savegmail, "TRASH_BLOCK", 2):
             try:
                 gmail, left, offered = self.run_session(places, [("trash", list("ABCDE")), ("undo", [])], api=api)
             except KeyboardInterrupt:  # escaping, it would stop the whole test run

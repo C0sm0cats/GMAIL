@@ -1187,18 +1187,46 @@ def delete_messages(service, user_id, ids):
         userId=user_id, body={"ids": chunk}).execute())
 
 
+TRASH_BLOCK = 200  # ids per batchModify for the trash: few round trips, Ctrl+C still honoured between blocks
+
+
+def move_trash_label(service, user_id, ids, add=(), remove=(), fallback=None):
+    """Add / remove TRASH with one batchModify per TRASH_BLOCK ids. Returns {id: exception}.
+
+    Same as messages.trash / untrash (checked on Gmail), far fewer calls and quota. A block Gmail refuses
+    is redone id by id with fallback(id), so each failure stays per email. Ctrl+C (in the main thread)
+    lets the block in progress finish, then stops: the ids not sent fail with StoppedError.
+    """
+    errors, stopped, previous_handler = {}, [], None
+    if threading.current_thread() is threading.main_thread():
+        previous_handler = signal.signal(signal.SIGINT, lambda signum, frame: stopped.append(signum))
+    try:
+        for start in range(0, len(ids), TRASH_BLOCK):
+            block = ids[start:start + TRASH_BLOCK]
+            if stopped:
+                errors.update({msg_id: StoppedError() for msg_id in block})
+                continue
+            try:
+                modify_labels(service, user_id, block, add=add, remove=remove)
+            except GMAIL_ERRORS as exc:
+                debug(f"batchModify on the trash failed, retrying one by one: {exc}")
+                errors.update(run_batched(service, block, fallback)[1])
+    finally:
+        if previous_handler is not None:
+            signal.signal(signal.SIGINT, previous_handler)
+    return errors
+
+
 def trash_messages(service, user_id, ids):
     """Move messages to the Gmail trash. Returns {id: exception} for the ones that failed."""
-    _, errors = run_batched(service, ids, lambda msg_id: service.users().messages().trash(userId=user_id, id=msg_id),
-                            stoppable=True)
-    return errors
+    return move_trash_label(service, user_id, list(ids), add=["TRASH"],
+                            fallback=lambda msg_id: service.users().messages().trash(userId=user_id, id=msg_id))
 
 
 def untrash_messages(service, user_id, ids):
     """Restore messages from the Gmail trash. Returns {id: exception} for the ones that failed."""
-    _, errors = run_batched(service, ids, lambda msg_id: service.users().messages().untrash(userId=user_id, id=msg_id),
-                            stoppable=True)
-    return errors
+    return move_trash_label(service, user_id, list(ids), remove=["TRASH"],
+                            fallback=lambda msg_id: service.users().messages().untrash(userId=user_id, id=msg_id))
 
 
 
