@@ -662,6 +662,15 @@ class PickerTest(unittest.TestCase):
         # Selected emails hidden by a filter stay selected (the footer and confirmations say so).
         self.assertEqual(pick("a/Subject 1\rdy"), ("trash", ["0", "1", "2"]))
 
+    def test_confirmations_count_the_hidden_selection(self):
+        # 3 emails selected, the filter shows one: the header and the d / D questions count all 3.
+        delete = screen_after("a/Subject 1\rD", 100, 20)
+        self.assertIn("Permanently delete 3 emails (2 hidden by the filter)?", delete)
+        self.assertIn("3 selected · 2 hidden by the filter", delete)
+        trash = screen_after("a/Subject 1\rd", 100, 20)
+        self.assertIn("Move 3 emails (2 hidden by the filter) to trash without saving?", trash)
+        self.assertIn("3 selected · 2 hidden by the filter", trash)
+
     def test_select_all_only_visible(self):
         # Under a filter, a and A only take the emails shown, not the hidden ones.
         messages = make_messages(4)
