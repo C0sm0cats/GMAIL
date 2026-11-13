@@ -317,6 +317,7 @@ def sign_in(reason):
         sys.exit(1)
 
     printed_rows = []
+    printed_width = []  # console.width each time the prompt was printed
 
     class QuietBrowser(webbrowser.BaseBrowser):
         # run_local_server hands us the sign-in URL here, so the prompt and opening are ours.
@@ -327,6 +328,7 @@ def sign_in(reason):
             lines = [(f"[yellow]![/] {escape(reason)}", f"! {reason}"),
                      (f"  [dim]Didn't open? Open the sign-in page:[/]", "  Didn't open? Open the sign-in page:"),
                      (f"  [dim][link={url}]{escape(url)}[/link][/]", f"  {url}")]
+            printed_width.append(console.width)
             for markup, plain in lines:
                 console.print(markup, soft_wrap=True)
                 printed_rows.append(max(1, -(-cell_len(plain) // max(1, console.width))))
@@ -346,7 +348,9 @@ def sign_in(reason):
         console.print(f"[red]✗[/] Sign-in cancelled or refused ({escape(e.error or str(e))}), "
                       "run savegmail again to retry.")
         sys.exit(1)
-    if not VERBOSE and console.is_terminal and printed_rows:
+    # A resize meanwhile reflows the lines (kitty, VTE) or not (xterm): their rows are unknown, so they
+    # stay, as with --verbose, rather than erase shell lines above or leave part of the URL.
+    if not VERBOSE and console.is_terminal and printed_rows and set(printed_width) == {console.width}:
         console.file.write(f"\x1b[{sum(printed_rows)}F\x1b[J")  # erase the prompt lines
     debug(f"Token expires {convert_expiry_to_local_time(creds.expiry)}")
     return creds

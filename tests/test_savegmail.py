@@ -5628,6 +5628,33 @@ class AuthenticateTest(unittest.TestCase):
         # 1 row for the reason, 1 for "Didn't open?" (37 cells), 3 for the URL (2 + 104 cells in 40 columns).
         self.assertTrue(text.endswith("\x1b[5F\x1b[J"), repr(text[-20:]))
 
+    def test_launch_sign_in_keeps_the_prompt_when_the_terminal_was_resized(self):
+        # kitty and VTE reflow the lines to the new width, xterm does not: their rows are unknown, so
+        # erasing by the count at print time would erase shell lines above, or leave part of the URL.
+        import datetime
+        import io
+        import webbrowser
+        from unittest import mock
+        from rich.console import Console
+        url = "https://accounts.example.invalid/o/oauth2/auth?response_type=code&client_id=id.example.invalid&state=abc"
+        fresh = mock.Mock(expiry=datetime.datetime(2030, 1, 1))
+        for before, after in ((40, 120), (120, 40)):
+            output = io.StringIO()
+            console = Console(file=output, width=before, force_terminal=True)
+
+            class Flow:
+                def run_local_server(self, browser, **kwargs):
+                    webbrowser.get(browser).open(url)
+                    console.width = after  # the user resizes the window while signing in
+                    return fresh
+
+            with mock.patch.object(savegmail, "oauth_flow", lambda: Flow()), \
+                    mock.patch.object(savegmail, "open_quietly", return_value=False), \
+                    mock.patch.object(savegmail, "console", console):
+                self.assertIs(self.real_sign_in("Sign in to Gmail in your browser."), fresh)
+            self.assertIn(url, output.getvalue())
+            self.assertNotIn("\x1b[J", output.getvalue(), f"{before} -> {after} columns")
+
     def test_ctrl_c_while_waiting_for_sign_in_quits_cleanly(self):
         from unittest import mock
         flow = mock.Mock()
