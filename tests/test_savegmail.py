@@ -2271,6 +2271,28 @@ class BodyCharsetTest(unittest.TestCase):
         # A declared charset that Python knows is still the one used.
         self.assertIn("Café", self.render(self.message(b"text/plain; charset=iso-8859-1", b"Caf\xe9")))
 
+    def test_charset_python_cannot_decode_with(self):
+        # idna has no 'replace' error handler, a NUL in a name makes Python raise ValueError: the email
+        # could be neither saved nor previewed, with "Unsupported error handling: replace" as the reason.
+        import base64
+        import tempfile
+        utf8 = "Café".encode("utf-8")
+        self.assertIn("Café", self.render(self.message(b"text/plain; charset=idna", utf8)))
+        self.assertIn("Café", self.render(self.message(b"text/html", b"<meta charset=idna><p>" + utf8)))
+        self.assertIn("Café", self.render(self.message(b"text/plain; charset*=''utf-8%00", utf8)))
+        raw = (b"Subject: Facture\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n"
+               b"--B\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + utf8 + b"\r\n--B\r\n"
+               b"Content-Type: application/pdf\r\nContent-Disposition: attachment; filename*=idna''caf%C3%A9.pdf"
+               b"\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERg==\r\n--B--\r\n")
+        with tempfile.TemporaryDirectory() as save_dir:
+            savegmail.save_email_and_attachments(
+                FakeRawService(base64.urlsafe_b64encode(raw).decode()), "me", "id1", save_dir,
+                ContentRecordingBrowser())
+            attachments = [name for name in os.listdir(save_dir) if not name.endswith("Facture.pdf")]
+            self.assertEqual(attachments, ["café.pdf"])
+            with open(os.path.join(save_dir, "café.pdf"), "rb") as f:
+                self.assertEqual(f.read(), b"%PDF")
+
 
 class HostileBodyTimeTest(unittest.TestCase):
     """A body built to make the rewriting before Chromium quadratic is still prepared at once."""

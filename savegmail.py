@@ -83,7 +83,12 @@ class CappedHeaderPolicy(type(policy_default)):
     def header_fetch_parse(self, name, value):
         if isinstance(value, str):
             value = value[:MAX_HEADER_CHARS]
-        return super().header_fetch_parse(name, value)
+        try:
+            return super().header_fetch_parse(name, value)
+        except UnicodeError:
+            # An RFC 2231 parameter (filename*=idna''caf%C3%A9.pdf) in a charset without the error
+            # handler the parser decodes with: the whole message would fail. Read those values as UTF-8.
+            return super().header_fetch_parse(name, re.sub(r"(\*=\s*)[^'\s;]*'", r"\1utf-8'", value))
 
 
 capped_header_policy = CappedHeaderPolicy()
@@ -584,7 +589,7 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
                     if codecs.lookup(codec).name in ('punycode', 'idna'):  # no mail charset, quadratic to decode
                         continue
                     return data.decode(codec, errors='replace')
-                except LookupError:
+                except (LookupError, ValueError):  # a NUL in the name (charset*=''utf-8%00)
                     continue
         try:
             return data.decode('utf-8')
