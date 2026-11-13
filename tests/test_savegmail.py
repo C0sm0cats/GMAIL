@@ -3514,6 +3514,14 @@ class UndoAfterDeleteTest(unittest.TestCase):
                 self.assertEqual([call.kwargs["headless"] for call in fake.chromium.launch.call_args_list],
                                  [headless])
 
+    def test_done_summary_leaves_out_what_u_took_back(self):
+        gmail, left, offered = self.run_session({"A": "inbox", "B": "inbox"},
+                                                [("save", ["A"]), ("undo", []), ("trash", ["B"]), ("undo", [])])
+        self.assertEqual(offered[1:4], ["save+keep (1)", None, "trash (1)"])
+        self.assertEqual(gmail.places, {"A": "inbox", "B": "inbox"})
+        self.assertEqual(left, [])
+        self.assertNotIn("Done", self.output.getvalue())
+
 
 class SaveMarksTest(unittest.TestCase):
     """s keeps the emails in Gmail, marked ✓ in every view and no longer selected; u takes back only its own ✓."""
