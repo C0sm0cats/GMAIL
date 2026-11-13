@@ -4852,6 +4852,19 @@ class LauncherVenvTest(unittest.TestCase):
         self.assertFalse(any(call.startswith("old -m pip install") for call in calls))
         self.assertTrue(calls[-1].endswith("savegmail.py --help"))
 
+    def test_weekly_upgrade_fails_fast_offline(self):
+        # pip's defaults retry each request 5 times with backoff: offline, the
+        # launcher waited about 5 minutes behind 175 warnings before starting.
+        self.provide("python3")
+        result, calls = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        install = next(call for call in calls if call.startswith("-m pip install"))
+        args = install.split()
+        self.assertIn("--retries", args)
+        self.assertEqual(args[args.index("--retries") + 1], "0")
+        self.assertIn("--timeout", args)
+        self.assertLessEqual(int(args[args.index("--timeout") + 1]), 10)
+
     def test_venv_on_old_python_with_old_system_python_says_so(self):
         self.provide("python3")
         os.makedirs(os.path.join(self.root, ".venv", "bin"))

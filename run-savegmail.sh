@@ -37,9 +37,11 @@ fi
 
 # Upgrade the dependencies at most once a week (eager, so indirect ones such as
 # certifi and oauthlib follow); an offline launch keeps the installed versions.
+# No retries and a short timeout: offline, pip would otherwise retry every
+# request for minutes before the launcher goes on.
 stamp="$script_dir/.venv/.savegmail-upgraded"
 if [ -z "$(find "$stamp" -mtime -7 2>/dev/null)" ]; then
-    if "$script_dir/.venv/bin/python" -m pip install --quiet --upgrade --upgrade-strategy eager \
+    if "$script_dir/.venv/bin/python" -m pip install --quiet --retries 0 --timeout 10 --upgrade --upgrade-strategy eager \
         playwright \
         prompt_toolkit \
         rich \
