@@ -365,11 +365,25 @@ def sign_in_quietly(check=lambda creds: None, timeout=300, show_url=lambda url: 
 
 
 def save_token(creds):
-    """Write token.json readable by the owner only: it grants full access to the mailbox."""
-    fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as token:
-        os.fchmod(fd, 0o600)  # a token.json written by an older version keeps its mode otherwise
-        token.write(creds.to_json())
+    """Write token.json readable by the owner only: it grants full access to the mailbox.
+
+    Written beside it then renamed over it: a failed write (disk full) leaves the old token.json whole.
+    """
+    temporary = TOKEN_PATH + ".tmp"
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as token:
+            os.fchmod(fd, 0o600)  # a leftover file from an interrupted write keeps its mode otherwise
+            token.write(creds.to_json())
+            token.flush()
+            os.fsync(fd)
+        os.replace(temporary, TOKEN_PATH)
+    except BaseException:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def exit_unreachable(error):
@@ -380,10 +394,17 @@ def exit_unreachable(error):
 
 def authenticate():
     creds = None
+    unreadable = False
     if os.path.exists(TOKEN_PATH):
-        creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
+        except ValueError as e:  # empty, cut short or missing a field
+            debug(f"Could not read token.json: {e}")
+            unreadable = True
     if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+        if unreadable:
+            creds = sign_in("Could not read token.json, sign in again in your browser.")
+        elif creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
                 debug(f"Token refreshed, expires {convert_expiry_to_local_time(creds.expiry)}")

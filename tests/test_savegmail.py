@@ -5055,6 +5055,21 @@ class AuthenticateTest(unittest.TestCase):
         self.assertIn("expired", self.sign_in.call_args[0][0])
         self.assertEqual(self.saved_token(), {"token": "fresh"})
 
+    def test_failed_token_write_keeps_the_old_token_then_empty_one_signs_in_again(self):
+        # Disk full while saving a refreshed token: the old token.json must stay usable.
+        import errno
+        self.new.to_json.side_effect = OSError(errno.ENOSPC, "No space left on device")
+        with self.assertRaises(OSError):
+            savegmail.save_token(self.new)
+        self.assertEqual(self.saved_token()["refresh_token"], "fake-refresh")
+        self.assertEqual(os.listdir(os.path.dirname(self.token_path)), ["token.json"])
+        # A token.json emptied by an older version: sign in again instead of a JSONDecodeError trace.
+        self.new.to_json.side_effect = None
+        open(self.token_path, "w").close()
+        self.assertIs(savegmail.authenticate(), self.new)
+        self.assertIn("Could not read token.json", self.sign_in.call_args[0][0])
+        self.assertEqual(self.saved_token(), {"token": "fresh"})
+
     def test_offline_refresh_says_unreachable_without_sign_in(self):
         with self.refresh_raising(savegmail.TransportError("Failed to resolve 'oauth2.googleapis.com'")):
             with self.assertRaises(SystemExit) as raised:
