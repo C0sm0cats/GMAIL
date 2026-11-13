@@ -1512,6 +1512,66 @@ class InlineImageTest(unittest.TestCase):
                 browser.close()
         self.assertEqual(widths, [[["cid", 40], ["lazy", 40]]])
 
+    def test_slow_remote_image_is_waited_for_before_printing(self):
+        import http.server
+        import tempfile
+        import threading
+        import time
+        from playwright.sync_api import sync_playwright
+        image = png_image(40, 20)
+
+        class SlowImage(http.server.BaseHTTPRequestHandler):
+            """Answers with the image after 1 s, like a distant CDN: longer than the fixed 300 ms pause."""
+            def do_GET(self):
+                time.sleep(1)
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(image)))
+                self.end_headers()
+                self.wfile.write(image)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SlowImage)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+        raw = inline_image_email(f'<img id="remote" src="http://127.0.0.1:{port}/slow.png">', image)
+        widths = []
+
+        class SpyBrowser:
+            """Real Chromium; notes the width of each image of the email page when it is printed."""
+            def __init__(self, browser):
+                self.browser = browser
+
+            def new_page(self, **kwargs):
+                page = self.browser.new_page(**kwargs)
+                pdf = page.pdf
+
+                def spy_pdf(**pdf_kwargs):
+                    widths.append(page.evaluate("[...document.images].map(img => [img.id, img.naturalWidth])"))
+                    return pdf(**pdf_kwargs)
+
+                page.pdf = spy_pdf
+                return page
+
+        try:
+            with sync_playwright() as playwright:
+                try:
+                    browser = playwright.chromium.launch(channel="chromium")
+                except Exception as error:  # no Playwright Chromium here; never install it from a test
+                    self.skipTest(f"Chromium unavailable: {error}")
+                try:
+                    with tempfile.TemporaryDirectory() as save_dir:
+                        savegmail.save_email_and_attachments(FakeRawService(raw), "me", "id1", save_dir,
+                                                             SpyBrowser(browser))
+                finally:
+                    browser.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(widths, [[["remote", 40]]])
+
     def test_silent_remote_image_does_not_block_the_save(self):
         import base64
         import socket
