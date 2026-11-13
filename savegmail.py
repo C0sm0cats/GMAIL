@@ -2941,10 +2941,14 @@ def interactive_download_main():
             # is used meanwhile), and the view only moves its floor once the emails are in the list.
             def load_more():
                 with sync_lock:
-                    before = f"before:{view['floor'] // 1000 + 1}"  # Gmail dates are in seconds; duplicates dropped
+                    second = view["floor"] // 1000
+                    before = f"before:{second + 1}"  # Gmail dates are in seconds; duplicates dropped
+                    # The listed emails of the floor second come back too: ask for that many more, or a
+                    # page made only of them would never move the floor (--max 1, a burst in one second).
+                    again = sum(1 for message in view["messages"] if message["internalDate"] // 1000 == second)
                     failed = set()
                     older, token = list_candidate_messages(
-                        sync_service, user_id, query=f"{view['query']} {before}".strip(), max_results=args.max,
+                        sync_service, user_id, query=f"{view['query']} {before}".strip(), max_results=args.max + again,
                         in_trash=view["in_trash"], failed=failed,
                     )
                 known = {message["id"] for message in view["messages"]}

@@ -4150,7 +4150,8 @@ class LoadMoreSessionTest(unittest.TestCase):
     MAILBOX = [("m1", 10_000_000), ("m2", 9_000_000), ("m3", 8_000_700), ("m4", 8_000_200),
                ("m5", 7_000_000), ("m6", 6_000_000), ("m7", 5_000_000), ("m8", 4_000_000)]
 
-    def test_repeated_m_loads_every_older_email_once(self):
+    def run_session(self, mailbox, page_size):
+        """Run the real session with `--max page_size`, pressing m until nothing more (at most 10 times)."""
         import io
         import re
         import tempfile
@@ -4164,7 +4165,7 @@ class LoadMoreSessionTest(unittest.TestCase):
             # Gmail's before:<epoch seconds> is exclusive; no page token here, m relies on before: only.
             queries.append(query)
             match = re.search(r"before:(\d+)", query)
-            matching = [(msg_id, date) for msg_id, date in self.MAILBOX
+            matching = [(msg_id, date) for msg_id, date in mailbox
                         if match is None or date < int(match.group(1)) * 1000]
             page = matching[:max_results]
             return ([{"id": msg_id, "from": f"S <{msg_id}@example.com>", "subject": msg_id, "snippet": "",
@@ -4188,19 +4189,40 @@ class LoadMoreSessionTest(unittest.TestCase):
             ask_user_to_select_messages=ask, refresh_messages=lambda *a, **k: ([], set()),
             sync_playwright=lambda: FakePlaywright(), launch_browser=lambda *a, **k: mock.Mock(),
             open_quietly=lambda url: True, console=Console(file=io.StringIO()),
-        ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir, "--max", "3"]):
+        ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir, "--max", str(page_size)]):
             savegmail.interactive_download_main()
 
-        self.assertEqual(first, ["m1", "m2", "m3"])
-        self.assertEqual(loads, [(["m4", "m5"], True), (["m6", "m7"], True), (["m8"], False)])
-        dates = dict(self.MAILBOX)
+        dates = dict(mailbox)
         shown = list(first)
         for older, _ in loads:  # each m: new emails, all older than everything listed before
             self.assertTrue(older)
             self.assertLess(max(dates[msg_id] for msg_id in older), min(dates[msg_id] for msg_id in shown))
             shown += older
-        self.assertEqual(shown, [msg_id for msg_id, _ in self.MAILBOX])  # none twice, none skipped
-        self.assertEqual(queries[1:], ["before:8001", "before:7001", "before:5001"])
+        self.assertEqual(shown, [msg_id for msg_id, _ in mailbox])  # none twice, none skipped
+        self.assertFalse(loads[-1][1])  # m more goes away once everything is listed
+        return first, loads, queries
+
+    def test_repeated_m_loads_every_older_email_once(self):
+        first, loads, queries = self.run_session(self.MAILBOX, 3)
+        self.assertEqual(first, ["m1", "m2", "m3"])
+        # The listed m3 shares the floor second and comes back: one more is asked for, so each m adds 3.
+        self.assertEqual(loads, [(["m4", "m5", "m6"], True), (["m7", "m8"], False)])
+        self.assertEqual(queries[1:], ["before:8001", "before:6001"])
+
+    def test_m_with_max_1_moves_on(self):
+        # The floor email always comes back with before:<its second + 1>: m must still load the next one.
+        mailbox = [("m1", 10_000_000), ("m2", 9_000_000), ("m3", 8_000_000), ("m4", 7_000_000)]
+        first, loads, queries = self.run_session(mailbox, 1)
+        self.assertEqual(first, ["m1"])
+        self.assertEqual(loads, [(["m2"], True), (["m3"], True), (["m4"], False)])
+
+    def test_m_past_a_full_page_in_the_floor_second(self):
+        # m2..m4 share one second: with --max 3, m once lists m4 and must then reach m5.
+        mailbox = [("m1", 10_000_000), ("m2", 9_000_300), ("m3", 9_000_200), ("m4", 9_000_100),
+                   ("m5", 7_000_000)]
+        first, loads, queries = self.run_session(mailbox, 3)
+        self.assertEqual(first, ["m1", "m2", "m3"])
+        self.assertEqual(loads, [(["m4", "m5"], False)])
 
 
 class FilteredMailboxApi(HistoryMailboxApi):
