@@ -164,6 +164,10 @@ class TextHelpersTest(unittest.TestCase):
         detail["labelIds"] = ["INBOX"]
         self.assertEqual(savegmail.message_row(savegmail.to_candidate(detail))["sender"], "Me")
 
+    def test_filter_finds_the_sender_address(self):
+        row = savegmail.message_row({"id": "1", "from": "Jean Dupont <jd@corp.example>", "subject": "Hi"})
+        self.assertIn("@corp.example", row["haystack"])
+
     def test_sent_category_size_flags(self):
         detail = {"id": "1", "labelIds": ["SENT", "UNREAD", "STARRED", "CATEGORY_PROMOTIONS"], "sizeEstimate": 12_400_000,
                   "payload": {"headers": [{"name": "To", "value": "Paul Martin <p@x>, Jo <j@x>"}]}}
