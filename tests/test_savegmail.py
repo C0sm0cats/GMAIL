@@ -2307,6 +2307,17 @@ class PdfFileNameTest(unittest.TestCase):
             self.assertEqual(self.read(os.path.join(save_dir, "Report.pdf")), b"USER-REPORT")
             self.assertFalse([name for name in os.listdir(save_dir) if name.startswith(".")])
 
+    def test_files_lists_final_paths_for_undo(self):
+        # `u` and the cleanup after a failed trash remove result["files"]:
+        # it must name every file on disk, the renamed PDF included.
+        import tempfile
+        with tempfile.TemporaryDirectory() as save_dir:
+            result = self.save(save_dir, "Invoice", attachment=("bill.pdf", b"%PDF-A"))
+            self.assertEqual(sorted(map(os.path.basename, result["files"])), sorted(os.listdir(save_dir)))
+            self.assertIn(result["pdf"], map(os.path.basename, result["files"]))
+            savegmail.remove_files(result["files"])
+            self.assertEqual(os.listdir(save_dir), [])
+
     def test_pdf_name_pads_milliseconds(self):
         import tempfile
         from datetime import datetime
