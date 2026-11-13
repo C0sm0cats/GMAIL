@@ -3763,17 +3763,31 @@ class SignInAgainSessionTest(unittest.TestCase):
 
 
 class HistoryMailboxApi(SyncedMailboxApi):
-    """SyncedMailboxApi with Gmail's history: change() records a label change, gets and lists are counted."""
+    """SyncedMailboxApi with Gmail's history: change() records a label change, gets and lists are counted.
+
+    Each event keeps its history record type; page, when set, is how many records history.list gives a page.
+    """
 
     def __init__(self, labels):
         super().__init__(labels)
         self.history_id, self.events, self.gets, self.lists, self.oldest = 100, [], [], 0, 0
         self.names = {}  # your own labels, {id: name}, as labels.list gives them
+        self.page = None
 
-    def change(self, msg_id, labels):
+    def change(self, msg_id, labels, kind="labelsRemoved"):
         self.mail[msg_id] = labels
+        self.record(msg_id, kind)
+
+    def record(self, msg_id, kind):
         self.history_id += 1
-        self.events.append((self.history_id, msg_id))
+        self.events.append((self.history_id, msg_id, kind))
+
+    def receive(self, msg_id, labels):
+        self.change(msg_id, labels, "messagesAdded")
+
+    def delete(self, msg_id):
+        del self.mail[msg_id]
+        self.record(msg_id, "messagesDeleted")
 
     def getProfile(self, userId):
         return FakeResult({"emailAddress": "me@example.com", "historyId": str(self.history_id)})
@@ -3795,9 +3809,14 @@ class HistoryMailboxApi(SyncedMailboxApi):
                 if int(startHistoryId) < api.oldest:
                     from unittest import mock
                     raise savegmail.HttpError(mock.Mock(status=404, reason="Not Found"), b"Not Found")
-                return FakeResult({"historyId": str(api.history_id), "history": [
-                    {"id": str(number), "labelsRemoved": [{"message": {"id": msg_id}}]}
-                    for number, msg_id in api.events if number > int(startHistoryId)]})
+                records = [{"id": str(number), kind: [{"message": {"id": msg_id}}]}
+                           for number, msg_id, kind in api.events if number > int(startHistoryId)]
+                start = int(pageToken or 0)
+                end = len(records) if api.page is None else start + api.page
+                response = {"historyId": str(api.history_id), "history": records[start:end]}
+                if end < len(records):
+                    response["nextPageToken"] = str(end)
+                return FakeResult(response)
         return History()
 
 
@@ -3864,6 +3883,37 @@ class HistorySyncSessionTest(unittest.TestCase):
         self.run_session(api, step)
         self.assertEqual(results[0]["labels"], {"m1": ["INBOX", "Label_2"]})
         self.assertEqual(results[0]["user_labels"], {"Label_1": "Work", "Label_2": "Factures"})
+
+    def test_sync_sees_emails_added_deleted_and_starred_in_gmail(self):
+        api = HistoryMailboxApi({f"m{index}": ["INBOX"] for index in range(3)})
+        results = []
+
+        def step(sync):
+            api.receive("new", ["INBOX", "UNREAD"])  # received during the session
+            results.append(sync())
+            results[-1]["applied"]()
+            api.delete("m1")  # deleted for good in Gmail web
+            results.append(sync())
+            results[-1]["applied"]()
+            api.change("m2", ["INBOX", "STARRED"], "labelsAdded")  # starred on the phone
+            results.append(sync())
+        self.run_session(api, step)
+        added, deleted, starred = results
+        self.assertEqual(([message["id"] for message in added["new"]], added["gone"]), (["new"], set()))
+        self.assertEqual(deleted["gone"], {"m1"})  # each sync is handed the list as first loaded
+        self.assertEqual(starred["labels"].get("m2"), ["INBOX", "STARRED"])
+
+    def test_sync_reads_every_page_of_the_history(self):
+        api = HistoryMailboxApi({f"m{index}": ["INBOX", "UNREAD"] for index in range(3)})
+        api.page = 1  # one history record per page
+        results = []
+
+        def step(sync):
+            api.change("m0", ["INBOX"])
+            api.change("m2", ["INBOX", "UNREAD", "STARRED"], "labelsAdded")  # on the 2nd page
+            results.append(sync())
+        self.run_session(api, step)
+        self.assertEqual(results[0]["labels"], {"m0": ["INBOX"], "m2": ["INBOX", "UNREAD", "STARRED"]})
 
     def test_history_too_old_falls_back_to_the_full_sync(self):
         api = HistoryMailboxApi({f"m{index}": ["INBOX", "UNREAD"] for index in range(3)})
