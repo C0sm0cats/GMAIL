@@ -2106,6 +2106,39 @@ class BodyCharsetTest(unittest.TestCase):
         self.assertIn("Café", self.render(self.message(b"text/plain; charset=iso-8859-1", b"Caf\xe9")))
 
 
+class HostileBodyTimeTest(unittest.TestCase):
+    """A body built to make the rewriting before Chromium quadratic is still prepared at once."""
+
+    render = BodyCharsetTest.render
+    message = BodyCharsetTest.message
+
+    def timed(self, content_type, body):
+        import time
+        start = time.monotonic()
+        html_body = self.render(self.message(content_type, body))
+        self.assertLess(time.monotonic() - start, 1.5, body[:40])
+        return html_body
+
+    def test_hostile_bodies_render_in_linear_time(self):
+        # Before: 12 s, 6 s, 5 s, 4 s and 3 s; a few hundred KB of the same took minutes.
+        self.timed(b"text/html", b"<p>Hello</p><!--" + b"<" * 20_000 + b"-->")
+        self.timed(b"text/html", b'<div style="background:url(' + b" " * 30_000 + b'x.png)">')
+        self.timed(b"text/html", b"<a href=" + b" " * 30_000 + b">x</a>")
+        self.timed(b"text/html", (b'<img srcset="' + b"a" * 20) * 2_000)
+        body = self.timed(b"text/plain", b"see http://a" + b")" * 100_000)
+        self.assertIn('<a href="http://a" target="_blank">http://a</a>)))', body)
+        body = self.timed(b"text/plain; charset=punycode", b"a" * 100_000 + b"-" + b"b" * 100_000)
+        self.assertIn("a" * 100_000 + "-", body)  # read as text, not decoded as a domain name
+        # The protocol-relative URLs are still given https.
+        body = self.timed(b"text/html", b"<img src = ' //a.example/i.png'><a href=//b.example/>x</a>"
+                                        b"<img srcset=\"//c.example/1.png 1x, //c.example/2.png 2x\">"
+                                        b"<style>p{background:url( \"//d.example/x.png\")}@import '//e.example/s.css';"
+                                        b"</style>")
+        for url in ("' https://a.example/i.png'", "href=https://b.example/", '"https://c.example/1.png 1x, '
+                    'https://c.example/2.png 2x"', '"https://d.example/x.png"', "'https://e.example/s.css'"):
+            self.assertIn(url, body)
+
+
 class PdfFileNameTest(unittest.TestCase):
     """The rendered PDF never overwrites or deletes a file the program did not create."""
 

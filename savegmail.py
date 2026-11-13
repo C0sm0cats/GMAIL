@@ -1,6 +1,7 @@
 import os
 import pathlib
 import base64
+import codecs
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
 import asyncio
 from datetime import datetime, timezone
@@ -503,10 +504,13 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
     def link_url(match):
         # Punctuation that ends the sentence is not part of the URL; a `)` is, when it closes a `(`
         # of the URL. A `www.` address has no scheme: alone, Chromium resolves it against about:blank.
-        url = html.unescape(match.group(1))
-        while url and (url[-1] in ".,;:!?]'\"" or (url[-1] == ")" and url.count(")") > url.count("("))):
-            url = url[:-1]
-        rest = html.unescape(match.group(1))[len(url):]
+        # The counts are kept up to date, not recounted per character: a long run of `)` stays linear.
+        full = html.unescape(match.group(1))
+        opens, closes, end = full.count("("), full.count(")"), len(full)
+        while end and (full[end - 1] in ".,;:!?]'\"" or (full[end - 1] == ")" and closes > opens)):
+            closes -= full[end - 1] == ")"
+            end -= 1
+        url, rest = full[:end], full[end:]
         href = url if url.lower().startswith(("http://", "https://")) else "http://" + url
         return f'<a href="{html.escape(href)}" target="_blank">{html.escape(url)}</a>{html.escape(rest)}'
 
@@ -534,6 +538,8 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         for name in filter(None, names):
             for codec in (name, name[2:]) if name.startswith('x-') else (name,):
                 try:
+                    if codecs.lookup(codec).name in ('punycode', 'idna'):  # no mail charset, quadratic to decode
+                        continue
                     return data.decode(codec, errors='replace')
                 except LookupError:
                     continue
@@ -687,12 +693,14 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
 
     # set_content leaves the page on about:blank, where a protocol-relative //host/x resolves to nothing:
     # the image, style or link would silently be missing from the PDF. Give those URLs https.
-    html_content = re.sub(r'''(<[^>]*?\b(?:src|href|background|poster)\s*=\s*["']?\s*)//''', r'\1https://',
+    # Each scan stops at the end of the current tag or value (`[^<>]`, `[^"'<>]`), and no two `\s*` are
+    # adjacent: otherwise thousands of `<` or of spaces in the email make these substitutions quadratic.
+    html_content = re.sub(r'''(<[^<>]*?\b(?:src|href|background|poster)\s*=\s*(?:["']\s*)?)//''', r'\1https://',
                           html_content, flags=re.I)
-    html_content = re.sub(r'''(<[^>]*?\bsrcset\s*=\s*)(["'])(.*?)\2''',
+    html_content = re.sub(r'''(<[^<>]*?\bsrcset\s*=\s*)(["'])([^"'<>]*)\2''',
                           lambda m: m.group(1) + m.group(2) + re.sub(r'(^|,)(\s*)//', r'\1\2https://', m.group(3))
-                          + m.group(2), html_content, flags=re.I | re.S)
-    html_content = re.sub(r'''(\burl\(\s*["']?\s*|@import\s+["'])//''', r'\1https://', html_content, flags=re.I)
+                          + m.group(2), html_content, flags=re.I)
+    html_content = re.sub(r'''(\burl\(\s*(?:["']\s*)?|@import\s+["'])//''', r'\1https://', html_content, flags=re.I)
 
     # The attachment list is printed once, at the end of the email, in the 10px text of the header:
     # in the footer template, Chromium would repeat it on every page and take that room from the body.
