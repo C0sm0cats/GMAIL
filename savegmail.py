@@ -801,13 +801,17 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
             header_template=header_template,
             footer_template=footer_template,
             margin=pdf_margins,
-            page_ranges=f"1-{MAX_PDF_PAGES}",
+            page_ranges=f"1-{MAX_PDF_PAGES + 1}",  # one page more: tells whether the email was cut
             path=final_pdf_path
         )
     except Exception as e:
         raise RuntimeError(f"PDF generation failed: {e}") from e
     finally:
         page.close()
+    # A cut PDF would be marked saved, then the email trashed by enter with the end of its body.
+    with open(final_pdf_path, "rb") as printed:
+        if len(re.findall(rb"/Type\s*/Page[^s]", printed.read())) > MAX_PDF_PAGES:
+            raise RuntimeError(f"email longer than {MAX_PDF_PAGES} PDF pages, kept in Gmail")
 
     now = datetime.now()
     timestamp = now.strftime("%y%m%d_%H%M%S")

@@ -1666,9 +1666,10 @@ class PageCountTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as save_dir:
             savegmail.save_email_and_attachments(FakeRawService(self.page_break_email(10)), "me", "id1",
                                                  save_dir, OptionsRecordingBrowser())
-        self.assertEqual(options[0].get("page_ranges"), f"1-{savegmail.MAX_PDF_PAGES}")
+        self.assertEqual(options[0].get("page_ranges"), f"1-{savegmail.MAX_PDF_PAGES + 1}")
 
-    def test_chromium_prints_at_most_max_pages(self):
+    def test_email_longer_than_max_pages_is_refused_not_cut(self):
+        """Bug 59: a cut PDF was marked saved, and enter trashed the email with the end of its body."""
         import re
         import tempfile
         from unittest import mock
@@ -1680,8 +1681,13 @@ class PageCountTest(unittest.TestCase):
                 self.skipTest(f"Chromium unavailable: {error}")
             try:
                 with tempfile.TemporaryDirectory() as save_dir, mock.patch.object(savegmail, "MAX_PDF_PAGES", 5):
+                    with self.assertRaisesRegex(RuntimeError, "longer than 5 PDF pages"):
+                        savegmail.save_email_and_attachments(
+                            FakeRawService(self.page_break_email(50)), "me", "id1", save_dir, browser)
+                    self.assertEqual(os.listdir(save_dir), [])
+                    # Exactly at the limit: saved whole.
                     result = savegmail.save_email_and_attachments(
-                        FakeRawService(self.page_break_email(50)), "me", "id1", save_dir, browser)
+                        FakeRawService(self.page_break_email(4)), "me", "id2", save_dir, browser)
                     with open(os.path.join(save_dir, result["pdf"]), "rb") as f:
                         pdf = f.read()
             finally:
