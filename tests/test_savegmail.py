@@ -3272,6 +3272,21 @@ class FakeTrashApi(FakeBatchApi):
         return Batch(callback, [])
 
 
+class FakeReadingApi(FakeMailboxApi):
+    """FakeMailboxApi that also reads emails like Gmail's messages.get, in batches, recording the ids read."""
+
+    def __init__(self):
+        super().__init__()
+        self.read = []
+
+    def get(self, userId, id, format, fields):
+        self.read.append(id)
+        return FakeResult({"id": id, "internalDate": "1700000000000", "payload": {"headers": []}})
+
+    def new_batch_http_request(self, callback):
+        return FakeBatch(callback, [])
+
+
 class GmailCallSizeTest(unittest.TestCase):
     """Gmail takes at most 1000 ids per batchDelete / batchModify."""
 
@@ -3335,7 +3350,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
     """Drives interactive_download_main with a fake Gmail and scripted keys, like s, D, u."""
 
     def run_session(self, places, steps, failing_untrash=(), failing=(), api=None, down=None, launch=None,
-                    args=(), gmail_class=None, opens=True):
+                    args=(), gmail_class=None, opens=True, real_refresh=False):
         """steps: (action, ids); an undo is only pressed when u is offered, as in the list.
         ids None: every email the list shows (a then the action).
 
@@ -3344,6 +3359,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
         self.signed_out holds whether the list offered r to sign in again, before each step.
         launch: replaces launch_browser (default: a new mock browser each time).
         opens: what open_quietly answers (False: no browser or PDF viewer opened anything).
+        real_refresh: leave refresh_messages real, listing and reading emails through api.
         ids {"select": [...], "cursor": id}: space on those emails, then the key, which acts on the
         selection, or on the email under the cursor when nothing is selected (like chosen() in the list).
         Returns (fake Gmail, files left in the download folder, undo label offered before each step);
@@ -3409,10 +3425,11 @@ class UndoAfterDeleteTest(unittest.TestCase):
                 return call(*args, **kwargs)
             return wrapper
         fakes = {name: failing_when_down(call) for name, call in fakes.items()}
+        if not real_refresh:
+            fakes["refresh_messages"] = lambda *a, **k: ([], set())
         with mock.patch.multiple(
             savegmail, authenticate=lambda: object(), build=lambda *a, **k: api or FakeSessionService(),
-            user_labels=lambda *a: {}, ask_user_to_select_messages=ask,
-            refresh_messages=lambda *a, **k: ([], set()), refresh_labels=lambda *a, **k: 0,
+            user_labels=lambda *a: {}, ask_user_to_select_messages=ask, refresh_labels=lambda *a, **k: 0,
             sync_playwright=lambda: FakePlaywright(), launch_browser=launch or (lambda *a, **k: mock.Mock()),
             open_quietly=lambda url: opens, console=Console(file=self.output, width=80), **fakes,
         ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir, *args]):
@@ -3597,6 +3614,15 @@ class UndoAfterDeleteTest(unittest.TestCase):
             with self.subTest(first=first):
                 gmail, left, offered = self.run_session({"A": "inbox"}, [(first, ["A"]), ("delete", ["A"])])
                 self.assertIsNone(offered[-1])
+
+    def test_undo_does_not_read_again_the_emails_it_restores(self):
+        # u after d: the emails come back in the list from what savegmail already had, without a messages.get each.
+        api = FakeReadingApi()
+        gmail, left, offered = self.run_session({"A": "inbox", "B": "inbox", "C": "inbox"},
+                                                [("trash", ["A", "B"]), ("undo", [])], api=api, real_refresh=True)
+        self.assertEqual(gmail.places, {"A": "inbox", "B": "inbox", "C": "inbox"})
+        self.assertEqual(self.shown[-1], ["A", "B", "C"])
+        self.assertEqual(api.read, [])
 
     def test_archive_undo_survives_delete_and_empty_trash(self):
         gmail, left, offered = self.run_session({"A": "inbox", "X": "trash"},

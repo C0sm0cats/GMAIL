@@ -1050,13 +1050,15 @@ def history_changes(service, user_id, start):
             return changed, labels, response.get("historyId", start)
 
 
-def sync_changes(service, user_id, view, loaded, failed=None):
+def sync_changes(service, user_id, view, loaded, failed=None, cached=None):
     """What changed in Gmail for a view since its history id: (new, gone ids, relabeled, new history id, known).
 
     relabeled lists the loaded ids whose labels may have changed and must be read again: only those Gmail's
     history lists without their labels, and nothing is listed when nothing changed. Without a history id, or
     one too old (404), every loaded email. known is {id: labels} for the loaded ids the history gave labels for.
-    New emails Gmail would not read are added to the set failed, when given.
+    New emails Gmail would not read are added to the set failed, when given. cached, {id: message}: emails
+    savegmail already has (those u restores), taken as they are instead of read again, with the labels the
+    history gives them when it does.
     """
     changed, labels, history = None, {}, None
     if view.get("history"):
@@ -1072,7 +1074,10 @@ def sync_changes(service, user_id, view, loaded, failed=None):
         return [], set(), [], history, {}
     new, gone = refresh_messages(service, user_id, view["query"], loaded,
                                  since=view["floor"] if view["more"] else None, in_trash=view["in_trash"],
-                                 failed=failed)
+                                 failed=failed, cached=cached)
+    for message in new:
+        if cached and message["id"] in cached and message["id"] in labels:
+            message["labels"] = labels[message["id"]]
     relabeled = [message["id"] for message in loaded
                  if message["id"] not in gone and (changed is None or message["id"] in changed)]
     known = {msg_id: labels[msg_id] for msg_id in relabeled if msg_id in labels}
@@ -1613,14 +1618,17 @@ def sender_name(sender):
     return name.strip().strip('"') or address or "—"
 
 
-def refresh_messages(service, user_id, query, loaded, since=None, page_size=100, in_trash=False, failed=None):
+def refresh_messages(service, user_id, query, loaded, since=None, page_size=100, in_trash=False, failed=None,
+                     cached=None):
     """Re-sync loaded emails with Gmail.
 
     since is the internalDate the loaded range goes down to: older emails are left to load_more. With
     since=None (nothing older to load) the whole query is synced.
     Returns (new messages, ids of loaded messages Gmail no longer lists); the ids of new emails Gmail
-    would not read are added to the set failed, when given.
+    would not read are added to the set failed, when given. New emails in cached, {id: message}, are taken
+    from it (a copy) instead of read again.
     """
+    cached = cached or {}
     known = {message["id"] for message in loaded}
     seen, new, page_token = set(), [], None
     while True:
@@ -1636,13 +1644,17 @@ def refresh_messages(service, user_id, query, loaded, since=None, page_size=100,
             last = max(position for position, msg_id in enumerate(ids) if msg_id in known)
             candidates = [msg_id for msg_id in ids[:last + 1] if msg_id not in known]
             crossed = True
-        details, errors = run_batched(service, candidates, lambda msg_id: metadata_request(service, user_id, msg_id))
+        details, errors = run_batched(service, [msg_id for msg_id in candidates if msg_id not in cached],
+                                      lambda msg_id: metadata_request(service, user_id, msg_id))
         if failed is not None:
             failed.update(errors)
         for msg_id in candidates:
-            if msg_id not in details:
+            if msg_id in cached:
+                message = dict(cached[msg_id])
+            elif msg_id in details:
+                message = to_candidate(details[msg_id])
+            else:
                 continue
-            message = to_candidate(details[msg_id])
             if since is None or message["internalDate"] >= since:
                 new.append(message)
             else:
@@ -3089,13 +3101,16 @@ def run_interactive_download():
             if view["total"]:
                 view["total"] = max(0, view["total"] - (before - len(messages)))
 
-        def refresh_view(view, quiet=False):
-            """Re-sync a view with Gmail; returns its notice lines (none if quiet and nothing changed)."""
+        def refresh_view(view, quiet=False, cached=None):
+            """Re-sync a view with Gmail; returns its notice lines (none if quiet and nothing changed).
+
+            cached, {id: message}: emails already known (those u restores), not read again from Gmail.
+            """
             failed = set()
             try:
                 with console.status("[dim]Checking Gmail…[/]"):
                     new, removed, relabeled, history, known = sync_changes(service, user_id, view, view["messages"],
-                                                                           failed=failed)
+                                                                           failed=failed, cached=cached)
                     if view["more"]:
                         view["total"] = estimate_total(service, user_id, view["query"], view["in_trash"])
             except GMAIL_ERRORS as exc:
@@ -3322,8 +3337,8 @@ def run_interactive_download():
                         errors.update({message["id"]: error for message in undo["archived"]
                                        if done is not None and message["id"] not in done})
                     if restored or unarchived:
-                        # Emails go back to whichever views they belong to.
-                        refresh_view(view)
+                        # Emails go back to whichever views they belong to, from what u already has of them.
+                        refresh_view(view, cached={message["id"]: message for message in restored + unarchived})
                     parts = []
                     if restored:
                         parts.append(f"{plural(len(restored), 'email')} restored from trash")
