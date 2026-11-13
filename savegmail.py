@@ -96,6 +96,9 @@ INLINE_IMAGE_URL = "https://cid.savegmail.invalid/{}"
 # in a time quadratic in their number (minutes per email). Real emails stay far below this many pages.
 MAX_PDF_PAGES = 1000
 
+# Emails included in another one; one without a name gets ours (bounces, digests), with this extension.
+INCLUDED_EMAIL_TYPES = {"message/rfc822": ".eml", "message/global": ".u8msg"}
+
 # Longest wait for an email's images and fonts before printing; one that never answers is printed without.
 IMAGE_WAIT_SECONDS = 15
 
@@ -630,6 +633,9 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
         name = part.get_filename()
         if not name and part.get_content_disposition() == 'attachment':
             name = "attachment" + (mimetypes.guess_extension(part.get_content_type()) or ".bin")
+        if not name and part is not msg and part.get_content_type() in INCLUDED_EMAIL_TYPES:
+            # An email included without a name (bounce, digest): kept whole, like a named one.
+            name = "attached-message" + INCLUDED_EMAIL_TYPES[part.get_content_type()]
         return name
 
     def walk(part):
@@ -1116,15 +1122,16 @@ def metadata_request(service, user_id, msg_id):
     )
 
 
-def has_attachment(part):
+def has_attachment(part, top=True):
     # The same parts as save_email_and_attachments saves (attachment_name, then not an inline image),
     # read from the Gmail API's parts instead of the raw email.
     headers = part.get("headers", [])
     mime_type = part.get("mimeType", "").lower()
     disposition = extract_header(headers, "Content-Disposition", "").split(";")[0].strip().lower()
-    named = bool(part.get("filename")) or disposition == "attachment"
+    named = (bool(part.get("filename")) or disposition == "attachment"
+             or (not top and mime_type in INCLUDED_EMAIL_TYPES))
     if mime_type.startswith("multipart/") or (mime_type.startswith("message/") and not named):
-        return any(has_attachment(sub) for sub in part.get("parts", []))
+        return any(has_attachment(sub, top=False) for sub in part.get("parts", []))
     return (named and (disposition == "attachment" or not extract_header(headers, "Content-ID", ""))
             and mime_type not in SIGNATURE_TYPES)
 

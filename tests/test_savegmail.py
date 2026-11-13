@@ -200,6 +200,7 @@ class TextHelpersTest(unittest.TestCase):
     def test_attachment_flag(self):
         from email.mime.application import MIMEApplication
         from email.mime.image import MIMEImage
+        from email.mime.message import MIMEMessage
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
 
@@ -234,6 +235,8 @@ class TextHelpersTest(unittest.TestCase):
         self.assertTrue(flag(mixed(mixed(MIMEText("hi"), pdf), smime, subtype="signed")))  # S/MIME
         self.assertTrue(flag(mixed(mixed(MIMEText("hi"), pdf), pgp, subtype="signed")))  # PGP/MIME
         self.assertTrue(flag(mixed(MIMEText("scan"), attached(MIMEApplication(b"%PDF", "pdf")))))  # no name
+        self.assertTrue(flag(mixed(MIMEText("bounce"), MIMEMessage(MIMEText("refused")),
+                                   subtype="report")))  # included email without name nor disposition
         self.assertFalse(flag(mixed(MIMEText("hi"), smime, subtype="signed")))  # only the signature
         self.assertFalse(flag(mixed(html, MIMEText("-- list footer"))))  # Mailman footer
         self.assertFalse(flag(mixed(html, logo, subtype="related")))  # inline image
@@ -2444,6 +2447,39 @@ class AttachmentPartTest(unittest.TestCase):
         # The preview lists them too, without writing them.
         result, files = self.save(msg, save_attachments=False)
         self.assertEqual((result["attachments"], files), (3, {}))
+
+    def test_included_email_without_name_or_disposition_is_saved(self):
+        from email.message import EmailMessage
+        from email.mime.message import MIMEMessage
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        refused = EmailMessage()
+        refused["Subject"] = "Contract"
+        refused.set_content("ORIGINALBODY")
+        refused.add_attachment(b"%PDF-CONTRACT", maintype="application", subtype="pdf", filename="contract.pdf")
+        # Postfix bounce (RFC 3464): the refused email has neither a file name nor a disposition.
+        bounce = MIMEMultipart("report", report_type="delivery-status")
+        bounce["Subject"] = "Undelivered Mail Returned to Sender"
+        bounce.attach(MIMEText("your message could not be delivered"))
+        bounce.attach(MIMEMessage(refused))
+        result, files = self.save(bounce)
+        self.assertEqual((result["attachments"], sorted(files)), (1, ["attached-message.eml"]))
+        self.assertIn(b"ORIGINALBODY", files["attached-message.eml"])
+        self.assertIn(b"contract.pdf", files["attached-message.eml"])
+        # Mailman MIME digest (RFC 2046 multipart/digest): each post is an unnamed message/rfc822.
+        posts = []
+        for text in ("FIRSTPOST", "SECONDPOST"):
+            post = EmailMessage()
+            post.set_content(text)
+            posts.append(MIMEMessage(post))
+        digest = MIMEMultipart("digest", _subparts=posts)
+        msg = MIMEMultipart("mixed", _subparts=[MIMEText("Today's Topics"), digest, MIMEText("-- footer")])
+        msg["Subject"] = "Example-list Digest"
+        result, files = self.save(msg)
+        self.assertEqual(result["attachments"], 2)
+        self.assertEqual(sorted(files), ["attached-message(1).eml", "attached-message.eml"])
+        self.assertEqual(sorted(b"FIRSTPOST" in data for data in files.values()), [False, True])
+        self.assertTrue(any(b"SECONDPOST" in data for data in files.values()))
 
 
 class FakeSaveService(FakeService):
