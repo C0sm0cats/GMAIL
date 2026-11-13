@@ -3400,6 +3400,14 @@ class UndoAfterDeleteTest(unittest.TestCase):
                     self.assertEqual(self.signed_out[2], isinstance(error, RefreshError))
                     self.assertEqual(gmail.places, {"A": "trash", "B": "inbox"})
 
+    def test_offline_undo_of_archive_can_be_retried(self):
+        # A u that fails offline after e keeps the emails to put back in the Inbox, so u stays offered.
+        import httplib2
+        gmail, left, offered = self.run_session({"A": "inbox"}, [("archive", ["A"]), ("undo", []), ("undo", [])],
+                                                down=(1, httplib2.ServerNotFoundError("Unable to find the server")))
+        self.assertEqual(offered[2:], ["archive (1)", "archive (1)"])
+        self.assertEqual(gmail.places, {"A": "archive"})
+
 
     def test_gmail_error_shows_its_reason_not_the_url(self):
         # Gmail refuses a change (quota, scopes): the notice says why, not a request URL cut at 80 characters.
