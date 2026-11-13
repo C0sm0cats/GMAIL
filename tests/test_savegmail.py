@@ -3162,7 +3162,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
             user_labels=lambda *a: {}, ask_user_to_select_messages=ask,
             refresh_messages=lambda *a, **k: ([], set()), refresh_labels=lambda *a, **k: 0,
             sync_playwright=lambda: FakePlaywright(), launch_browser=launch or (lambda *a, **k: mock.Mock()),
-            open_quietly=lambda url: opens, console=Console(file=self.output), **fakes,
+            open_quietly=lambda url: opens, console=Console(file=self.output, width=80), **fakes,
         ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir, *args]):
             savegmail.interactive_download_main()
         return gmail, sorted(os.listdir(save_dir)), offered
@@ -4755,6 +4755,24 @@ class QueryOptionTest(unittest.TestCase):
                                                            for _, view_filter in savegmail.VIEWS[1:]])
 
 
+class TerminalWidthTest(unittest.TestCase):
+    """The output tests pass whatever the width of the terminal running them (COLUMNS, tty size)."""
+
+    def test_output_tests_ignore_the_terminal_width(self):
+        from unittest import mock
+        names = ["UndoAfterDeleteTest.test_banner_stays_on_one_line_at_80_columns",
+                 "UndoAfterDeleteTest.test_relative_download_folder_then_f_enter_is_one_folder",
+                 "RestoreKeyTest.test_restore_after_trash_drops_the_undo_and_the_trash_total",
+                 "TypedSelectionTest.test_number_shown_is_email_chosen"]
+        for columns in ("40", "200"):
+            with self.subTest(columns=columns), mock.patch.dict(os.environ, {"COLUMNS": columns}):
+                suite = unittest.defaultTestLoader.loadTestsFromNames(names, sys.modules[__name__])
+                result = unittest.TestResult()
+                suite.run(result)
+                self.assertEqual([(str(test), trace.splitlines()[-1]) for test, trace in result.failures + result.errors], [])
+                self.assertEqual(result.testsRun, len(names))
+
+
 class TypedSelectionTest(unittest.TestCase):
     """ask_user_to_select_messages when stdin / stdout are not a terminal (pipe, CI)."""
 
@@ -4771,8 +4789,10 @@ class TypedSelectionTest(unittest.TestCase):
             return answers.pop(0)
 
         stdin = mock.Mock(isatty=lambda: False)
-        with savegmail.console.capture() as out, mock.patch.object(builtins, "input", fake_input), \
-                mock.patch.object(savegmail.sys, "stdin", stdin):
+        # A fixed width: the global console follows the terminal running the tests (COLUMNS, tty size).
+        console = savegmail.Console(highlight=False, width=80)
+        with mock.patch.object(savegmail, "console", console), console.capture() as out, \
+                mock.patch.object(builtins, "input", fake_input), mock.patch.object(savegmail.sys, "stdin", stdin):
             action, chosen = savegmail.ask_user_to_select_messages(messages)
         return action, [message["id"] for message in chosen], prompts, out.get()
 
