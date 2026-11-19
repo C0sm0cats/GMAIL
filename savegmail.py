@@ -28,6 +28,7 @@ import signal
 import time
 import tempfile
 import threading
+import _thread
 import uuid
 import webbrowser
 from urllib.parse import quote
@@ -114,6 +115,47 @@ IMAGE_WAIT_SECONDS = 15
 PRINT_WRAP_CSS = ("pre { white-space: pre-wrap !important; overflow-wrap: anywhere !important; }"
                   " *, *::before, *::after { filter: none !important; backdrop-filter: none !important;"
                   " box-shadow: none !important; text-shadow: none !important; }")
+
+# Longest an email may take to print. Real emails print in seconds, even at MAX_PDF_PAGES; effects the
+# print stylesheet cannot reach (a blur inside an SVG image, a separate document) take minutes per hundred pages.
+PDF_PRINT_SECONDS = 60
+
+
+def print_pdf(page, **options):
+    """page.pdf(**options), given up after PDF_PRINT_SECONDS: Playwright's pdf() has no timeout.
+
+    A watchdog thread interrupts the main thread as Ctrl+C does; Playwright's sync API raises that in the
+    waiting call and stays usable. A flag the watchdog sets first tells the timeout from a real Ctrl+C.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return page.pdf(**options)  # nothing to interrupt from here
+    lock, state = threading.Lock(), {"done": False, "timed_out": False}
+
+    def stop():
+        with lock:  # under the lock: once the print is done, no interrupt can follow
+            if state["done"]:
+                return
+            state["timed_out"] = True
+            if hasattr(signal, "pthread_kill"):
+                # A real signal also wakes the event loop, which may be waiting for the driver with no timer.
+                signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+            else:
+                _thread.interrupt_main()
+
+    watchdog = threading.Timer(PDF_PRINT_SECONDS, stop)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        try:
+            return page.pdf(**options)
+        finally:
+            with lock:
+                state["done"] = True
+            watchdog.cancel()
+    except KeyboardInterrupt:
+        if not state["timed_out"]:
+            raise
+        raise TimeoutError(f"email took longer than {PDF_PRINT_SECONDS} s to print, kept in Gmail") from None
 
 
 def new_email_page(browser, resources=None):
@@ -860,7 +902,8 @@ def write_email_files(service, user_id, msg_id, save_dir, browser, on_step, writ
 
         pdf_margins = measure_pdf_margins(browser, header_template, footer_template)
 
-        page.pdf(
+        print_pdf(
+            page,
             format='A4',
             print_background=True,
             display_header_footer=True,

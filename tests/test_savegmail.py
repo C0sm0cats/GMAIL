@@ -2033,6 +2033,108 @@ class BlurEffectTest(unittest.TestCase):
         self.assertEqual(styles, [["none"] * 7])
 
 
+class PrintTimeoutTest(unittest.TestCase):
+    """A blur inside an SVG image escapes the print stylesheet: 6 minutes for 1,000 pages, so printing is bounded."""
+
+    message = {"id": "m1", "from": "S <s@example.com>", "subject": "Slow", "snippet": "",
+               "internalDate": 1_700_000_000_000}
+
+    @staticmethod
+    def raw_email(body, subtype="plain"):
+        import base64
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["Subject"] = "Slow"
+        msg["From"] = "s@example.com"
+        msg.set_content(body, subtype=subtype)
+        return base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+    class SlowPage(FakePdfPage):
+        # Chromium still rasterizing: the PDF file is begun, the call does not return for a long time.
+        def pdf(self, path, **kwargs):
+            import time
+            open(path, "wb").close()
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                time.sleep(0.05)
+            with open(path, "wb") as f:
+                f.write(b"%PDF-RENDERED")
+
+    class SlowBrowser:
+        def new_page(self, **kwargs):
+            return PrintTimeoutTest.SlowPage(False)
+
+    def test_slow_print_fails_and_email_stays_in_gmail(self):
+        import io
+        import tempfile
+        import time
+        from unittest import mock
+        service = FakeSaveService(self.raw_email("hello"))
+        with tempfile.TemporaryDirectory() as save_dir, \
+                mock.patch.object(savegmail, "PDF_PRINT_SECONDS", 0.5, create=True), \
+                mock.patch.object(savegmail, "measure_pdf_margins", return_value={}), \
+                mock.patch.object(savegmail, "open_quietly", return_value=True), \
+                mock.patch.object(savegmail, "console", savegmail.Console(file=io.StringIO())):
+            start = time.monotonic()
+            try:
+                saved, count, failed, files = savegmail.save_messages(
+                    service, "me", [self.message], save_dir, self.SlowBrowser(), True)
+                opened, preview_failed, unopened = savegmail.preview_messages(
+                    service, "me", [self.message], self.SlowBrowser(), save_dir)
+            except KeyboardInterrupt:  # escaping, it would stop the whole test run
+                self.fail("the print timeout escaped as Ctrl+C")
+            elapsed = time.monotonic() - start
+            left = os.listdir(save_dir)
+        self.assertLess(elapsed, 10)
+        self.assertEqual((saved, files, service.trashed, left), ([], {}, [], []))  # enter: neither saved nor trashed
+        self.assertIn("took longer than 0.5 s to print", failed["m1"])
+        self.assertEqual((opened, unopened), ([], {}))
+        self.assertIn("took longer than 0.5 s to print", preview_failed["m1"])
+
+    def test_ctrl_c_while_printing_still_stops(self):
+        from unittest import mock
+
+        class InterruptedPage:
+            def pdf(self, **kwargs):
+                raise KeyboardInterrupt
+
+        with mock.patch.object(savegmail, "PDF_PRINT_SECONDS", 30, create=True):
+            with self.assertRaises(KeyboardInterrupt):
+                savegmail.print_pdf(InterruptedPage(), path="x.pdf")
+
+    def test_blur_in_svg_image_is_stopped_and_chromium_still_prints(self):
+        import tempfile
+        import time
+        import urllib.parse
+        from unittest import mock
+        from playwright.sync_api import sync_playwright
+        height = 1122 * 30  # 30 pages: about 10 s to print
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="700" height="%d"><filter id="f">'
+               '<feGaussianBlur stdDeviation="80"/></filter><rect width="700" height="%d" fill="red" '
+               'filter="url(#f)"/></svg>' % (height, height))
+        hostile = self.raw_email('<img src="data:image/svg+xml,%s" width="700" height="%d">'
+                                 % (urllib.parse.quote(svg), height), "html")
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(channel="chromium")
+            except Exception as error:  # no Playwright Chromium here; never install it from a test
+                self.skipTest(f"Chromium unavailable: {error}")
+            try:
+                with tempfile.TemporaryDirectory() as save_dir, \
+                        mock.patch.object(savegmail, "PDF_PRINT_SECONDS", 1, create=True):
+                    start = time.monotonic()
+                    with self.assertRaisesRegex(RuntimeError, "took longer than 1 s to print"):
+                        savegmail.save_email_and_attachments(FakeRawService(hostile), "me", "id1", save_dir, browser)
+                    self.assertLess(time.monotonic() - start, 6)
+                    self.assertEqual(os.listdir(save_dir), [])
+                    # The same Chromium prints the next email of the selection.
+                    result = savegmail.save_email_and_attachments(
+                        FakeRawService(self.raw_email("next")), "me", "id2", save_dir, browser)
+                    self.assertEqual(os.listdir(save_dir), [result["pdf"]])
+            finally:
+                browser.close()
+
+
 class MalformedAddressTest(unittest.TestCase):
     """Python's address parser raises on some malformed addresses: the email is still saved, with the raw value."""
 
