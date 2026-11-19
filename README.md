@@ -200,6 +200,7 @@ If any step fails, the files written for that email are removed and the email st
 
 - If an email renders badly, retry it with `--headed`
 - Use `--verbose` to see which MIME parts and inline images were processed
+- An email that takes longer than 60 s to print (heavy effects such as a blurred SVG image) fails with `PDF generation failed: email took longer than 60 s to print, kept in Gmail`, and one over 1000 PDF pages with `email longer than 1000 PDF pages, kept in Gmail`: no file is left, the email stays in Gmail, and the other selected emails are still saved
 
 ### Playwright browser setup
 
