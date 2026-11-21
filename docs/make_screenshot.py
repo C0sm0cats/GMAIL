@@ -88,6 +88,10 @@ def render_screen():
                 views=[name for name, _ in savegmail.VIEWS], view=0, folder="~/GMail/",
                 badges={"All mail": ("15", "unread"), "Inbox": ("12", "unread"), "Archived": ("3", "unread"),
                         "Starred": ("2", "unread"), "Drafts": ("1", "total")},
+                # Like the app, the list can switch views, so its footer offers Tab; it stays on All mail.
+                switch=lambda delta, wake, retry=False: {
+                    "view": 0, "messages": messages, "state": state, "load_more": lambda: ([], False),
+                    "total": 1240, "sync": None, "loading": False, "load_error": None},
             )
     screen = pyte.Screen(COLUMNS, ROWS)
     pyte.Stream(screen).feed(snapshot[0])
