@@ -28,6 +28,7 @@ import signal
 import time
 import tempfile
 import threading
+import collections
 import _thread
 import uuid
 import webbrowser
@@ -1833,7 +1834,8 @@ KEY_HELP = [
     ("Tab", "next view: All mail (everything but spam and trash), Inbox, Archived, Starred, Sent, Drafts, Spam, Trash"),
     ("⇧Tab", "previous view (Shift+Tab)"),
     ("m", "load older emails"),
-    ("r", "sign in to Gmail again, in your browser, when the session has expired (shown in the header)"),
+    ("r", "sign in to Gmail again, in your browser, when the session has expired (shown in the header); "
+          "fetch a view again when Gmail failed"),
     ("p", "preview as PDF, exactly as it would be saved (nothing written to the download folder); marks as read"),
     ("o", "open the current email in Gmail, in your browser; marks as read"),
     ("*", "star / unstar in Gmail"),
@@ -1881,7 +1883,7 @@ def drop_last_word(text):
 
 
 def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
-                  views=("All mail",), view=0, badges=None, folder="", sync=None, sign_in=None):
+                  views=("All mail",), view=0, badges=None, folder="", sync=None, sign_in=None, switch=None):
     """Interactive multi-select list over messages (extended in place when older emails load).
 
     Returns (action, chosen messages) where action is "download" (save + trash), "save",
@@ -1904,6 +1906,11 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     notice is a list of formatted-text lines shown under the header (last action result).
     undo_label describes what u would undo (e.g. "trash (3)"), None when there is nothing to undo.
     total is Gmail's estimate of how many emails match the query (shown while more can be loaded).
+    switch(delta, wake, retry=False) lets Tab / Shift+Tab change view without leaving the list (without it
+    they return "next_view" / "prev_view"): it moves the caller's current view by delta tabs (0: stays) and
+    returns the view now shown as {"view", "messages", "state", "load_more", "total", "sync", "loading",
+    "load_error"}. A view still loading shows "Fetching…" until wake() (called from any thread) says a
+    fetch ended; load_error is why it failed, r fetches again (retry).
     """
     from prompt_toolkit.application import Application, get_app
     from prompt_toolkit.filters import Condition
@@ -1911,15 +1918,35 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     from prompt_toolkit.layout import HSplit, Layout, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.layout.dimension import Dimension
-    from prompt_toolkit.styles import Style
+    from prompt_toolkit.styles import DynamicStyle, Style
 
-    rows = [message_row(message) for message in messages]
-    in_trash = views[view] == "Trash"
-    in_spam = views[view] == "Spam"
-    in_archived = views[view] == "Archived"
     state = new_picker_state() if state is None else state
-    state.update(filtering=False, loading=False, confirm=None, help=False, folder=None, exhausted=load_more is None)
     notice = list(notice)
+    rows, in_trash, in_spam, in_archived = [], False, False, False
+    fetching, load_error = False, None  # the view shown is still loading / why its loading failed
+    # Bumped whenever another view (or the same one, loaded) is shown: a sync or an m started before
+    # then belongs to what was shown, its result is dropped rather than merged into this list.
+    generation = 0
+    sync_task = None
+
+    def bind(bundle, entering=True):
+        """Show a view's emails: when the list opens, on Tab, and when the view shown ends loading."""
+        nonlocal messages, load_more, state, total, view, sync, rows, in_trash, in_spam, in_archived
+        nonlocal fetching, load_error, generation
+        messages, load_more, state, total, sync = (bundle[key] for key in
+                                                   ("messages", "load_more", "state", "total", "sync"))
+        view, fetching, load_error = bundle["view"], bundle.get("loading", False), bundle.get("load_error")
+        generation += 1
+        rows = [message_row(message) for message in messages]
+        in_trash, in_spam, in_archived = (views[view] == name for name in ("Trash", "Spam", "Archived"))
+        if entering:
+            state.update(filtering=False, loading=False, confirm=None, help=False, folder=None, syncing=False)
+        state["exhausted"] = load_more is None
+        # Emails may be added above the cursor between runs (refresh): put it back on the same email.
+        positions = [position for position, index in enumerate(visible())
+                     if messages[index]["id"] == state["cursor_id"]]
+        if positions:
+            state["cursor"] = positions[0]
 
     def visible():
         terms = state["query"].lower().split()
@@ -1927,6 +1954,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         if state["sort"] == "size":
             indexes.sort(key=lambda index: -messages[index].get("size", 0))
         return indexes
+
+    bind({"view": view, "messages": messages, "load_more": load_more, "state": state, "total": total, "sync": sync})
 
     def size():
         return get_app().output.get_size()
@@ -1974,7 +2003,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     def render_header():
         indexes = visible()
-        count = f"{len(rows)} emails"
+        count = "fetching…" if fetching else f"{len(rows)} emails"
         if total and not state["exhausted"] and total > len(rows):
             count = f"{len(rows)} of ~{total:,} emails"
         # Unread for the whole view: the tab's counter when it counts unread, else the loaded emails.
@@ -2052,6 +2081,11 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     def render_list():
         if state["help"]:
             return render_help()
+        if fetching:
+            return [("class:dim", f"   Fetching {views[view]}…")]
+        if load_error:
+            again = "r to sign in" if state["signed_out"] else "r to try again"
+            return [("class:error", f"   Could not fetch {views[view]}"), ("class:dim", f" · {load_error} · {again}")]
         indexes = clamp()
         if not indexes:
             return [("class:dim", "   No email matches this filter." if rows else "   No emails here.")]
@@ -2173,6 +2207,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                 browse.append(("m", "loading…" if state["loading"] else "more", True))
             if state["signed_out"] and sign_in is not None:
                 browse.append(("r", "signing in…" if state["signing_in"] else "sign in", True))
+            elif load_error:
+                browse.append(("r", "try again", True))
             browse += [("Tab", "views", False), ("?", "help", True), ("q", "quit", True)]
             delete = ([] if in_trash else [("d", "trash", True)]) + [("D", "delete permanently", False),
                                                                      ("T", "empty trash", False)]
@@ -2279,8 +2315,17 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     bindings.add("R", filter=browsing & Condition(lambda: in_archived))(lambda event: submit(event, "unarchive", chosen()))
     bindings.add("e", filter=browsing & Condition(lambda: not (in_trash or in_spam or in_archived)))(
         lambda event: submit(event, "archive", chosen()))
-    bindings.add("tab", filter=browsing)(lambda event: event.app.exit(result=("next_view", [])))
-    bindings.add("s-tab", filter=browsing)(lambda event: event.app.exit(result=("prev_view", [])))
+    def switch_view(event, delta):
+        if switch is None:  # the caller switches, then opens the list again
+            event.app.exit(result=("next_view" if delta > 0 else "prev_view", []))
+            return
+        state["cursor_id"] = current_id()  # where this view's cursor comes back to
+        notice.clear()  # the last action's result is about the view left
+        bind(switch(delta, wake))
+        restart_sync(event.app)
+
+    bindings.add("tab", filter=browsing)(lambda event: switch_view(event, 1))
+    bindings.add("s-tab", filter=browsing)(lambda event: switch_view(event, -1))
     bindings.add("s", filter=browsing)(lambda event: submit(event, "save", chosen()))
     @bindings.add("p", filter=browsing)
     def _(event):
@@ -2296,7 +2341,9 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     bindings.add("d", filter=browsing & not_trash)(lambda event: ask_confirm("trash"))
     bindings.add("D", filter=browsing)(lambda event: ask_confirm("delete"))
-    bindings.add("T", filter=browsing)(lambda event: ask_confirm("empty_trash"))
+    # Not while the view shown waits for Gmail: the question would sit over a list not there yet.
+    bindings.add("T", filter=browsing & Condition(lambda: not (fetching or load_error)))(
+        lambda event: ask_confirm("empty_trash"))
 
     @bindings.add("?", filter=browsing)
     def _(event):
@@ -2390,25 +2437,29 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     async def run_sync(app):
         if sync is None or state["syncing"]:
             return
-        state["syncing"] = True
+        # The view it syncs: Tab may show another one before it ends (see generation).
+        shown, own, run = generation, state, sync
+        own["syncing"] = True
         app.invalidate()
         snapshot = [{"id": message["id"], "internalDate": message["internalDate"],
                      "labels": list(message.get("labels", []))} for message in messages]
         try:
-            result = await in_background(sync, snapshot)
+            result = await in_background(run, snapshot)
         except SyncSkipped:
             pass
         except RefreshError as exc:
             debug(f"Sync failed: {exc}")
-            state["signed_out"] = True
+            own["signed_out"] = True
         except Exception as exc:
             debug(f"Sync failed: {exc}")
-            state["sync_note"] = ("class:error", "↻ sync failed, retrying", time.monotonic())
+            own["sync_note"] = ("class:error", "↻ sync failed, retrying", time.monotonic())
         else:
-            state["signed_out"] = False
-            apply_sync(result)
+            own["signed_out"] = False
+            if shown == generation:
+                apply_sync(result)
         finally:
-            state["syncing"] = False
+            if shown == generation:  # otherwise showing the view again reset it, another sync may run
+                own["syncing"] = False
             app.invalidate()
 
     async def keep_in_sync(app):
@@ -2417,12 +2468,44 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             await run_sync(app)
             await asyncio.sleep(SYNC_INTERVAL)
 
-    async def run_sign_in(app):
-        def show_url(url):  # called from the sign-in thread; invalidate is thread-safe
-            state["sign_in_url"] = url
+    def restart_sync(app):
+        """Keep the view now shown in sync (the one left stops), starting with a sync right away."""
+        nonlocal sync_task
+        if sync_task is not None:
+            sync_task.cancel()
+        sync_task = app.create_background_task(keep_in_sync(app)) if sync else None
+
+    def wake():
+        """The loader ended a fetch (called from its thread): the list shows it if it is the view waited for."""
+        try:
+            app.loop.call_soon_threadsafe(loaded)
+        except (AttributeError, RuntimeError):
+            pass  # the list is not running (any more): it gets the view when it opens again
+
+    def loaded():
+        if not (fetching or load_error):
+            return
+        bundle = switch(0, wake)
+        if (bundle["loading"], bundle["load_error"]) != (fetching, load_error):
+            bind(bundle, entering=False)  # a filter being typed or an open prompt stays
+            restart_sync(app)
             app.invalidate()
 
-        state["signing_in"], state["sign_in_url"] = True, None
+    def retry_load(app):
+        bundle = switch(0, wake, retry=True)
+        if (bundle["loading"], bundle["load_error"]) != (fetching, load_error):
+            bind(bundle, entering=False)
+            restart_sync(app)
+        app.invalidate()
+
+    async def run_sign_in(app):
+        own = state  # Tab may show another view while the browser sign-in runs
+
+        def show_url(url):  # called from the sign-in thread; invalidate is thread-safe
+            own["sign_in_url"] = url
+            app.invalidate()
+
+        own["signing_in"], own["sign_in_url"] = True, None
         app.invalidate()
         try:
             await in_background(sign_in, show_url)
@@ -2433,19 +2516,25 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
             if isinstance(exc, WrongAccountError):
                 shorter = (f"↻ signed in as {exc.address}, r to try again",) * bool(exc.address)
                 shorter += ("↻ wrong account, r to try again",)
-            state["sign_in_note"] = (f"↻ {failure}, r to try again", time.monotonic(), shorter)
+            own["sign_in_note"] = (f"↻ {failure}, r to try again", time.monotonic(), shorter)
         else:
-            state["signed_out"] = False
+            own["signed_out"] = False
         finally:
-            state["signing_in"], state["sign_in_url"] = False, None
+            own["signing_in"], own["sign_in_url"] = False, None
             app.invalidate()
-        if not state["signed_out"]:
+        if not own["signed_out"]:
+            if switch is not None:
+                retry_load(app)  # the views the expired session could not fetch
             await run_sync(app)
 
     @bindings.add("r", filter=browsing & Condition(
         lambda: sign_in is not None and state["signed_out"] and not state["signing_in"]))
     def _(event):
         event.app.create_background_task(run_sign_in(event.app))
+
+    @bindings.add("r", filter=browsing & Condition(lambda: bool(load_error) and not state["signed_out"]))
+    def _(event):
+        retry_load(event.app)
 
     @bindings.add("u", filter=browsing & Condition(lambda: bool(undo_label)))
     def _(event):
@@ -2456,17 +2545,20 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
         if state["loading"] or state["exhausted"]:
             return
         state["loading"] = True
+        shown, own, run = generation, state, load_more  # Tab may show another view before it ends
 
         async def load():
             try:
-                older, more, *loaded = await in_background(load_more)
+                older, more, *loaded = await in_background(run)
             except Exception as exc:
                 debug(f"Loading more failed: {exc}")
                 if isinstance(exc, RefreshError):
-                    state["signed_out"] = True
-                else:
+                    own["signed_out"] = True
+                elif shown == generation:
                     state["sync_note"] = ("class:error", "m loading failed, m to try again", time.monotonic())
             else:
+                if shown != generation:
+                    return  # older emails of a view no longer shown: dropped, its floor stays (m again)
                 state["exhausted"] = not more
                 # Older emails go at the bottom by date, but not by size: keep the cursor on its email.
                 current = current_id()
@@ -2479,7 +2571,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                 for done in loaded:
                     done()
             finally:
-                state["loading"] = False
+                if shown == generation:
+                    state["loading"] = False
                 event.app.invalidate()
 
         event.app.create_background_task(load())
@@ -2553,36 +2646,45 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     # Grays are absolute, not ANSI bright black: some palettes (Solarized dark) make that the background.
     # The cursor row has an absolute background, so it sets its text color too, readable on light themes.
-    style = Style.from_dict({
-        "title": "bold",
-        "columns": "fg:#8a8a8a underline",
-        "tab": "fg:#8a8a8a",
-        # Current view: its tab filled with the view color, the header info written in it.
-        "tab.current": f"reverse bold fg:{VIEW_COLORS.get(views[view], 'ansicyan')}",
-        "view": f"fg:{VIEW_COLORS.get(views[view], 'ansicyan')}",
-        "tab.badge": "fg:default bold",
-        "dim": "fg:#8a8a8a",
-        "accent": "fg:ansicyan bold",
-        "cursor": "fg:ansicyan bold",
-        "checked": "fg:ansigreen bold",
-        "saved": "fg:ansigreen",
-        "error": "fg:ansired bold",
-        "sender": "fg:ansicyan",
-        "draft": "fg:ansired",
-        "sent": "fg:ansimagenta",
-        "unread": "bold",
-        "star": "fg:ansiyellow",
-        "tag.size": "fg:ansiyellow",
-        "tag.category": "fg:ansiblue",
-        "tag.label": "fg:ansigreen",
-        "row.current": "fg:#e4e4e4 bg:#303030",
-        "unread.dot": "fg:ansiblue bold",
-        "key": "bold",
-        "group.browse": "fg:ansicyan bold",
-        "group.email": "fg:ansigreen bold",
-        "group.delete": "fg:ansired bold",
-        "warn": "fg:ansiyellow bold",
-    })
+    def make_style(name):
+        return Style.from_dict({
+            "title": "bold",
+            "columns": "fg:#8a8a8a underline",
+            "tab": "fg:#8a8a8a",
+            # Current view: its tab filled with the view color, the header info written in it.
+            "tab.current": f"reverse bold fg:{VIEW_COLORS.get(name, 'ansicyan')}",
+            "view": f"fg:{VIEW_COLORS.get(name, 'ansicyan')}",
+            "tab.badge": "fg:default bold",
+            "dim": "fg:#8a8a8a",
+            "accent": "fg:ansicyan bold",
+            "cursor": "fg:ansicyan bold",
+            "checked": "fg:ansigreen bold",
+            "saved": "fg:ansigreen",
+            "error": "fg:ansired bold",
+            "sender": "fg:ansicyan",
+            "draft": "fg:ansired",
+            "sent": "fg:ansimagenta",
+            "unread": "bold",
+            "star": "fg:ansiyellow",
+            "tag.size": "fg:ansiyellow",
+            "tag.category": "fg:ansiblue",
+            "tag.label": "fg:ansigreen",
+            "row.current": "fg:#e4e4e4 bg:#303030",
+            "unread.dot": "fg:ansiblue bold",
+            "key": "bold",
+            "group.browse": "fg:ansicyan bold",
+            "group.email": "fg:ansigreen bold",
+            "group.delete": "fg:ansired bold",
+            "warn": "fg:ansiyellow bold",
+        })
+
+    styles = {}  # by view name: the tab and header colors are the view's own, and Tab changes view in place
+
+    def view_style():
+        if views[view] not in styles:
+            styles[views[view]] = make_style(views[view])
+        return styles[views[view]]
+    style = DynamicStyle(view_style)
     windows = [Window(FormattedTextControl(render_header), height=1),
                # Wrapped, not cut: the cause of a failure is often longer than the line. No rows when empty.
                Window(FormattedTextControl(render_notice), wrap_lines=True,
@@ -2597,10 +2699,6 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     app = Application(layout=Layout(HSplit(windows)), key_bindings=bindings, style=style, erase_when_done=True)
     app.ttimeoutlen = 0.05
     app.timeoutlen = 0.05  # esc is also the start of Alt+key: wait for a second key this long only
-    # Emails may be added above the cursor between runs (refresh): put it back on the same email.
-    positions = [position for position, index in enumerate(visible()) if messages[index]["id"] == state["cursor_id"]]
-    if positions:
-        state["cursor"] = positions[0]
     discard_pending_keys(app.input)
 
     # --verbose lines while the list shows: queued, then printed above it by the list's own loop (the list
@@ -2639,8 +2737,10 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
 
     def pre_run():
         app.create_background_task(relay_debug())
-        if sync:
-            app.create_background_task(keep_in_sync(app))
+        if switch is not None:
+            # The view may have ended loading since the caller looked; from now on wake() tells.
+            bind(switch(0, wake))
+        restart_sync(app)
 
     global DEBUG_SINK
     DEBUG_SINK = take_debug
@@ -2730,14 +2830,15 @@ def parse_command(answer):
 
 
 def ask_user_to_select_messages(messages, load_more=None, state=None, notice=(), undo_label=None, total=None,
-                                views=("All mail",), view=0, badges=None, folder="", sync=None, sign_in=None):
+                                views=("All mail",), view=0, badges=None, folder="", sync=None, sign_in=None,
+                                switch=None):
     """Pick emails interactively, or by typed numbers when not attached to a terminal.
 
     Returns (action, messages); see pick_messages for the actions.
     """
     if sys.stdin.isatty() and sys.stdout.isatty():
         return pick_messages(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync,
-                             sign_in)
+                             sign_in, switch)
     if not messages:
         return "quit", []
 
@@ -3116,29 +3217,40 @@ def run_interactive_download():
             query = " ".join(part for part in [f"({args.query})" if args.query else "", view_filter] if part)
             return {"name": name, "query": query, "in_trash": name in {"Trash", "Spam"}, "messages": [], "more": False,
                     "floor": None, "total": None, "state": new_picker_state(), "loaded": False, "stale": False,
-                    "history": None}
+                    "history": None, "loading": False, "fetched": None, "load_error": None}
 
         views = [make_view(name, view_filter) for name, view_filter in VIEWS]
         current = 0
 
-        def load_view(view):
-            with console.status(f"[dim]Fetching {view['name']}…[/]"):
-                # Before the listing: the syncs ask Gmail's history what changed since then.
-                history = history_id(service, user_id)
-                failed = set()
-                loaded, token = list_candidate_messages(
-                    service, user_id, query=view["query"], max_results=args.max, in_trash=view["in_trash"],
-                    failed=failed,
-                )
-                view["total"] = estimate_total(service, user_id, view["query"], view["in_trash"]) if token else None
-            view["messages"][:] = loaded
+        def fetch_view(svc, view):
+            """A view's first page from Gmail, read with svc; touches nothing (see apply_fetched)."""
+            # Before the listing: the syncs ask Gmail's history what changed since then.
+            history = history_id(svc, user_id)
+            failed = set()
+            loaded, token = list_candidate_messages(
+                svc, user_id, query=view["query"], max_results=args.max, in_trash=view["in_trash"], failed=failed,
+            )
+            total = estimate_total(svc, user_id, view["query"], view["in_trash"]) if token else None
+            return {"messages": loaded, "more": token is not None, "total": total,
+                    "history": None if failed else history}
+
+        def apply_fetched(view, data):
+            view["messages"][:] = data["messages"]
+            view["total"] = data["total"]
             # m asks Gmail for emails older than the oldest one loaded so far: unlike page tokens, this
             # stays right after refreshes and after emails were trashed during the session.
-            view["floor"] = min((message["internalDate"] for message in loaded), default=None)
-            view["more"] = token is not None
+            view["floor"] = min((message["internalDate"] for message in data["messages"]), default=None)
+            view["more"] = data["more"]
             # An email Gmail would not read is missing from the list: without a history id, the next sync
             # re-lists the whole view and brings it.
-            view["loaded"], view["stale"], view["history"] = True, False, None if failed else history
+            view["loaded"], view["stale"], view["history"] = True, False, data["history"]
+            view.update(loading=False, fetched=None, load_error=None)
+
+        def load_view(view):
+            """Fetch a view while the list is closed (at launch, or when the list cannot switch in place)."""
+            with console.status(f"[dim]Fetching {view['name']}…[/]"):
+                data = fetch_view(service, view)
+            apply_fetched(view, data)
 
         def load_more_for(view):
             # Runs in a worker thread the list may abandon: it uses the sync connection (the main one
@@ -3257,6 +3369,10 @@ def run_interactive_download():
 
         def adopt(fresh):
             creds.token, creds._refresh_token, creds.expiry = fresh.token, fresh.refresh_token, fresh.expiry
+            # Every view works again, not only the one r was pressed in: otherwise r on another view would
+            # sign in again instead of retrying its fetch.
+            for each in views:
+                each["state"]["signed_out"] = False
 
         def sign_in_again(show_url=lambda url: None):
             adopt(sign_in_quietly(check_account, show_url=show_url))
@@ -3292,8 +3408,110 @@ def run_interactive_download():
                         "applied": (lambda: None) if failed else (lambda: view.update(history=history))}
             return sync
 
+        # The views load in a worker thread, so Tab never waits for Gmail nor blanks the screen: one at a
+        # time, the one Tab just showed ahead of the preloads. Its own Gmail connection (the client is not
+        # thread-safe) and lock: a slow sync must not hold back the view the user is waiting for.
+        load_service = build("gmail", "v1", credentials=creds)
+        load_ready = threading.Condition()  # guards the queue and each view's loading / fetched / load_error
+        load_queue = collections.deque()  # indexes in views
+        loader = {"thread": None, "wake": None}
+
+        def enqueue_load(index, first=False):
+            """Have the loader fetch views[index] (unless loaded, fetched or in flight); first jumps the queue."""
+            view = views[index]
+            with load_ready:
+                if view["loaded"] or view["fetched"] is not None:
+                    return
+                if index in load_queue:
+                    if not first:
+                        return
+                    load_queue.remove(index)
+                elif view["loading"]:
+                    return  # being fetched right now
+                view.update(loading=True, load_error=None)
+                (load_queue.appendleft if first else load_queue.append)(index)
+                load_ready.notify()
+                if loader["thread"] is None:
+                    # Daemon: quitting never waits for a fetch, its result is simply lost.
+                    loader["thread"] = threading.Thread(target=load_views, daemon=True)
+                    loader["thread"].start()
+
+        def load_views():
+            while True:
+                with load_ready:
+                    while not load_queue:
+                        load_ready.wait()
+                    index = load_queue.popleft()
+                view = views[index]
+                if view["loaded"]:  # loaded meanwhile without the loader (see load_view)
+                    with load_ready:
+                        view["loading"] = False
+                    continue
+                data = error = None
+                try:
+                    try:
+                        data = fetch_view(load_service, view)
+                    except RefreshError:
+                        if not reload_session():
+                            raise
+                        data = fetch_view(load_service, view)
+                except Exception as exc:  # the loader must outlive any failure: the view shows it, r retries
+                    debug(f"Fetching {view['name']} failed: {exc}")
+                    error = exc
+                with load_ready:
+                    if isinstance(error, RefreshError):
+                        for each in views:
+                            each["state"]["signed_out"] = True
+                    # Applied by the list's own thread (switch), never here: the list may be reading the view.
+                    view.update(loading=False, fetched=data,
+                                load_error=None if error is None else
+                                "Gmail session expired" if isinstance(error, RefreshError) else error_text(error))
+                    wake = loader["wake"]
+                if wake:
+                    wake()
+
+        def apply_pending(view):
+            """Put in the view what the loader fetched for it, unless it got loaded otherwise meanwhile."""
+            with load_ready:
+                data, view["fetched"] = view["fetched"], None
+            if data is not None and not view["loaded"]:
+                apply_fetched(view, data)
+
+        def switch(delta, wake=None, retry=False):
+            """Show the view delta tabs away in the open list (0: the current one again); see pick_messages.
+
+            wake() is called from the loader thread whenever it finished a view. retry fetches again the
+            views that failed (r, or a sign-in).
+            """
+            nonlocal current, notice
+            with load_ready:
+                loader["wake"] = wake
+            if delta:
+                current = (current + delta) % len(views)
+                notice = []
+            view = views[current]
+            apply_pending(view)
+            if retry:
+                failed = [index for index, each in enumerate(views) if each["load_error"] and not each["loaded"]]
+                with load_ready:
+                    for index in failed:
+                        views[index]["load_error"] = None
+                for index in failed:
+                    enqueue_load(index)
+            if not view["loaded"] and not view["load_error"]:
+                enqueue_load(current, first=True)
+            return {"view": current, "messages": view["messages"], "state": view["state"],
+                    "load_more": load_more_for(view) if view["more"] else None, "total": view["total"],
+                    # The background sync starts once the view is loaded: it compares with what is listed.
+                    "sync": sync_for(view) if view["loaded"] else None,
+                    "loading": not view["loaded"] and not view["load_error"], "load_error": view["load_error"]}
+
         badges = {}  # tab counters, filled and kept current by the background sync
         load_view(views[current])
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            # Only the interactive list has tabs: the other views load behind it, in tab order.
+            for index in range(len(views)):
+                enqueue_load(index)
         notice = []
         # Last reversible action (d, enter, s or e): its key-help name, emails to restore from the trash,
         # files to remove, emails to put back in the Inbox.
@@ -3333,12 +3551,16 @@ def run_interactive_download():
         # Back to the list after every action, until the user quits.
         while True:
             view = views[current]
+            apply_pending(view)
             messages, state = view["messages"], view["state"]
             action, chosen = ask_user_to_select_messages(
                 messages, load_more_for(view) if view["more"] else None, state, notice, undo_text(undo),
-                view["total"], [view["name"] for view in views], current, badges, shown_dir, sync_for(view),
-                sign_in_again,
+                view["total"], [view["name"] for view in views], current, badges, shown_dir,
+                sync_for(view) if view["loaded"] else None, sign_in_again, switch,
             )
+            # Tab switches view inside the list: the action is about the view shown when it was left.
+            view = views[current]
+            messages, state = view["messages"], view["state"]
             if action == "quit" or (
                 action not in {"undo", "empty_trash", "refresh", "next_view", "prev_view", "folder"} and not chosen
             ):
@@ -3361,11 +3583,13 @@ def run_interactive_download():
 
             try:
                 if action in {"next_view", "prev_view"}:
-                    current = (current + (1 if action == "next_view" else -1)) % len(views)
-                    view = views[current]
-                    notice = []
-                    if not view["loaded"]:
-                        load_view(view)
+                    # The list could not switch in place (not a terminal): fetch here, then move, so a failed
+                    # fetch leaves the list on the view it was on rather than on an empty one.
+                    target = (current + (1 if action == "next_view" else -1)) % len(views)
+                    apply_pending(views[target])
+                    if not views[target]["loaded"]:
+                        load_view(views[target])
+                    current, view, notice = target, views[target], []
 
                 elif action == "preview":
                     # Previews live in a session temp dir (never in the download folder), removed on quit.
@@ -3410,7 +3634,7 @@ def run_interactive_download():
                         unarchived = [message for message in undo["archived"] if done is None or message["id"] in done]
                         errors.update({message["id"]: error for message in undo["archived"]
                                        if done is not None and message["id"] not in done})
-                    if restored or unarchived:
+                    if (restored or unarchived) and view["loaded"]:  # else its fetch brings them
                         # Emails go back to whichever views they belong to, from what u already has of them.
                         refresh_view(view, cached={message["id"]: message for message in restored + unarchived})
                     parts = []

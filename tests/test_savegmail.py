@@ -4532,7 +4532,8 @@ class SignInAgainSessionTest(unittest.TestCase):
                 fresh.expiry = __import__("datetime").datetime(2100, 1, 1)  # a real sign-in sets it
                 return fresh
 
-        def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, sign_in):
+        def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, sign_in,
+                *rest):
             if not calls:
                 calls.append(None)
                 revoked.add("tokA")  # the session expires while the list is open
@@ -6159,6 +6160,347 @@ class NonUtf8LocaleTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, output)
         self.assertNotIn("UnicodeEncodeError", output)
         self.assertIn("? Could not use the download folder", output)
+
+
+class FakeSwitch:
+    """The switch run_interactive_download hands the list, over fixed views: {"messages", "loading", ...} each."""
+
+    def __init__(self, *views):
+        self.views = [dict({"state": savegmail.new_picker_state(), "loading": False, "load_error": None,
+                            "load_more": None, "sync": None}, **view) for view in views]
+        self.current, self.calls, self.wake = 0, [], None
+
+    def __call__(self, delta, wake=None, retry=False):
+        self.calls.append((delta, retry))
+        self.wake = wake
+        self.current = (self.current + delta) % len(self.views)
+        return dict(self.views[self.current], view=self.current, total=None)
+
+
+def named_messages(prefix, count):
+    return [dict(message, id=f"{prefix}{i}", subject=f"Subject {prefix}{i}")
+            for i, message in enumerate(make_messages(count))]
+
+
+def pick_steps(steps, messages, delay=0.4, **kwargs):
+    """Like pick_later, but a step may also be a callable, run instead of sending keys."""
+    import threading
+    import time
+    with create_pipe_input() as pipe:
+        with create_app_session(input=pipe, output=DummyOutput()):
+            def send():
+                for step in steps:
+                    time.sleep(delay)
+                    step() if callable(step) else pipe.send_text(step)
+            threading.Thread(target=send, daemon=True).start()
+            action, chosen = savegmail.pick_messages(messages, **kwargs)
+    return action, [message["id"] for message in chosen]
+
+
+def screens_after(steps, columns, rows, messages, **kwargs):
+    """The picker's screen text after each step (keys, or a callable run instead); then esc and q close it."""
+    import io
+    import threading
+    import time
+    from unittest import mock
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.output.vt100 import Vt100_Output
+    from prompt_toolkit.renderer import Renderer
+    render, shown, texts = Renderer.render, {}, []
+
+    def record(self, app, layout, is_done=False):
+        render(self, app, layout, is_done)
+        if not is_done:
+            buffer = self._last_screen.data_buffer
+            shown["text"] = "\n".join(
+                "".join(buffer[y][x].char for x in range(max(buffer[y], default=-1) + 1)).rstrip()
+                for y in range(rows))
+
+    output = Vt100_Output(io.StringIO(), lambda: Size(rows, columns), term="xterm")
+    done = threading.Event()
+    with mock.patch.object(Renderer, "render", record), create_pipe_input() as pipe:
+        with create_app_session(input=pipe, output=output):
+            def send():
+                time.sleep(0.3)
+                for step in steps:
+                    step() if callable(step) else pipe.send_text(step)
+                    time.sleep(0.4)
+                    texts.append(shown.get("text"))
+                for key in ("\x1b", "q"):
+                    if not done.wait(0.3):
+                        pipe.send_text(key)
+            sender = threading.Thread(target=send, daemon=True)
+            sender.start()
+            savegmail.pick_messages(messages, **kwargs)
+            done.set()
+            sender.join()
+    return texts
+
+
+class InPlaceSwitchTest(unittest.TestCase):
+    """Tab / Shift+Tab with a switch: the list stays open and shows the other view."""
+
+    NAMES = ("All mail", "Inbox", "Trash")
+
+    def test_tab_switches_without_leaving_the_list(self):
+        inbox = named_messages("b", 2)
+        switch = FakeSwitch({"messages": make_messages(3)}, {"messages": inbox}, {"messages": named_messages("t", 1)})
+        action, ids = pick("\t\x1b[Z\t\r", switch.views[0]["messages"], views=self.NAMES, switch=switch)
+        self.assertEqual((action, ids), ("download", ["b0"]))  # the action is about the view shown
+        self.assertEqual([delta for delta, _ in switch.calls], [0, 1, -1, 1])
+
+    def test_trash_keys_follow_the_view_shown(self):
+        switch = FakeSwitch({"messages": make_messages(1)}, {"messages": []}, {"messages": named_messages("t", 1)})
+        # Shift+Tab from All mail is Trash: enter is off there, R restores.
+        self.assertEqual(pick("\x1b[Z\rR", switch.views[0]["messages"], views=self.NAMES, switch=switch),
+                         ("restore", ["t0"]))
+
+    def test_cursor_and_filter_stay_with_their_view(self):
+        def run(keys):
+            switch = FakeSwitch({"messages": make_messages(3)}, {"messages": named_messages("b", 3)},
+                                {"messages": []})
+            return pick(keys, switch.views[0]["messages"], views=self.NAMES, switch=switch)
+        self.assertEqual(run("j\t\x1b[Z\r"), ("download", ["1"]))
+        self.assertEqual(run("j\t/b2\r\x1b[Z\t\r"), ("download", ["b2"]))
+
+    def test_fetching_placeholder_then_rows(self):
+        switch = FakeSwitch({"messages": make_messages(1)}, {"messages": [], "loading": True}, {"messages": []})
+
+        def loaded():
+            switch.views[1].update(messages=named_messages("b", 1), loading=False)
+            switch.wake()  # from the loader thread, like run_interactive_download's
+        texts = screens_after(["\t", "T", loaded], 100, 20, switch.views[0]["messages"], views=self.NAMES,
+                              switch=switch)
+        self.assertIn("Fetching Inbox…", texts[0])
+        self.assertIn("fetching…", texts[0])
+        self.assertNotIn("Permanently delete", texts[1])  # T waits for the view
+        self.assertNotIn("Fetching", texts[2])
+        self.assertIn("Subject b0", texts[2])
+
+    def test_failed_fetch_says_why_and_r_tries_again(self):
+        switch = FakeSwitch({"messages": make_messages(1)}, {"messages": [], "load_error": "503 Unavailable"},
+                            {"messages": []})
+
+        def retried():
+            self.assertIn((0, True), switch.calls)
+            switch.views[1].update(messages=named_messages("b", 1), load_error=None)
+            switch.wake()
+
+        texts = screens_after(["\t", "r", retried], 100, 20, switch.views[0]["messages"], views=self.NAMES,
+                              switch=switch)
+        self.assertIn("Could not fetch Inbox · 503 Unavailable · r to try again", texts[0])
+        self.assertIn("Subject b0", texts[2])
+
+    def test_sync_of_the_view_left_is_dropped(self):
+        import threading
+        release, started = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        calls, applied = [], []
+
+        def slow_sync(loaded):
+            calls.append(loaded)
+            if len(calls) > 1:  # the sync All mail asks for when it opens again
+                return {"new": [], "gone": set(), "labels": {}, "total": None, "badges": {}}
+            started.set()
+            release.wait(10)
+            # Would show in Inbox if applied to the view shown: b0 gone.
+            return {"new": [], "gone": {"0", "b0"}, "labels": {}, "total": None, "badges": {},
+                    "applied": lambda: applied.append(True)}
+
+        all_mail, inbox = make_messages(2), named_messages("b", 2)
+        switch = FakeSwitch({"messages": all_mail, "sync": slow_sync}, {"messages": inbox}, {"messages": []})
+        action, _ = pick_steps([started.wait, "\t", release.set, "\x1b[Z", "q"], all_mail, sync=slow_sync,
+                               views=self.NAMES, switch=switch)
+        self.assertEqual(action, "quit")
+        self.assertEqual([message["id"] for message in inbox], ["b0", "b1"])
+        # The sync All mail asked for when it opened again is the one applied, not the one left behind.
+        self.assertEqual(sorted(message["id"] for message in all_mail), ["0", "1"])
+        self.assertEqual(applied, [])
+
+    def test_sync_after_a_sign_in_on_the_view_left_is_dropped(self):
+        # The sync run_sign_in waits for is not the view's sync loop, which Tab cancels: only the
+        # generation check keeps it out of the view shown meanwhile.
+        import threading
+        release, started, signed_in, applied = threading.Event(), threading.Event(), [], []
+        self.addCleanup(release.set)
+
+        def slow_sync(loaded):
+            if not signed_in:
+                raise savegmail.RefreshError("expired")  # keeps the view signed out until r
+            if started.is_set():
+                return {"new": [], "gone": set(), "labels": {}, "total": None, "badges": {}}
+            started.set()
+            release.wait(10)
+            return {"new": [], "gone": {"0", "b0"}, "labels": {}, "total": None, "badges": {},
+                    "applied": lambda: applied.append(True)}
+
+        all_mail, inbox = make_messages(2), named_messages("b", 2)
+        state = savegmail.new_picker_state()
+        state["signed_out"] = True
+        switch = FakeSwitch({"messages": all_mail, "sync": slow_sync, "state": state}, {"messages": inbox},
+                            {"messages": []})
+        action, _ = pick_steps(["r", lambda: started.wait(5), "\t", release.set, "q"], all_mail, sync=slow_sync,
+                               sign_in=lambda show_url: signed_in.append(True), state=state, views=self.NAMES,
+                               switch=switch)
+        self.assertEqual(action, "quit")
+        self.assertEqual(signed_in, [True])
+        self.assertEqual([message["id"] for message in inbox], ["b0", "b1"])
+        self.assertEqual(applied, [])
+
+    def test_older_emails_of_the_view_left_are_dropped(self):
+        import threading
+        release, applied = threading.Event(), []
+        self.addCleanup(release.set)
+
+        def slow_load_more():
+            release.wait(10)
+            return [{**make_messages(1)[0], "id": "old", "internalDate": 1}], False, lambda: applied.append(True)
+
+        all_mail, inbox = make_messages(2), named_messages("b", 2)
+        switch = FakeSwitch({"messages": all_mail, "load_more": slow_load_more}, {"messages": inbox},
+                            {"messages": []})
+        action, _ = pick_steps(["m", "\t", release.set, "\x1b[Z", "q"], all_mail, load_more=slow_load_more,
+                               views=self.NAMES, switch=switch)
+        self.assertEqual(action, "quit")
+        self.assertEqual([message["id"] for message in all_mail], ["0", "1"])
+        self.assertEqual([message["id"] for message in inbox], ["b0", "b1"])
+        self.assertEqual(applied, [])
+
+
+class BackgroundLoadSessionTest(unittest.TestCase):
+    """The views load in a worker thread behind the list (interactive_download_main on a terminal)."""
+
+    QUERIES = [query for _, query in savegmail.VIEWS]
+
+    def run_session(self, ask, listed):
+        import io
+        import tempfile
+        from unittest import mock
+        from rich.console import Console
+        folder = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, folder, True)
+        self.folder = folder
+        api = SyncedMailboxApi({})
+        with mock.patch.multiple(
+            savegmail, authenticate=lambda: object(), build=lambda *a, **k: api, user_labels=lambda *a: {},
+            list_candidate_messages=listed, ask_user_to_select_messages=ask,
+            sync_playwright=lambda: FakePlaywright(), launch_browser=lambda *a, **k: mock.Mock(),
+            console=Console(file=io.StringIO()), TOKEN_PATH=os.path.join(folder, "none.json"),
+        ), mock.patch.object(sys.stdin, "isatty", lambda: True), mock.patch.object(sys.stdout, "isatty", lambda: True), \
+                mock.patch.object(sys, "argv", ["savegmail", "--download-path", folder]):
+            savegmail.interactive_download_main()
+
+    @staticmethod
+    def message(msg_id):
+        return {"id": msg_id, "from": "S <s@example.com>", "subject": msg_id, "snippet": "",
+                "internalDate": 1_700_000_000_000, "labels": ["INBOX"]}
+
+    def wait_loaded(self, switch, wake_event):
+        """Wait until the view shown is no longer loading (wake from the loader), then return it."""
+        for _ in range(50):
+            bundle = switch(0, wake_event.set)
+            if not bundle["loading"]:
+                return bundle
+            wake_event.wait(0.2)
+            wake_event.clear()
+        self.fail("the view never loaded")
+
+    def test_view_tabbed_to_loads_first(self):
+        import threading
+        gate, inbox_asked, order, seen = threading.Event(), threading.Event(), [], {}
+        self.addCleanup(gate.set)
+
+        def listed(service, user_id, query="", **kwargs):
+            view_filter = query.strip()
+            order.append(view_filter)
+            if view_filter == "in:inbox":
+                inbox_asked.set()
+                gate.wait(10)  # the first preload is slow: Tab goes on meanwhile
+            return [self.message(view_filter or "all")], None
+
+        def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, sign_in,
+                switch):
+            woken = threading.Event()
+            inbox_asked.wait(10)
+            seen["first"] = switch(1, woken.set)["loading"]
+            switch(1, woken.set)
+            switch(1, woken.set)  # Starred: three quick Tabs
+            gate.set()
+            seen["starred"] = self.wait_loaded(switch, woken)
+            seen["thread"] = threading.current_thread()
+            return "quit", []
+
+        self.run_session(ask, listed)
+        self.assertTrue(seen["first"])
+        self.assertEqual(seen["starred"]["view"], 3)
+        self.assertEqual([message["id"] for message in seen["starred"]["messages"]], ["is:starred"])
+        self.assertIsNotNone(seen["starred"]["sync"])  # syncs once loaded
+        # Launch, the preload in flight, the view shown, then the other preloads in tab order.
+        self.assertEqual(order[:3], ["", "in:inbox", "is:starred"])
+        self.assertEqual(order[3], self.QUERIES[2])
+
+    def test_failed_fetch_then_retry(self):
+        import threading
+        from google.auth.exceptions import RefreshError
+        failures, seen = {"in:inbox": RuntimeError("offline"), "-in:inbox": RefreshError("invalid_grant")}, {}
+
+        def listed(service, user_id, query="", **kwargs):
+            view_filter = query.strip()
+            error = failures.pop(view_filter.split(" ")[0], None) if view_filter else None
+            if error:
+                raise error
+            return [self.message(view_filter or "all")], None
+
+        def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, sign_in,
+                switch):
+            woken = threading.Event()
+            switch(1, woken.set)
+            seen["inbox"] = self.wait_loaded(switch, woken)
+            seen["inbox_ids"] = [message["id"] for message in seen["inbox"]["messages"]]
+            switch(1, woken.set)
+            seen["archived"] = self.wait_loaded(switch, woken)
+            seen["signed_out"] = state["signed_out"]  # All mail's, too: the whole session expired
+            switch(-1, woken.set, retry=True)
+            seen["retried"] = self.wait_loaded(switch, woken)
+            return "quit", []
+
+        self.run_session(ask, listed)
+        self.assertEqual(seen["inbox"]["load_error"], "offline")
+        self.assertEqual(seen["inbox_ids"], [])
+        self.assertEqual(seen["archived"]["load_error"], "Gmail session expired")
+        self.assertTrue(seen["archived"]["state"]["signed_out"])
+        self.assertTrue(seen["signed_out"])
+        self.assertIsNone(seen["retried"]["load_error"])
+        self.assertEqual([message["id"] for message in seen["retried"]["messages"]], ["in:inbox"])
+
+    def test_fetch_ended_while_the_list_was_closed(self):
+        import threading
+        gate, wakes, calls = threading.Event(), threading.Event(), []
+        self.addCleanup(gate.set)
+
+        def listed(service, user_id, query="", **kwargs):
+            if query.strip() == "in:inbox":
+                gate.wait(10)
+            return [self.message(query.strip() or "all")], None
+
+        def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, sign_in,
+                switch):
+            calls.append((view, [message["id"] for message in messages]))
+            if len(calls) == 1:
+                bundle = switch(1, wakes.set)
+                bundle["state"]["folder"] = self.folder  # f then enter while Inbox loads: the list closes
+                threading.Timer(0.2, gate.set).start()
+                return "folder", []
+            if len(calls) == 2:
+                wakes.wait(10)  # ended meanwhile; the next opening shows it
+                return "folder", []
+            return "quit", []
+
+        self.run_session(ask, listed)
+        self.assertEqual(calls[0], (0, ["all"]))
+        self.assertEqual(calls[1][0], 1)  # back on the view Tab showed
+        self.assertEqual(calls[2], (1, ["in:inbox"]))
 
 
 if __name__ == "__main__":

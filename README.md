@@ -83,7 +83,7 @@ Run:
 ./run-savegmail.sh
 ```
 
-The script lists your Gmail messages (newest first) in an interactive picker, starting with the **All mail** view: every email except spam and trash (received, sent, archived, drafts), like Gmail's "All mail". `Tab` / `Shift+Tab` switch between the views shown in the header; each keeps its own list, selection and cursor, and with `--query` every view is filtered by it.
+The script lists your Gmail messages (newest first) in an interactive picker, starting with the **All mail** view: every email except spam and trash (received, sent, archived, drafts), like Gmail's "All mail". `Tab` / `Shift+Tab` switch between the views shown in the header, without leaving the list: the views load in the background after All mail, and one not there yet shows `Fetching…` until it is (`r` tries again if Gmail failed). Each keeps its own list, selection and cursor, and with `--query` every view is filtered by it.
 
 Each view has its own color: its tab is filled with it and the header info (`· 50 emails · newest first`) is written in it, so you always see where you are; it reads like `· 50 emails, 12 unread`. Tabs show the number of unread emails, in white, in every view, except Drafts which shows all drafts in grey (a draft is never unread). Without `--query` they are Gmail's exact counters; All mail and Archived (not labels) and, with `--query`, the filtered views are counted from a search, shown as `1,000+` beyond 1,000.
 
@@ -101,7 +101,7 @@ Actions apply to the selected emails, or to the current one if none is selected.
 | `Tab` / `Shift+Tab` | Next / previous view: All mail, Inbox, Archived, Starred, Sent, Drafts, Spam, Trash |
 | `/` | Filter by sender, subject, category or label, e.g. `/promo`, `/draft`, `/sent`, `/invoices` (`enter` to apply, `esc` to clear) |
 | `m` | Load older emails (added at the bottom) |
-| `r` | When the header shows the Gmail session expired: sign in again in your browser; the list syncs again once signed in, no restart needed |
+| `r` | When the header shows the Gmail session expired: sign in again in your browser; the list syncs again once signed in, no restart needed. On a view Gmail failed to fetch: fetch it again |
 | `p` | Preview as the exact PDFs a download would produce, opened in your PDF viewer (temporary file, nothing saved to the download folder); marks them as read; asks `y` before opening more than 5 |
 | `o` | Open the current email in Gmail, in your browser; marks it as read |
 | `*` | Star / unstar in Gmail (stars all, unless all are already starred) |
