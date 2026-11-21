@@ -1889,7 +1889,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     Returns (action, chosen messages) where action is "download" (save + trash), "save",
     "trash", "delete" (permanent), "empty_trash", "restore", "not_spam", "archive", "unarchive", "preview", "star", "unread",
     "open", "undo",
-    "refresh", "next_view", "prev_view", "folder" or "quit".
+    "refresh", "folder" or "quit".
     badges maps view names to (count text, "unread" | "total") shown in their tab.
     folder is the download folder f starts editing from; the "folder" action leaves the new one in
     state["folder"].
@@ -1907,8 +1907,8 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     undo_label describes what u would undo (e.g. "trash (3)"), None when there is nothing to undo.
     total is Gmail's estimate of how many emails match the query (shown while more can be loaded).
     switch(delta, wake, retry=False) lets Tab / Shift+Tab change view without leaving the list (without it
-    they return "next_view" / "prev_view"): it moves the caller's current view by delta tabs (0: stays) and
-    returns the view now shown as {"view", "messages", "state", "load_more", "total", "sync", "loading",
+    the list has a single view and they do nothing): it moves the caller's current view by delta tabs
+    (0: stays) and returns the view now shown as {"view", "messages", "state", "load_more", "total", "sync", "loading",
     "load_error"}. A view still loading shows "Fetching…" until wake() (called from any thread) says a
     fetch ended; load_error is why it failed, r fetches again (retry).
     """
@@ -2209,7 +2209,7 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
                 browse.append(("r", "signing in…" if state["signing_in"] else "sign in", True))
             elif load_error:
                 browse.append(("r", "try again", True))
-            browse += [("Tab", "views", False), ("?", "help", True), ("q", "quit", True)]
+            browse += [("Tab", "views", False)] * (switch is not None) + [("?", "help", True), ("q", "quit", True)]
             delete = ([] if in_trash else [("d", "trash", True)]) + [("D", "delete permanently", False),
                                                                      ("T", "empty trash", False)]
             if undo_label:
@@ -2316,16 +2316,14 @@ def pick_messages(messages, load_more=None, state=None, notice=(), undo_label=No
     bindings.add("e", filter=browsing & Condition(lambda: not (in_trash or in_spam or in_archived)))(
         lambda event: submit(event, "archive", chosen()))
     def switch_view(event, delta):
-        if switch is None:  # the caller switches, then opens the list again
-            event.app.exit(result=("next_view" if delta > 0 else "prev_view", []))
-            return
         state["cursor_id"] = current_id()  # where this view's cursor comes back to
         notice.clear()  # the last action's result is about the view left
         bind(switch(delta, wake))
         restart_sync(event.app)
 
-    bindings.add("tab", filter=browsing)(lambda event: switch_view(event, 1))
-    bindings.add("s-tab", filter=browsing)(lambda event: switch_view(event, -1))
+    can_switch = Condition(lambda: switch is not None)  # no switch: the list only has the view it was given
+    bindings.add("tab", filter=browsing & can_switch)(lambda event: switch_view(event, 1))
+    bindings.add("s-tab", filter=browsing & can_switch)(lambda event: switch_view(event, -1))
     bindings.add("s", filter=browsing)(lambda event: submit(event, "save", chosen()))
     @bindings.add("p", filter=browsing)
     def _(event):
@@ -3247,7 +3245,7 @@ def run_interactive_download():
             view.update(loading=False, fetched=None, load_error=None)
 
         def load_view(view):
-            """Fetch a view while the list is closed (at launch, or when the list cannot switch in place)."""
+            """Fetch a view before the list opens (the one shown at launch); the others load behind it."""
             with console.status(f"[dim]Fetching {view['name']}…[/]"):
                 data = fetch_view(service, view)
             apply_fetched(view, data)
@@ -3562,7 +3560,7 @@ def run_interactive_download():
             view = views[current]
             messages, state = view["messages"], view["state"]
             if action == "quit" or (
-                action not in {"undo", "empty_trash", "refresh", "next_view", "prev_view", "folder"} and not chosen
+                action not in {"undo", "empty_trash", "refresh", "folder"} and not chosen
             ):
                 break
             ids = {message["id"] for message in chosen}
@@ -3582,16 +3580,7 @@ def run_interactive_download():
                 continue
 
             try:
-                if action in {"next_view", "prev_view"}:
-                    # The list could not switch in place (not a terminal): fetch here, then move, so a failed
-                    # fetch leaves the list on the view it was on rather than on an empty one.
-                    target = (current + (1 if action == "next_view" else -1)) % len(views)
-                    apply_pending(views[target])
-                    if not views[target]["loaded"]:
-                        load_view(views[target])
-                    current, view, notice = target, views[target], []
-
-                elif action == "preview":
+                if action == "preview":
                     # Previews live in a session temp dir (never in the download folder), removed on quit.
                     preview_dir = preview_dir or tempfile.mkdtemp(prefix="savegmail-preview-")
                     opened, failed, unopened = preview_messages(service, user_id, chosen, get_browser(), preview_dir)

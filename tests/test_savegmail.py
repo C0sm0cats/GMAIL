@@ -845,9 +845,9 @@ class PickerTest(unittest.TestCase):
         self.assertEqual(pick("R", **archived), ("unarchive", ["0"]))
         self.assertEqual(pick("eq", **archived), ("quit", []))
 
-    def test_view_keys(self):
-        self.assertEqual(pick("\t"), ("next_view", []))
-        self.assertEqual(pick("\x1b[Z"), ("prev_view", []))  # Shift+Tab
+    def test_view_keys_do_nothing_without_a_switch(self):
+        # A list given a single view (no switch) stays open on Tab / Shift+Tab; see InPlaceSwitchTest.
+        self.assertEqual(pick("\t\x1b[Z\r"), ("download", ["0"]))
 
     def test_trash_view_keys(self):
         trash = dict(views=("All mail", "Trash"), view=1)
@@ -1217,7 +1217,7 @@ class PickerTest(unittest.TestCase):
         self.assertEqual((action, ids), ("download", ["0"]))
 
     def test_leaving_the_list_does_not_wait_for_background_work(self):
-        # Tab, q or an action during a sync, an m or an r: the list goes at once, the work is dropped.
+        # q or an action during a sync, an m or an r: the list goes at once, the work is dropped.
         import threading
         import time
         from google.auth.exceptions import RefreshError
@@ -1236,8 +1236,8 @@ class PickerTest(unittest.TestCase):
         def expired(loaded):
             raise RefreshError("invalid_grant")
 
-        cases = [("\t", {"sync": slow_sync}, "next_view"), ("q", {"sync": slow_sync}, "quit"),
-                 ("m\t", {"load_more": slow_load_more}, "next_view"),
+        cases = [("\r", {"sync": slow_sync}, "download"), ("q", {"sync": slow_sync}, "quit"),
+                 ("m\r", {"load_more": slow_load_more}, "download"),
                  ("rq", {"sync": expired, "sign_in": lambda show_url: release.wait(10)}, "quit")]
         for keys, kwargs, expected in cases:
             with self.subTest(keys=keys):
@@ -3577,12 +3577,28 @@ class GmailCallSizeTest(unittest.TestCase):
                     call(FakeBatchApi(fail_on=1), "me", ids)
 
 
+def tab_to(switch, delta):
+    """Tab (+1) / Shift+Tab (-1) as the open list does: switch, then wait until the view loaded or failed."""
+    import threading
+    woken = threading.Event()
+    bundle = switch(delta, woken.set)
+    for _ in range(100):
+        if not bundle["loading"]:
+            return bundle
+        woken.wait(0.2)
+        woken.clear()
+        bundle = switch(0, woken.set)
+    raise AssertionError("the view never loaded")
+
+
 class UndoAfterDeleteTest(unittest.TestCase):
     """Drives interactive_download_main with a fake Gmail and scripted keys, like s, D, u."""
 
     def run_session(self, places, steps, failing_untrash=(), failing=(), api=None, down=None, launch=None,
                     args=(), gmail_class=None, opens=True, real_refresh=False):
         """steps: (action, ids); an undo is only pressed when u is offered, as in the list.
+        ("tab", []) / ("shift_tab", []) change view inside the list, through the switch it is given: the
+        next step is about the view then shown.
         ids None: every email the list shows (a then the action).
 
         api: a fake Gmail API (FakeBatchApi) that the real modify_labels and delete_messages call.
@@ -3595,7 +3611,8 @@ class UndoAfterDeleteTest(unittest.TestCase):
         selection, or on the email under the cursor when nothing is selected (like chosen() in the list).
         Returns (fake Gmail, files left in the download folder, undo label offered before each step);
         self.notices holds the notice shown before each step, as plain text lines; self.marked the ids
-        shown ✓, self.selected those selected, and self.shown those listed, before each step; self.saved
+        shown ✓, self.selected those selected, and self.shown those listed, before each step;
+        self.load_errors why the view shown could not be fetched (None: it was); self.saved
         the ids passed to each save_messages call; self.output what the session printed (its Done summary).
         """
         import io
@@ -3608,11 +3625,11 @@ class UndoAfterDeleteTest(unittest.TestCase):
         if api is not None:
             api.gmail = gmail
         steps, offered, self.notices, self.signed_out = list(steps), [], [], []
-        self.marked, self.selected, self.saved, self.shown = [], [], [], []
+        self.marked, self.selected, self.saved, self.shown, self.load_errors = [], [], [], [], []
         broken = []
         self.output = io.StringIO()
 
-        def ask(messages, load_more, state, notice, undo_label, *rest):
+        def ask(messages, load_more, state, notice, undo_label, *rest, load_error=None):
             if down is not None and len(offered) == down[0]:
                 broken.append(down[1])
             offered.append(undo_label)
@@ -3621,9 +3638,17 @@ class UndoAfterDeleteTest(unittest.TestCase):
             self.marked.append(sorted(state["saved"]))
             self.selected.append(sorted(state["selected"]))
             self.shown.append(sorted(message["id"] for message in messages))
+            self.load_errors.append(load_error)
             if not steps:
                 return "quit", []
             action, ids = steps.pop(0)
+            if action in {"tab", "shift_tab"}:
+                # The list stays open on the other view: no notice, the same undo.
+                total, views, view, badges, folder, sync, sign_in, switch = rest
+                bundle = tab_to(switch, 1 if action == "tab" else -1)
+                return ask(bundle["messages"], bundle["load_more"], bundle["state"], [], undo_label,
+                           bundle["total"], views, bundle["view"], badges, folder, bundle["sync"], sign_in, switch,
+                           load_error=bundle["load_error"])
             if action == "undo" and undo_label is None:
                 return ask(messages, load_more, state, notice, undo_label, *rest)
             if action == "folder":  # ids: the folder typed after f; None: f then enter on the folder shown
@@ -3662,7 +3687,8 @@ class UndoAfterDeleteTest(unittest.TestCase):
             savegmail, authenticate=lambda: object(), build=lambda *a, **k: api or FakeSessionService(),
             user_labels=lambda *a: {}, ask_user_to_select_messages=ask, refresh_labels=lambda *a, **k: 0,
             sync_playwright=lambda: FakePlaywright(), launch_browser=launch or (lambda *a, **k: mock.Mock()),
-            open_quietly=lambda url: opens, console=Console(file=self.output, width=80), **fakes,
+            open_quietly=lambda url: opens, console=Console(file=self.output, width=80),
+            TOKEN_PATH=os.path.join(save_dir, "none.json"), **fakes,  # never the real token.json
         ), mock.patch.object(sys, "argv", ["savegmail", "--download-path", save_dir, *args]):
             savegmail.interactive_download_main()
         return gmail, sorted(os.listdir(save_dir)), offered
@@ -4009,7 +4035,7 @@ class UndoAfterDeleteTest(unittest.TestCase):
                     (savegmail.HttpError(mock.Mock(status=503, reason="Backend Error"), b"Backend Error"),
                      " ✗ Gmail request failed")]
         actions = [("star", ["B"]), ("unread", ["B"]), ("archive", ["B"]), ("open", ["B"]), ("undo", []),
-                   ("next_view", []), ("prev_view", []), ("trash", ["B"]), ("restore", ["A"])]
+                   ("tab", []), ("shift_tab", []), ("trash", ["B"]), ("restore", ["A"])]
         for error, shown in failures:
             for action, ids in actions:
                 with self.subTest(error=type(error).__name__, action=action):
@@ -4018,6 +4044,14 @@ class UndoAfterDeleteTest(unittest.TestCase):
                         down=(1, error))
                     self.assertEqual(offered[1:], ["trash (1)"] * 3)
                     if action == "open":  # o opens Gmail in the browser; failing to mark it read says nothing
+                        continue
+                    if action in {"tab", "shift_tab"}:
+                        # The view tabbed to says in place why it could not be fetched (r tries again).
+                        self.assertEqual(self.load_errors[2], "Gmail session expired"
+                                         if isinstance(error, RefreshError) else savegmail.error_text(error))
+                        self.assertEqual(self.shown[2], [])
+                        self.assertEqual(self.signed_out[2], isinstance(error, RefreshError))
+                        self.assertEqual(gmail.places, {"A": "trash", "B": "inbox"})
                         continue
                     # e, ! and * say which emails they could not change; the others that nothing was done.
                     self.assertTrue(self.notices[2][0].startswith(
@@ -4047,11 +4081,12 @@ class UndoAfterDeleteTest(unittest.TestCase):
             error = exc
         reason = "403 Request had insufficient authentication scopes."
         for action, ids in [("star", ["B"]), ("unread", ["B"]), ("archive", ["B"]), ("trash", ["B"]),
-                            ("undo", []), ("next_view", [])]:
+                            ("undo", []), ("tab", [])]:
             with self.subTest(action=action):
                 self.run_session({"A": "inbox", "B": "inbox"}, [("trash", ["A"]), (action, ids)],
                                  down=(1, error))
-                shown = "\n".join(self.notices[2])
+                # Tab: the view it shows gives the reason itself, in place of its emails.
+                shown = self.load_errors[2] if action == "tab" else "\n".join(self.notices[2])
                 self.assertIn(reason, shown)
                 self.assertNotIn("googleapis.com", shown)
 
@@ -4162,12 +4197,12 @@ class SaveMarksTest(unittest.TestCase):
         self.assertEqual(gmail.places, {"A": "inbox", "B": "inbox", "X": "trash"})
 
     def test_save_marks_the_email_in_every_view(self):
-        self.run_session({"A": "inbox"}, [("save", ["A"]), ("next_view", []), ("next_view", [])])
+        self.run_session({"A": "inbox"}, [("save", ["A"]), ("tab", []), ("tab", [])])
         # All mail, where s was pressed, then Inbox and Archived.
         self.assertEqual(self.marked[1:], [["A"], ["A"], ["A"]])
 
     def test_undo_of_save_removes_the_mark_in_every_view(self):
-        self.run_session({"A": "inbox"}, [("save", ["A"]), ("undo", []), ("next_view", [])])
+        self.run_session({"A": "inbox"}, [("save", ["A"]), ("undo", []), ("tab", [])])
         self.assertEqual(self.marked[1:], [["A"], [], []])
 
     def test_undo_keeps_the_mark_of_an_earlier_save(self):
@@ -4196,7 +4231,7 @@ class SelectionAfterActionTest(unittest.TestCase):
 
     def test_archive_then_undo_then_trash_trashes_only_the_cursor_email(self):
         gmail, left, offered = self.run_session(
-            self.places, [("next_view", []), ("archive", self.batch), ("undo", []), ("trash", {"cursor": "X"})])
+            self.places, [("tab", []), ("archive", self.batch), ("undo", []), ("trash", {"cursor": "X"})])
         self.assertEqual(self.selected[2:], [[], [], []])
         self.assertEqual(gmail.places, {"A": "inbox", "B": "inbox", "X": "trash"})
 
@@ -4298,8 +4333,8 @@ class ActionTargetsTest(unittest.TestCase):
         # Shift+Tab twice: Trash, then Spam; T there, then Tab back to the Trash.
         gmail, left, offered = self.run_session(
             {"s1": "spam", "s2": "spam", "t1": "trash"},
-            [("prev_view", []), ("prev_view", []), ("empty_trash", {"select": ["s1"], "cursor": "s1"}),
-             ("next_view", [])],
+            [("shift_tab", []), ("shift_tab", []), ("empty_trash", {"select": ["s1"], "cursor": "s1"}),
+             ("tab", [])],
             api=FakeMailboxApi(), gmail_class=ViewGmail)
         self.assertEqual(gmail.places, {"s1": "spam", "s2": "spam", "t1": "gone"})
         self.assertEqual(self.notices[3][0], " ✓ Trash emptied · 1 email permanently deleted")
@@ -4388,15 +4423,15 @@ class RestoreKeyTest(unittest.TestCase):
     def test_restore_takes_the_emails_off_the_trash_list_and_the_selection(self):
         # Sort the trash: select the emails to keep, R, then D on the one left under the cursor.
         gmail, left, offered = self.run_session({"t0": "trash", "t1": "trash", "t2": "trash"}, [
-            ("prev_view", []), ("restore", {"select": ["t1", "t2"], "cursor": "t0"}), ("delete", {"cursor": "t0"})])
+            ("shift_tab", []), ("restore", {"select": ["t1", "t2"], "cursor": "t0"}), ("delete", {"cursor": "t0"})])
         self.assertEqual(self.shown[2], ["t0"])
         self.assertEqual(self.selected[2], [])
         self.assertEqual(gmail.places, {"t0": "gone", "t1": "inbox", "t2": "inbox"})
 
     def test_unarchive_and_not_spam_take_the_emails_off_their_list(self):
         # Tab twice: Archived; Shift+Tab twice: Spam. R on two selected emails, then D on the one left.
-        for place, views, action in [("archive", [("next_view", [])] * 2, "unarchive"),
-                                     ("spam", [("prev_view", [])] * 2, "not_spam")]:
+        for place, views, action in [("archive", [("tab", [])] * 2, "unarchive"),
+                                     ("spam", [("shift_tab", [])] * 2, "not_spam")]:
             with self.subTest(place=place):
                 gmail, left, offered = self.run_session(
                     {"x0": place, "x1": place, "x2": place},
@@ -5076,9 +5111,12 @@ class ViewFilterSessionTest(unittest.TestCase):
         self.addCleanup(__import__("shutil").rmtree, save_dir, True)
         shown = []
 
-        def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, *rest):
+        def ask(messages, load_more, state, notice, undo_label, total, views, view, badges, folder, sync, sign_in,
+                switch):
             if views[view] != "Trash":
-                return "prev_view", []  # All mail is first, Trash last
+                bundle = tab_to(switch, -1)  # Shift+Tab: All mail is first, Trash last
+                self.assertEqual(views[bundle["view"]], "Trash")
+                messages, load_more, sync = bundle["messages"], bundle["load_more"], bundle["sync"]
             if not shown:
                 shown.append([message["id"] for message in messages])
                 step(messages, load_more, sync)
@@ -5451,7 +5489,7 @@ class QueryOptionTest(unittest.TestCase):
 
     def test_query_filters_every_view_and_the_emails_acted_on(self):
         places = {"bank1": "inbox", "o1": "inbox", "bank2": "archive", "o2": "archive", "o3": "inbox"}
-        steps = [("download", None)] + [("next_view", [])] * (len(savegmail.VIEWS) - 1)
+        steps = [("download", None)] + [("tab", [])] * (len(savegmail.VIEWS) - 1)
         gmail, left, offered = self.run_session(places, steps, args=["--query", "from:bank"], gmail_class=QueryGmail)
         self.assertEqual(gmail.places, {"bank1": "trash", "o1": "inbox", "bank2": "trash", "o2": "archive",
                                         "o3": "inbox"})
